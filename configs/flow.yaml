@@ -1,0 +1,3 @@
+acceleration_weight: 0.35
+volume_weight: 0.45
+close_location_weight: 0.20

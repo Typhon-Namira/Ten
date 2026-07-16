@@ -1,0 +1,5 @@
+provider: csv
+symbol: XAU/USD
+timeframes: [M1, M5, M15, H1, H4, D1]
+default_lookback: 500
+

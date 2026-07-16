@@ -1,0 +1,3 @@
+enabled: false
+clock_mode: deterministic
+checkpoint_interval: 1000

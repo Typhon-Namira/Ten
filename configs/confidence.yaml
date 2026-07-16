@@ -1,0 +1,8 @@
+weights:
+  smc: 0.25
+  liquidity: 0.20
+  institutional_flow: 0.20
+  volume_profile: 0.15
+  economic_risk: 0.15
+  ai_bonus: 0.05
+maximum_ai_bonus: 0.10

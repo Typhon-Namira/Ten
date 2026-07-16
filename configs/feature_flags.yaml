@@ -1,0 +1,10 @@
+flags:
+  EnableSMC: true
+  EnableLiquidity: true
+  EnableFlow: true
+  EnableVolumeProfile: true
+  EnableEconomicFilter: true
+  EnableAI: true
+  EnableReplay: false
+  EnableMarketRegime: false
+  EnableDashboardModules: true

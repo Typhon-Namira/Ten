@@ -1,0 +1,4 @@
+model: meta-llama/llama-3.3-70b-instruct
+prompt_version: signal_analysis_v1
+temperature: 0.1
+max_tokens: 900

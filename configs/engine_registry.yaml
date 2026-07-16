@@ -1,0 +1,31 @@
+engines:
+  market_data:
+    enabled: true
+    version: 1.0.0
+  smc:
+    enabled: true
+    version: 1.0.0
+  liquidity:
+    enabled: true
+    version: 1.0.0
+  institutional_flow:
+    enabled: true
+    version: 1.0.0
+  volume_profile:
+    enabled: true
+    version: 1.0.0
+  economic_calendar:
+    enabled: true
+    version: 1.0.0
+  ai_scoring:
+    enabled: true
+    version: 1.0.0
+  signal:
+    enabled: true
+    version: 1.0.0
+  market_regime:
+    enabled: false
+    version: 1.0.0
+  replay:
+    enabled: false
+    version: 1.0.0
