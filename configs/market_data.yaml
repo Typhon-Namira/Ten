@@ -1,5 +1,35 @@
-provider: csv
-symbol: XAU/USD
-timeframes: [M1, M5, M15, H1, H4, D1]
+symbols: [XAUUSD]
+timeframes: [M1, M5, M15, M30, H1, H4, D1]
 default_lookback: 500
-
+preferred_provider: twelve_data
+provider_failure_threshold: 3
+provider_recovery_successes: 3
+providers:
+  - name: twelve_data
+    base_url: https://api.twelvedata.com
+    api_key_env: TEN_TWELVE_DATA_API_KEY
+    priority: 10
+  - name: oanda
+    base_url: https://api-fxpractice.oanda.com
+    api_key_env: TEN_OANDA_API_KEY
+    account_id_env: TEN_OANDA_ACCOUNT_ID
+    priority: 20
+  - name: alpha_vantage
+    base_url: https://www.alphavantage.co/query
+    api_key_env: TEN_ALPHA_VANTAGE_API_KEY
+    priority: 30
+  - name: financial_modeling_prep
+    base_url: https://financialmodelingprep.com/api/v3
+    api_key_env: TEN_FMP_API_KEY
+    priority: 40
+cache:
+  memory_max_entries: 10000
+  realtime_ttl_seconds: 15
+  historical_ttl_seconds: 3600
+  persistent_directory: data/market_cache
+validation:
+  future_tolerance_seconds: 5
+  clock_drift_tolerance_seconds: 30
+  gap_tolerance_multiplier: 1.5
+  volatility_spike_multiplier: 8
+  minimum_quality_score: 60

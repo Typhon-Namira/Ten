@@ -94,3 +94,6 @@ The factory keys definitions by `(name, version)`. Registry configuration select
 - no LLM-generated confidence;
 - no market-regime detection, replay execution, or AI-memory adapter yet;
 - no notification or Telegram implementation.
+# Market-data single source of truth
+
+All current and future engines must obtain normalized market observations from the Market Data Engine. Provider adapters, validation, quality, failover, cache, persistence, replay, sessions, and raw metrics are documented in [MARKET_DATA_ENGINE.md](MARKET_DATA_ENGINE.md).

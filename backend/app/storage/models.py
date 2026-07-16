@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +48,107 @@ class MarketDataRecord(Base):
     volume: Mapped[float] = mapped_column(Float, default=0.0)
 
 
+class HistoricalCandleRecord(Base):
+    __tablename__ = "historical_candles"
+    __table_args__ = (Index("ux_historical_candle_series", "symbol", "timeframe", "timestamp", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+    spread: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    quality_score: Mapped[float] = mapped_column(Float)
+    quality_level: Mapped[str] = mapped_column(String(32))
+    ingestion_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RealtimeCandleRecord(Base):
+    __tablename__ = "realtime_candles"
+    __table_args__ = (Index("ix_realtime_candle_series", "symbol", "timeframe", "timestamp"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16))
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ProviderMetricRecord(Base):
+    __tablename__ = "provider_metrics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    healthy: Mapped[bool] = mapped_column(Boolean)
+    confidence: Mapped[float] = mapped_column(Float)
+    uptime_ratio: Mapped[float] = mapped_column(Float)
+    quota_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class LatencyHistoryRecord(Base):
+    __tablename__ = "market_latency_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    latency_ms: Mapped[float] = mapped_column(Float)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class QualityHistoryRecord(Base):
+    __tablename__ = "market_quality_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16))
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    score: Mapped[float] = mapped_column(Float)
+    level: Mapped[str] = mapped_column(String(32))
+    anomalies: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+
+
+class GapHistoryRecord(Base):
+    __tablename__ = "market_gap_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16))
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    missing_count: Mapped[int] = mapped_column(Integer)
+    classification: Mapped[str] = mapped_column(String(32))
+    repaired: Mapped[bool] = mapped_column(Boolean, default=False)
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class SynchronizationHistoryRecord(Base):
+    __tablename__ = "market_synchronization_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rows_written: Mapped[int] = mapped_column(Integer, default=0)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+
+class CacheMetadataRecord(Base):
+    __tablename__ = "market_cache_metadata"
+
+    key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    layer: Mapped[str] = mapped_column(String(32))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    candle_count: Mapped[int] = mapped_column(Integer)
+    last_accessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AnalysisResultRecord(Base):
     """Versioned engine output for reproducibility and audit."""
 
@@ -73,4 +174,3 @@ class EngineLogRecord(Base):
     message: Mapped[str] = mapped_column(Text)
     context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-

@@ -12,6 +12,8 @@ from backend.app.core.config import get_settings
 from backend.app.core.exceptions import TenError
 from backend.app.core.logging import configure_logging
 from backend.app.core.config import YamlConfigRepository
+from backend.app.engines.market_data_engine import build_market_data_service
+from backend.app.engines.market_data_engine.config import MarketDataConfig
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
 
 
@@ -27,7 +29,12 @@ def create_app() -> FastAPI:
         app.state.signal_repository = InMemorySignalRepository()
         app.state.engine_registry = build_engine_registry(configs=configs)
         app.state.pipeline_manager = PipelineManager.from_yaml(app.state.engine_registry, configs)
-        yield
+        market_config = configs.load_model("market_data", MarketDataConfig)
+        app.state.market_data_service = build_market_data_service(market_config)
+        try:
+            yield
+        finally:
+            await app.state.market_data_service.close()
 
     application = FastAPI(
         title="TEN Market Intelligence API",

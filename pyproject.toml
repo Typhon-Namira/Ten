@@ -17,6 +17,7 @@ dependencies = [
   "pydantic-settings>=2.5,<3",
   "PyYAML>=6.0,<7",
   "sqlalchemy[asyncio]>=2.0.35,<3",
+  "tzdata>=2025.2",
   "uvicorn[standard]>=0.30,<1",
 ]
 
@@ -36,6 +37,7 @@ packages = ["backend"]
 addopts = "-q --strict-markers --disable-warnings"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 target-version = "py312"

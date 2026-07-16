@@ -1,0 +1,134 @@
+"""Market-data persistence ports and deterministic in-process implementation."""
+
+import asyncio
+from abc import ABC, abstractmethod
+from datetime import datetime
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.app.storage.models import HistoricalCandleRecord, RealtimeCandleRecord
+
+from .models import Candle, Timeframe, canonical_symbol
+
+
+class MarketDataRepository(ABC):
+    @abstractmethod
+    async def upsert_historical(self, candles: list[Candle]) -> int:
+        """Persist normalized historical candles idempotently."""
+
+    @abstractmethod
+    async def append_realtime(self, candle: Candle) -> None:
+        """Persist one realtime observation."""
+
+    @abstractmethod
+    async def history(self, symbol: str, timeframe: Timeframe, start: datetime | None = None, end: datetime | None = None, limit: int = 500) -> list[Candle]:
+        """Query a chronological series."""
+
+    @abstractmethod
+    async def candle_at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> Candle | None:
+        """Return the exact candle visible at a historical timestamp."""
+
+
+class InMemoryMarketDataRepository(MarketDataRepository):
+    def __init__(self) -> None:
+        self._historical: dict[tuple[str, Timeframe, datetime], Candle] = {}
+        self._realtime: list[Candle] = []
+        self._lock = asyncio.Lock()
+
+    async def upsert_historical(self, candles: list[Candle]) -> int:
+        async with self._lock:
+            for candle in candles:
+                self._historical[(canonical_symbol(candle.symbol), candle.timeframe, candle.timestamp)] = candle
+        return len(candles)
+
+    async def append_realtime(self, candle: Candle) -> None:
+        async with self._lock:
+            self._realtime.append(candle)
+            self._historical[(canonical_symbol(candle.symbol), candle.timeframe, candle.timestamp)] = candle
+
+    async def history(self, symbol: str, timeframe: Timeframe, start: datetime | None = None, end: datetime | None = None, limit: int = 500) -> list[Candle]:
+        normalized = canonical_symbol(symbol)
+        async with self._lock:
+            selected = [
+                candle
+                for (item_symbol, item_timeframe, _), candle in self._historical.items()
+                if item_symbol == normalized
+                and item_timeframe == timeframe
+                and (start is None or candle.timestamp >= start)
+                and (end is None or candle.timestamp <= end)
+            ]
+        return sorted(selected, key=lambda item: item.timestamp)[-limit:]
+
+    async def candle_at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> Candle | None:
+        candles = await self.history(symbol, timeframe, end=timestamp, limit=1)
+        return candles[-1] if candles else None
+
+
+class SqlAlchemyMarketDataRepository(MarketDataRepository):
+    """PostgreSQL adapter using bulk conflict-safe writes and indexed range reads."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def upsert_historical(self, candles: list[Candle]) -> int:
+        if not candles:
+            return 0
+        values = [self._values(item) for item in candles]
+        statement = insert(HistoricalCandleRecord).values(values)
+        statement = statement.on_conflict_do_update(
+            index_elements=["symbol", "timeframe", "timestamp"],
+            set_={name: getattr(statement.excluded, name) for name in ("open", "high", "low", "close", "volume", "spread", "provider", "quality_score", "quality_level", "ingestion_timestamp")},
+        )
+        await self.session.execute(statement)
+        await self.session.commit()
+        return len(candles)
+
+    async def append_realtime(self, candle: Candle) -> None:
+        self.session.add(
+            RealtimeCandleRecord(
+                symbol=candle.symbol,
+                timeframe=candle.timeframe.value,
+                timestamp=candle.timestamp,
+                payload=candle.model_dump(mode="json"),
+                received_at=candle.ingestion_timestamp,
+            )
+        )
+        await self.upsert_historical([candle])
+
+    async def history(self, symbol: str, timeframe: Timeframe, start: datetime | None = None, end: datetime | None = None, limit: int = 500) -> list[Candle]:
+        statement = select(HistoricalCandleRecord).where(
+            HistoricalCandleRecord.symbol == canonical_symbol(symbol),
+            HistoricalCandleRecord.timeframe == timeframe.value,
+        )
+        if start is not None:
+            statement = statement.where(HistoricalCandleRecord.timestamp >= start)
+        if end is not None:
+            statement = statement.where(HistoricalCandleRecord.timestamp <= end)
+        statement = statement.order_by(HistoricalCandleRecord.timestamp.desc()).limit(limit)
+        records = list((await self.session.scalars(statement)).all())
+        return [self._candle(item) for item in reversed(records)]
+
+    async def candle_at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> Candle | None:
+        candles = await self.history(symbol, timeframe, end=timestamp, limit=1)
+        return candles[-1] if candles else None
+
+    @staticmethod
+    def _values(candle: Candle) -> dict[str, object]:
+        return {
+            "symbol": candle.symbol, "timeframe": candle.timeframe.value, "timestamp": candle.timestamp,
+            "open": candle.open, "high": candle.high, "low": candle.low, "close": candle.close,
+            "volume": candle.volume, "spread": candle.spread, "provider": candle.provider,
+            "quality_score": candle.quality_score, "quality_level": candle.quality_level.value,
+            "ingestion_timestamp": candle.ingestion_timestamp,
+        }
+
+    @staticmethod
+    def _candle(record: HistoricalCandleRecord) -> Candle:
+        return Candle(
+            symbol=record.symbol, timeframe=Timeframe(record.timeframe), timestamp=record.timestamp,
+            open=record.open, high=record.high, low=record.low, close=record.close, volume=record.volume,
+            spread=record.spread, provider=record.provider, quality_score=record.quality_score,
+            quality_level=record.quality_level, ingestion_timestamp=record.ingestion_timestamp,
+        )

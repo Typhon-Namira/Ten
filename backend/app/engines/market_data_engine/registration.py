@@ -18,7 +18,20 @@ def _build(_: EngineBuildContext, __: Mapping[str, Any]) -> MarketDataBoundary:
 
 async def _execute(_: MarketDataBoundary, context: PipelineExecutionContext) -> EngineExecutionResult:
     latest = context.candles[-1] if context.candles else None
-    features = {"count": len(context.candles), "symbol": latest.symbol if latest else None, "timeframe": latest.timeframe.value if latest else None}
+    features = {
+        "count": len(context.candles),
+        "symbol": latest.symbol if latest else None,
+        "timeframe": latest.timeframe.value if latest else None,
+        "open": latest.open if latest else None,
+        "high": latest.high if latest else None,
+        "low": latest.low if latest else None,
+        "close": latest.close if latest else None,
+        "volume": latest.volume if latest else None,
+        "spread": latest.spread if latest else None,
+        "provider": latest.provider if latest else None,
+        "quality": latest.quality_score if latest else None,
+        "timestamp": latest.timestamp.isoformat() if latest else None,
+    }
     return EngineExecutionResult(output=context.candles, features=features, namespace="market_data", event_type=MarketDataReady)
 
 

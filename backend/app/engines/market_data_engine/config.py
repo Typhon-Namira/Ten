@@ -1,8 +1,43 @@
-from pydantic import BaseModel
+"""Market Data Engine configuration."""
+
+from pydantic import BaseModel, Field
+
+from .models import Timeframe
+
+
+class ProviderConfig(BaseModel):
+    name: str
+    enabled: bool = True
+    priority: int = Field(default=100, ge=0)
+    base_url: str
+    api_key_env: str
+    account_id_env: str | None = None
+    request_timeout_seconds: float = Field(default=15, gt=0)
+    quota_per_minute: int | None = Field(default=None, ge=1)
+
+
+class CacheConfig(BaseModel):
+    memory_max_entries: int = Field(default=10_000, ge=1)
+    realtime_ttl_seconds: int = Field(default=15, ge=1)
+    historical_ttl_seconds: int = Field(default=3600, ge=1)
+    persistent_directory: str = "data/market_cache"
+
+
+class ValidationConfig(BaseModel):
+    future_tolerance_seconds: int = Field(default=5, ge=0)
+    clock_drift_tolerance_seconds: int = Field(default=30, ge=0)
+    gap_tolerance_multiplier: float = Field(default=1.5, ge=1)
+    volatility_spike_multiplier: float = Field(default=8, gt=1)
+    minimum_quality_score: float = Field(default=60, ge=0, le=100)
 
 
 class MarketDataConfig(BaseModel):
-    symbol: str = "XAU/USD"
-    default_lookback: int = 500
-    request_timeout_seconds: float = 15.0
-
+    symbols: tuple[str, ...] = ("XAUUSD",)
+    timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
+    default_lookback: int = Field(default=500, ge=1, le=100_000)
+    providers: tuple[ProviderConfig, ...] = ()
+    cache: CacheConfig = CacheConfig()
+    validation: ValidationConfig = ValidationConfig()
+    preferred_provider: str = "twelve_data"
+    provider_recovery_successes: int = Field(default=3, ge=1)
+    provider_failure_threshold: int = Field(default=3, ge=1)

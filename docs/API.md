@@ -11,3 +11,20 @@ The API is read-only in the initial foundation.
 | GET | `/market/status` | Indicative UTC weekday/session status |
 
 Interactive OpenAPI documentation is available at `/docs` when the backend is running.
+# Market Data API
+
+All market-data routes are provider-neutral.
+
+- `GET /market/latest`
+- `GET /market/history`
+- `GET /market/replay?at=...`
+- `GET /market/candle/{timestamp}`
+- `GET /market/session/{timestamp}`
+- `GET /market/providers`
+- `GET /market/provider/status`
+- `GET /market/provider/statistics`
+- `GET /market/state`
+- `GET /market/metrics`
+- `GET /market/health`
+
+Series routes accept `symbol`, `timeframe`, and bounded `limit` parameters. Historical requests also accept `start`, `end`, and `refresh`. Timestamps must be ISO-8601 values with an explicit UTC offset. A refresh requiring an unavailable live provider returns HTTP 503; an absent persisted candle or metric returns HTTP 404.
