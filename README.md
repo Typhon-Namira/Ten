@@ -71,6 +71,30 @@ docker compose up --build
 
 The dashboard is served at `http://localhost:5173`, the API at `http://localhost:8000`, and PostgreSQL at `localhost:5432`.
 
+### Railway
+
+The repository includes [`railway.json`](railway.json) for a Railpack backend
+deployment. It starts the nested FastAPI application with Railway's assigned
+port and verifies `/health` before marking a deployment healthy.
+
+1. Create a Railway service from `Typhon-Namira/Ten`.
+2. Keep the service root directory at the repository root.
+3. Add `TEN_OPENROUTER_API_KEY` if AI scoring should be enabled.
+4. Add a Railway PostgreSQL service and set `TEN_DATABASE_URL` to its async
+   SQLAlchemy URL when durable persistence is enabled.
+5. Generate a public domain under the service's Networking settings.
+
+The backend start command is:
+
+```bash
+uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+```
+
+The React dashboard is a separate deployable frontend. Create another Railway
+service rooted at `/frontend`, set `VITE_API_URL` to the public backend URL,
+build with `npm run build`, and serve the generated `dist` directory as a
+static site.
+
 ## Development workflow
 
 ```bash
