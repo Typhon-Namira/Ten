@@ -2,6 +2,8 @@
 
 `configs/smc.yaml` contains typed and hashed pivot, structure, displacement, imbalance, Order Block, dealing-range, MTF, quality, lifecycle, batching, checkpoint, and bounded-recalculation settings for SMC Production 1.0. Exact definitions and defaults are documented in [SMC_ENGINE.md](SMC_ENGINE.md).
 
+`configs/liquidity.yaml` contains immutable validated groups for absolute/tick/ATR/percentage tolerances, equal-level clustering, pool limits, sweep and reclaim classification, DST-aware sessions, previous-period references, symbol-specific round levels, deterministic ranking, multi-timeframe bounds, processing limits, input quality and persistence policy. Its SHA-256-derived version is included in every snapshot, event, feature and persisted object. Exact semantics are documented in [LIQUIDITY_ENGINE.md](LIQUIDITY_ENGINE.md).
+
 TEN treats YAML as the runtime composition source.
 
 | File | Purpose |

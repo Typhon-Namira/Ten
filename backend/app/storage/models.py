@@ -205,6 +205,53 @@ class SMCCheckpointRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class LiquidityObjectRecord(Base):
+    __tablename__ = "liquidity_objects"
+    __table_args__ = (Index("ix_liquidity_objects_series_time", "symbol", "timeframe", "availability_timestamp"), Index("ix_liquidity_objects_type_state", "object_type", "lifecycle_state"))
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    logical_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    object_type: Mapped[str] = mapped_column(String(32), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    availability_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    lifecycle_state: Mapped[str] = mapped_column(String(32), index=True)
+    confidence_score: Mapped[float] = mapped_column(Float)
+    quality_score: Mapped[float] = mapped_column(Float)
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    engine_version: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class LiquiditySnapshotRecord(Base):
+    __tablename__ = "liquidity_snapshots"
+    __table_args__ = (Index("ux_liquidity_snapshot_boundary", "symbol", "timeframe", "analysis_timestamp", "configuration_version", "processing_mode", unique=True),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    analysis_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    processing_mode: Mapped[str] = mapped_column(String(32))
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    engine_version: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class LiquidityCheckpointRecord(Base):
+    __tablename__ = "liquidity_checkpoints"
+    __table_args__ = (Index("ux_liquidity_checkpoint_series", "symbol", "timeframe", "configuration_version", unique=True),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    engine_version: Mapped[str] = mapped_column(String(32))
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    last_processed_candle: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    state_hash: Mapped[str] = mapped_column(String(64))
+    state_payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AnalysisResultRecord(Base):
     """Versioned engine output for reproducibility and audit."""
 

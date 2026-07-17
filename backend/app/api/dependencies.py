@@ -4,6 +4,7 @@ from typing import cast
 from backend.app.services import EngineRegistry, SignalRepository
 from backend.app.engines.market_data_engine import MarketDataService
 from backend.app.engines.smc_engine import SMCService
+from backend.app.engines.liquidity_engine import LiquidityService
 
 
 def get_signal_repository(request: Request) -> SignalRepository:
@@ -20,3 +21,7 @@ def get_market_data_service(request: Request) -> MarketDataService:
 
 def get_smc_service(request: Request) -> SMCService:
     return cast(SMCService, request.app.state.smc_service)
+
+
+def get_liquidity_service(request: Request) -> LiquidityService:
+    return cast(LiquidityService, request.app.state.liquidity_service)

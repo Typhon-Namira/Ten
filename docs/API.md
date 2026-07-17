@@ -4,6 +4,8 @@ The API is read-only in the initial foundation.
 
 SMC Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/smc/state`, `/swings`, `/structure`, `/events`, `/displacements`, `/zones`, `/liquidity-references`, `/dealing-ranges`, `/multi-timeframe`, `/snapshot`, `/replay`, `/health`, `/metrics`, and `/config` endpoints. `TEN_API_PREFIX` is empty by default. See [SMC Engine](SMC_ENGINE.md) for filtering and deterministic semantics.
 
+Liquidity Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/liquidity/health`, `/metrics`, `/config`, `/state`, `/snapshot`, `/levels`, `/equal-levels`, `/pools`, `/events`, `/sweeps`, `/grabs`, `/raids`, `/stop-hunts`, `/false-breaks`, `/sessions`, `/reference-levels`, `/confluences`, `/targets`, `/map`, `/mtf`, and `/replay`. Collection queries support bounded offset/limit pagination; timestamp queries return only snapshots available at that boundary. No Liquidity mutation route exists. See [Liquidity Engine](LIQUIDITY_ENGINE.md).
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Process liveness |

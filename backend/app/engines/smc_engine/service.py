@@ -10,7 +10,7 @@ from backend.app.features import FeatureRecord, FeatureStore
 
 from .analyzer import BaselineSMCAnalyzer
 from .config import SMCConfig
-from .liquidity_contract import LiquidityFeatureReader
+from .liquidity_contract import LiquidityFeatureReader, SMCLiquidityContext, SMCLiquidityLevel
 from .events import BOSDetected, BreakerBlockDetected, CHOCHDetected, DealingRangeUpdated, DisplacementDetected, ImbalanceDetected, LiquidityVoidDetected, MSSDetected, MitigationBlockDetected, MultiTimeframeContextUpdated, OrderBlockDetected, SMCAnalysisUpdated, SMCInputDegraded, SMCObjectLifecycleChanged, SMCReplayCompleted, SwingConfirmed
 from .models import AnalysisStatus, Evidence, LiquidityReferenceType, MTFConflictState, MultiTimeframeContext, ProcessingMode, SMCAnalysisSnapshot, StructureDirection, StructureEventType, StructureLiquidityReference, ZoneType, stable_id
 from .repository import InMemorySMCRepository, SMCRepository
@@ -81,6 +81,14 @@ class SMCService:
     async def state(self, symbol: str, timeframe: Timeframe, timestamp: datetime | None = None) -> SMCAnalysisSnapshot | None:
         persisted = await self.repository.at(symbol, timeframe, timestamp) if timestamp else await self.repository.latest(symbol, timeframe)
         return persisted or (self._recovered.get((symbol.replace("/", "").replace("-", "").upper(), timeframe)) if timestamp is None else None)
+
+    async def liquidity_context(self, symbol: str, timeframe: Timeframe, at: datetime) -> SMCLiquidityContext:
+        snapshot = await self.state(symbol, timeframe, at)
+        if snapshot is None:
+            snapshot = await self.replay(symbol, timeframe, at)
+        levels = tuple(SMCLiquidityLevel(id=str(item.id), symbol=item.symbol, timeframe=item.timeframe, kind=item.swing_type.value, scope=item.scope.value, price=item.price, occurred_at=item.timestamp, available_at=item.confirmed_at or item.detected_at, confidence_score=item.confidence_score, quality_score=item.quality_score) for item in snapshot.swings if (item.confirmed_at or item.detected_at) <= at)
+        protected = tuple(str(item) for item in (snapshot.structure_state.protected_high_id, snapshot.structure_state.protected_low_id) if item)
+        return SMCLiquidityContext(symbol=snapshot.symbol, timeframe=snapshot.timeframe, analyzed_through=snapshot.analysis_timestamp, structure_direction=snapshot.structure_state.current_direction.value, levels=levels, protected_level_ids=protected, structural_event_ids=tuple(str(item.id) for item in snapshot.structure_events), configuration_version=snapshot.configuration_version, engine_version=snapshot.engine_version)
 
     async def bounded_recalculate(self, symbol: str, timeframe: Timeframe, corrected_at: datetime) -> SMCAnalysisSnapshot:
         start = corrected_at - timeframe.duration * self.config.processing.recalculation_window

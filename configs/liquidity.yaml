@@ -1,2 +1,63 @@
-equal_level_tolerance: 0.001
-max_levels: 20
+tolerances:
+  absolute: 0.0
+  ticks: 2
+  tick_size: 0.01
+  atr_multiplier: 0.08
+  percentage: 0.0005
+equal_levels:
+  enabled: true
+  allow_micro_candles: true
+  minimum_touches: 2
+  minimum_separation_candles: 1
+  maximum_age_candles: 1000
+  merge_multiplier: 1.25
+  split_multiplier: 2.5
+  outlier_zscore: 2.5
+pools:
+  maximum_active: 1000
+  approach_atr: 0.25
+  expiration_candles: 2000
+  structural_weight: 0.35
+  temporal_weight: 0.25
+sweeps:
+  minimum_penetration_atr: 0.02
+  deep_penetration_atr: 0.5
+  reclaim_candles: 3
+  raid_minimum_pools: 2
+  stop_hunt_minimum_confidence: 65
+  false_break_hold_candles: 1
+sessions:
+  enabled: true
+  opening_range_candles: 4
+  include_overlap: true
+references:
+  previous_day: true
+  previous_week: true
+  previous_month: true
+  current_periods: true
+round_numbers:
+  enabled: true
+  increments: {XAUUSD: 10.0, DEFAULT: 1.0}
+  minor_divisor: 2
+  maximum_distance_atr: 10
+  confidence_cap: 55
+ranking:
+  distance_weight: 0.25
+  strength_weight: 0.30
+  freshness_weight: 0.20
+  scope_weight: 0.15
+  quality_weight: 0.10
+multi_timeframe:
+  hierarchy: [M1, M5, M15, M30, H1, H4, D1, W1, MN1]
+  maximum_depth: 5
+  overlap_tolerance_atr: 0.1
+processing:
+  minimum_history: 5
+  maximum_candles: 10000
+  candidate_lookback: 2000
+  checkpoint_interval: 100
+  minimum_input_quality: 60
+persistence:
+  required_in_production: true
+  query_limit: 500
+algorithm_version: 1.0.0
