@@ -28,7 +28,7 @@ Replay asks `MarketDataService.replay` for the visible candle prefix and derives
 
 The existing Event Bus receives typed swing, BOS, CHoCH, MSS, degraded-input, analysis-updated, and replay-completed events. Stable snapshot IDs make repeat publication idempotent within the service lifecycle. The existing Feature Store receives direction, internal/external direction, active/protected levels, last structural event IDs, confidence, quality, analytical timestamp, and version traceability. No entry, exit, stop, target, size, order, recommendation, or profitability field is published.
 
-Read-only endpoints are `/api/v1/smc/state`, `/swings`, `/structure`, `/events`, `/snapshot`, `/replay`, `/health`, `/metrics`, and `/config`. Filters and query sizes are validated by FastAPI and capped at 5,000 objects/candles.
+Read-only endpoints are `${TEN_API_PREFIX}/smc/state`, `/swings`, `/structure`, `/events`, `/snapshot`, `/replay`, `/health`, `/metrics`, and `/config`; with the default empty prefix they begin at `/smc`. Filters and query sizes are validated by FastAPI and capped at 5,000 objects/candles.
 
 ## Configuration and complexity
 
