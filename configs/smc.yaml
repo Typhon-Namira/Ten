@@ -1,3 +1,24 @@
-swing_window: 3
-minimum_displacement_ratio: 0.5
-equal_level_tolerance: 0.0005
+swing:
+  left_window: 2
+  right_window: 2
+  minimum_separation: 2
+  minimum_excursion: 0.0
+  atr_excursion_multiplier: 0.25
+  internal_sensitivity: 0.5
+  external_min_strength: 65
+  equal_level_tolerance: 0.0005
+structure:
+  confirmation_method: close
+  minimum_break_distance: 0.0
+  atr_break_multiplier: 0.05
+  displacement_body_ratio: 0.6
+  mss_displacement_score: 65
+  require_protected_level_for_mss: true
+processing:
+  minimum_history: 5
+  recalculation_window: 500
+  batch_size: 5000
+  checkpoint_interval: 100
+  maximum_active_objects: 5000
+  minimum_input_quality: 60
+algorithm_version: 2.0.0

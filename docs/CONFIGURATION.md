@@ -1,5 +1,7 @@
 # Configuration
 
+`configs/smc.yaml` contains the typed, hashed SMC Milestone 2A pivot, structure-confirmation, quality, batching, checkpoint, and bounded-recalculation settings. Exact definitions and defaults are documented in [SMC_ENGINE.md](SMC_ENGINE.md).
+
 TEN treats YAML as the runtime composition source.
 
 | File | Purpose |

@@ -14,6 +14,7 @@ from backend.app.core.logging import configure_logging
 from backend.app.core.config import YamlConfigRepository
 from backend.app.engines.market_data_engine import build_market_data_service
 from backend.app.engines.market_data_engine.config import MarketDataConfig
+from backend.app.engines.smc_engine import SMCConfig, SMCService
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
 
 
@@ -31,6 +32,13 @@ def create_app() -> FastAPI:
         app.state.pipeline_manager = PipelineManager.from_yaml(app.state.engine_registry, configs)
         market_config = configs.load_model("market_data", MarketDataConfig)
         app.state.market_data_service = build_market_data_service(market_config)
+        smc_config = configs.load_model("smc", SMCConfig)
+        app.state.smc_service = SMCService(
+            app.state.market_data_service,
+            app.state.pipeline_manager.event_bus,
+            app.state.pipeline_manager.feature_store,
+            smc_config,
+        )
         try:
             yield
         finally:

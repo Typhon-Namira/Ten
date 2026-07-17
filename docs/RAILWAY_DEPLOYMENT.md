@@ -1,5 +1,7 @@
 # Railway deployment
 
+The root `railway.toml` explicitly selects Railpack, starts `uvicorn backend.app.main:app` on Railway's `$PORT`, and checks `/health`. This prevents Railpack's “No start command detected” failure for TEN's package-based FastAPI layout.
+
 TEN is a monorepo. Deploy the backend and frontend as separate Railway
 services so each service has one build and runtime responsibility.
 

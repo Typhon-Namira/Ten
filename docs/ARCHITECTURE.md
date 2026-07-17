@@ -2,6 +2,8 @@
 
 TEN is an event-observable, configuration-driven modular monolith. Provider adapters normalize external data, dynamically discovered engines produce versioned features, optional AI assesses only a feature snapshot, deterministic policy calculates confidence, and the signal engine creates a non-executable scenario.
 
+The [SMC Engine](SMC_ENGINE.md) consumes normalized candles exclusively through `MarketDataService` and publishes versioned structural facts through the existing Feature Store and Event Bus.
+
 ## System dependency flow
 
 ```mermaid

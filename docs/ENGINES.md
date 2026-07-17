@@ -3,7 +3,7 @@
 | Engine | Input | Output | Baseline responsibility | Upgrade boundary |
 |---|---|---|---|---|
 | Market data | Provider response or CSV | `Candle`, `Tick` | Normalize M1, M5, M15, H1, H4, D1 data | Implement `MarketDataProvider` or `RealtimeMarketDataProvider` |
-| SMC / ICT | Ordered candles | `SMCResult` | Directional structure, close-based BOS, three-candle FVG, premium/discount position | Implement `SMCAnalyzer` |
+| SMC / ICT | Normalized candles from `MarketDataService` | `SMCAnalysisSnapshot` / compatible `SMCResult` | Confirmed swings, independent internal/external structure, BOS, CHoCH, and MSS | Extend `SMCAnalyzer`; see [SMC Engine](SMC_ENGINE.md) |
 | Liquidity | Ordered candles | `LiquidityResult` | Equal-level pools, sweep state, nearest buy/sell liquidity, UTC session | Implement `LiquidityAnalyzer` |
 | Institutional flow | Ordered OHLCV | `FlowScore` | Estimate pressure, acceleration, delta proxy, and absorption probability | Implement `InstitutionalFlowEngine`; label licensed exchange data explicitly |
 | Volume profile | Ordered OHLCV | `VolumeProfileResult` | POC, VAH, VAL, HVN/LVN nodes from configurable price bins | Implement `VolumeProfileAnalyzer` |

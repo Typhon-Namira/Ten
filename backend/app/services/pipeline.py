@@ -1,6 +1,6 @@
 """Configuration-driven, event-publishing analysis pipeline manager."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -103,7 +103,7 @@ class PipelineManager:
             candles=sorted(candles, key=lambda item: item.timestamp),
             events=events,
             feature_store=self.feature_store,
-            **({"now": now} if now is not None else {}),
+            now=now or datetime.now(UTC),
         )
         executed: list[str] = []
         factor_values: dict[str, float] = {}

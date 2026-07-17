@@ -3,6 +3,7 @@ from typing import cast
 
 from backend.app.services import EngineRegistry, SignalRepository
 from backend.app.engines.market_data_engine import MarketDataService
+from backend.app.engines.smc_engine import SMCService
 
 
 def get_signal_repository(request: Request) -> SignalRepository:
@@ -15,3 +16,7 @@ def get_engine_registry(request: Request) -> EngineRegistry:
 
 def get_market_data_service(request: Request) -> MarketDataService:
     return cast(MarketDataService, request.app.state.market_data_service)
+
+
+def get_smc_service(request: Request) -> SMCService:
+    return cast(SMCService, request.app.state.smc_service)
