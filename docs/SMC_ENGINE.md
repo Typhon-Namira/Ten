@@ -1,4 +1,4 @@
-# Smart Money Concepts Engine — Milestone 2A
+# Smart Money Concepts Engine — Production Version 1.0
 
 TEN's SMC Engine converts normalized candles into deterministic structural facts. It is an analytical layer, not a signal generator, and does not claim to infer actual institutional intent. SMC terminology varies across methodologies; the definitions below are the exact TEN rules.
 
@@ -20,24 +20,61 @@ Close, wick, and hybrid confirmation are configurable, together with absolute an
 
 ## State, persistence, and replay
 
-`SwingPoint`, `StructureLeg`, `StructureEvent`, `MarketStructureState`, and `SMCAnalysisSnapshot` are immutable Pydantic contracts. The in-memory repository supports idempotent chronological snapshots and time travel. The SQLAlchemy PostgreSQL adapter uses conflict-safe immutable writes to indexed `smc_objects` and `smc_analysis_snapshots` tables; `smc_checkpoints` stores bounded-recovery pointers. Schema creation follows TEN's existing SQLAlchemy metadata convention because this repository does not contain an Alembic migration framework.
+`SwingPoint`, `StructureLeg`, `StructureEvent`, `Displacement`, `SMCZone`, `DealingRange`, `StructureLiquidityReference`, `MultiTimeframeContext`, `MarketStructureState`, and `SMCAnalysisSnapshot` are immutable Pydantic contracts. The SQLAlchemy PostgreSQL adapter is selected automatically when the configured database is reachable and falls back explicitly to bounded in-memory storage when unavailable. Conflict-safe object-version and snapshot writes preserve lifecycle history; `smc_checkpoints` restores the newest state per series at startup. The idempotent production migration is `migrations/20260717_smc_v1.sql`.
 
 Replay asks `MarketDataService.replay` for the visible candle prefix and derives a replay-mode snapshot. A swing cannot appear before `confirmed_at`; structural events cannot reference future confirmation candles. Historical corrections use the configured bounded recalculation window.
 
 ## Events, features, and API
 
-The existing Event Bus receives typed swing, BOS, CHoCH, MSS, degraded-input, analysis-updated, and replay-completed events. Stable snapshot IDs make repeat publication idempotent within the service lifecycle. The existing Feature Store receives direction, internal/external direction, active/protected levels, last structural event IDs, confidence, quality, analytical timestamp, and version traceability. No entry, exit, stop, target, size, order, recommendation, or profitability field is published.
+The existing Event Bus receives typed structure, displacement, imbalance, void, Order Block, Breaker, Mitigation Block, dealing-range, lifecycle, MTF, degraded-input, analysis-updated, and replay events. Stable snapshot IDs make repeat publication idempotent. The Feature Store receives every bounded object payload, lifecycle, confidence, quality, analytical timestamp, processing mode, and version. No entry, exit, stop, target, size, order, recommendation, or profitability field is published.
 
-Read-only endpoints are `${TEN_API_PREFIX}/smc/state`, `/swings`, `/structure`, `/events`, `/snapshot`, `/replay`, `/health`, `/metrics`, and `/config`; with the default empty prefix they begin at `/smc`. Filters and query sizes are validated by FastAPI and capped at 5,000 objects/candles.
+Read-only endpoints are `${TEN_API_PREFIX}/smc/state`, `/swings`, `/structure`, `/events`, `/displacements`, `/zones`, `/liquidity-references`, `/dealing-ranges`, `/multi-timeframe`, `/snapshot`, `/replay`, `/health`, `/metrics`, and `/config`; with the default empty prefix they begin at `/smc`. Object routes support filters, offsets, time travel, and limits capped at 5,000.
 
 ## Configuration and complexity
 
-`configs/smc.yaml` defines pivot windows, separation, excursion, sensitivity, external strength, equal-level tolerance, confirmation method, break distance, displacement/MSS thresholds, minimum history, quality threshold, batch/recalculation/checkpoint limits, and maximum active objects. The SHA-256-derived configuration version changes whenever serialized settings change.
+`configs/smc.yaml` defines pivot, structure, displacement, imbalance, Order Block, dealing-range, MTF, quality, batching, recalculation, checkpoint, expiration, mitigation, and active-object settings. The SHA-256-derived configuration version changes whenever serialized settings change.
 
-Context, pivot detection, and structure processing are linear in candle count apart from chronological output ordering (`O(n log n)` worst case); active lookups are bounded. Repository queries use `(symbol, timeframe, analysis_timestamp)` indexes.
+Context, displacement, imbalance, lifecycle, and structure scans are `O(n)` with configuration-bounded active sets and lookbacks; swing ordering is `O(s log s)`. Repository queries use `(symbol, timeframe, analysis_timestamp)` indexes.
 
-## Milestone boundary and limitations
+## Object detection and lifecycle
 
-Milestone 2A delivers swings, internal/external structure, BOS, CHoCH, MSS, explicit state, evidence/confidence, persistence, replay/time travel, events, features, APIs, metrics, and tests. It intentionally does not expose placeholder zone models or routes. Displacement is currently structural confirmation evidence, not a standalone published object.
+Displacement combines ATR-normalized impulse, body ratio, directional efficiency, optional rolling-volume confirmation, consecutive-candle impulse grouping, confidence, and bounded invalidation. Three-candle FVGs are available only on the third closed candle, filtered by absolute and ATR size, merged when overlapping, split after partial fills, decayed, mitigated, expired, or converted to inversion FVGs after distal-close invalidation. Strong impulses may create liquidity voids.
 
-Milestone 2B will add displacement objects, FVG/inversion FVG, liquidity voids, Order Blocks, Breakers, Mitigation Blocks, and their complete lifecycles. Milestone 2C will add equal levels, inducement, dealing ranges, premium/discount/equilibrium, nested/MTF structure, expanded confidence, restart checkpoint activation, and performance benchmarking.
+Order Blocks require a structural event, validated displacement, and the last qualifying opposing candle inside the bounded lookback. Body refinement and optional volume confirmation are configurable. Invalidated blocks convert to lineage-linked Breakers; partial returns produce Mitigation Blocks. Every zone transitions through active, touched/partial, mitigated, superseded, invalidated, broken, or expired states with immutable versions.
+
+Dealing ranges are anchored by alternating confirmed swings and expose range high/low, equilibrium, premium/discount boundary, OTE, golden zone, direction, scope, and nesting metadata. MTF analysis reads only Market Data Engine candles through the requested timestamp for M1, M5, M15, M30, H1, H4, and D1; W1 and MN1 directions are deterministic calendar aggregations of visible D1 candles.
+
+## Liquidity ownership boundary
+
+TEN's dedicated `liquidity_engine` owns equal-high/equal-low clustering, buy/sell-side pools, session/previous-period liquidity, sweep/raid/stop-hunt lifecycle, heatmaps, and target ranking. SMC publishes only confirmed-swing and inducement references needed by its own validation. Optional sweep evidence enters through the read-only `LiquidityFeatureReader` protocol; evidence whose availability time is after the snapshot boundary is rejected.
+
+## Lifecycle flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created
+    Created --> Confirmed
+    Confirmed --> Active
+    Active --> PartiallyMitigated: first penetration
+    PartiallyMitigated --> Mitigated: configured fill
+    Active --> Invalidated: distal close
+    Active --> Expired: age threshold
+    PartiallyMitigated --> Superseded: FVG split
+    Invalidated --> Active: inversion or breaker child
+    Mitigated --> Archived
+    Expired --> Archived
+```
+
+## Replay and restart flow
+
+```mermaid
+flowchart LR
+    MD[MarketDataService replay prefix] --> C[CandleContext]
+    C --> A[Deterministic SMC analyzers]
+    A --> S[Versioned snapshot]
+    S --> O[(smc_objects)]
+    S --> P[(smc_analysis_snapshots)]
+    S --> K[(smc_checkpoints)]
+    K --> R[Startup restoration]
+    R --> API[Time-travel APIs]
+```

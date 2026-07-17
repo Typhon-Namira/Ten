@@ -10,9 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
-from backend.app.storage.models import SMCAnalysisSnapshotRecord, SMCObjectRecord
+from backend.app.storage.models import SMCAnalysisSnapshotRecord, SMCCheckpointRecord, SMCObjectRecord
 
-from .models import SMCAnalysisSnapshot
+from .models import SMCAnalysisSnapshot, stable_id
 
 
 class SMCRepository(ABC):
@@ -27,6 +27,10 @@ class SMCRepository(ABC):
     @abstractmethod
     async def at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> SMCAnalysisSnapshot | None:
         """Return the last snapshot available at or before timestamp."""
+
+    @abstractmethod
+    async def checkpoints(self) -> tuple[SMCAnalysisSnapshot, ...]:
+        """Restore the latest durable state for every configured series."""
 
 
 class InMemorySMCRepository(SMCRepository):
@@ -56,6 +60,10 @@ class InMemorySMCRepository(SMCRepository):
             eligible = [item for item in items if item.analysis_timestamp <= timestamp]
             return eligible[-1] if eligible else None
 
+    async def checkpoints(self) -> tuple[SMCAnalysisSnapshot, ...]:
+        async with self._lock:
+            return tuple(items[-1] for items in self._snapshots.values() if items)
+
 
 class SqlAlchemySMCRepository(SMCRepository):
     """PostgreSQL adapter with idempotent writes and indexed time travel."""
@@ -69,6 +77,9 @@ class SqlAlchemySMCRepository(SMCRepository):
         objects = self._objects(snapshot)
         if objects:
             await self.session.execute(insert(SMCObjectRecord).values(objects).on_conflict_do_nothing(index_elements=["id"]))
+        checkpoint = {"symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "configuration_version": snapshot.configuration_version, "snapshot_id": snapshot.id, "last_processed_candle": snapshot.analysis_timestamp, "state_payload": snapshot.model_dump(mode="json"), "updated_at": snapshot.created_at}
+        statement = insert(SMCCheckpointRecord).values(checkpoint)
+        await self.session.execute(statement.on_conflict_do_update(index_elements=["symbol", "timeframe", "configuration_version"], set_={name: getattr(statement.excluded, name) for name in ("snapshot_id", "last_processed_candle", "state_payload", "updated_at")}))
         await self.session.commit()
 
     async def latest(self, symbol: str, timeframe: Timeframe) -> SMCAnalysisSnapshot | None:
@@ -76,6 +87,10 @@ class SqlAlchemySMCRepository(SMCRepository):
 
     async def at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> SMCAnalysisSnapshot | None:
         return await self._query(symbol, timeframe, timestamp)
+
+    async def checkpoints(self) -> tuple[SMCAnalysisSnapshot, ...]:
+        records = list((await self.session.scalars(select(SMCCheckpointRecord).order_by(SMCCheckpointRecord.updated_at))).all())
+        return tuple(SMCAnalysisSnapshot.model_validate(item.state_payload) for item in records)
 
     async def _query(self, symbol: str, timeframe: Timeframe, timestamp: datetime | None) -> SMCAnalysisSnapshot | None:
         statement = select(SMCAnalysisSnapshotRecord).where(SMCAnalysisSnapshotRecord.symbol == canonical_symbol(symbol), SMCAnalysisSnapshotRecord.timeframe == timeframe.value)
@@ -87,9 +102,12 @@ class SqlAlchemySMCRepository(SMCRepository):
     @staticmethod
     def _objects(snapshot: SMCAnalysisSnapshot) -> list[dict[str, object]]:
         values: list[dict[str, object]] = []
-        for object_type, items in (("swing", snapshot.swings), ("structure_leg", snapshot.structure_legs), ("structure_event", snapshot.structure_events)):
+        for object_type, items in (("swing", snapshot.swings), ("structure_leg", snapshot.structure_legs), ("structure_event", snapshot.structure_events), ("displacement", snapshot.displacements), ("zone", snapshot.zones), ("liquidity_reference", snapshot.liquidity_references), ("dealing_range", snapshot.dealing_ranges)):
             for item in items:
                 analytical_timestamp = getattr(item, "timestamp", snapshot.analysis_timestamp)
                 availability_timestamp = getattr(item, "confirmed_at", None) or analytical_timestamp
-                values.append({"id": item.id, "object_type": object_type, "symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "analytical_timestamp": analytical_timestamp, "availability_timestamp": availability_timestamp, "lifecycle_state": "confirmed", "confidence_score": item.confidence_score, "quality_score": getattr(item, "quality_score", 100.0), "algorithm_version": getattr(item, "algorithm_version", snapshot.engine_version), "configuration_version": snapshot.configuration_version, "payload": item.model_dump(mode="json"), "created_at": snapshot.created_at})
+                version = int(getattr(item, "version", 1))
+                lifecycle = str(getattr(getattr(item, "lifecycle_state", None), "value", "confirmed"))
+                record_id = stable_id("object-version", snapshot.symbol, snapshot.timeframe, item.id, version, lifecycle)
+                values.append({"id": record_id, "object_type": object_type, "symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "analytical_timestamp": analytical_timestamp, "availability_timestamp": availability_timestamp, "lifecycle_state": lifecycle, "confidence_score": item.confidence_score, "quality_score": getattr(item, "quality_score", 100.0), "algorithm_version": getattr(item, "algorithm_version", snapshot.engine_version), "configuration_version": snapshot.configuration_version, "payload": item.model_dump(mode="json"), "created_at": snapshot.created_at})
         return values

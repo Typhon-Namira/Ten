@@ -169,6 +169,9 @@ class _Scalars:
     def first(self) -> object | None:
         return self.value
 
+    def all(self) -> list[object]:
+        return [self.value] if self.value is not None else []
+
 
 class _Session:
     def __init__(self, payload: dict[str, object] | None = None) -> None:
@@ -177,7 +180,7 @@ class _Session:
         self.commit = AsyncMock()
 
     async def scalars(self, _statement: object) -> _Scalars:
-        return _Scalars(SimpleNamespace(payload=self.payload) if self.payload else None)
+        return _Scalars(SimpleNamespace(payload=self.payload, state_payload=self.payload) if self.payload else None)
 
 
 @pytest.mark.asyncio
@@ -186,8 +189,9 @@ async def test_sql_repository_conflict_safe_write_and_reads(candles: list[Candle
     session = _Session(snapshot.model_dump(mode="json"))
     repository = SqlAlchemySMCRepository(cast(Any, session))
     await repository.save(snapshot)
-    assert session.execute.await_count == 2 and session.commit.await_count == 1
+    assert session.execute.await_count == 3 and session.commit.await_count == 1
     assert await repository.latest("XAU/USD", Timeframe.M15) == snapshot
     assert await repository.at("XAU/USD", Timeframe.M15, snapshot.analysis_timestamp) == snapshot
+    assert await repository.checkpoints() == (snapshot,)
     empty = SqlAlchemySMCRepository(cast(Any, _Session()))
     assert await empty.latest("XAU/USD", Timeframe.M15) is None

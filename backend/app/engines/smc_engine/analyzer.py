@@ -1,4 +1,4 @@
-"""Deterministic SMC Milestone 2A analysis orchestration."""
+"""Deterministic SMC Production 1.0 analysis orchestration."""
 
 from abc import ABC
 from datetime import UTC, datetime
@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from backend.app.engines.common import AnalysisEngine
 from backend.app.engines.market_data_engine import Candle, Timeframe
 
+from .advanced import AdvancedSMCAnalyzer
 from .config import SMCConfig
 from .context import CandleContext
 from .models import (
@@ -32,17 +33,23 @@ class SMCAnalyzer(AnalysisEngine[list[Candle], SMCResult], ABC):
 
 class BaselineSMCAnalyzer(SMCAnalyzer):
     name = "smc"
-    version = "2.0.0"
+    version = "3.0.0"
 
     def __init__(self, config: SMCConfig | None = None) -> None:
         self.config = config or SMCConfig()
         self.swings = SwingDetector(self.config)
         self.structure = StructureAnalyzer(self.config)
+        self.advanced = AdvancedSMCAnalyzer(self.config)
 
     def analyze(self, data: list[Candle]) -> SMCResult:
         snapshot = self.analyze_snapshot(data, ProcessingMode.HISTORICAL)
         observations = ["Insufficient confirmed history for structural analysis."] if snapshot.status == AnalysisStatus.INSUFFICIENT_HISTORY else []
-        return SMCResult(bias=snapshot.structure_state.current_direction, structure_events=list(snapshot.structure_events), snapshot=snapshot, observations=observations)
+        gaps = [item for item in snapshot.zones if "fvg" in item.zone_type.value]
+        position = "equilibrium"
+        if snapshot.dealing_ranges and data:
+            active_range = snapshot.dealing_ranges[-1]
+            position = "premium" if data[-1].close > active_range.equilibrium else "discount" if data[-1].close < active_range.equilibrium else "equilibrium"
+        return SMCResult(bias=snapshot.structure_state.current_direction, structure_events=list(snapshot.structure_events), fair_value_gaps=list(gaps), premium_discount_position=position, snapshot=snapshot, observations=observations)
 
     def analyze_snapshot(self, data: list[Candle], mode: ProcessingMode = ProcessingMode.HISTORICAL) -> SMCAnalysisSnapshot:
         if not data:
@@ -59,9 +66,13 @@ class BaselineSMCAnalyzer(SMCAnalyzer):
             if bootstrap is not None:
                 events = (bootstrap,)
                 state = state.model_copy(update={"current_direction": bootstrap.direction, "external_direction": bootstrap.direction, "last_bos_id": bootstrap.id, "state_version": 1})
+        displacements, zones, liquidity_references, dealing_ranges = self.advanced.analyze(context, swings, events)
+        if dealing_ranges:
+            state = state.model_copy(update={"active_dealing_range_id": dealing_ranges[-1].id})
         status = AnalysisStatus.DEGRADED_INPUT if context.degraded else AnalysisStatus.COMPLETE
         timestamp = context.candles[-1].timestamp
-        confidence = sum(item.confidence_score for item in events) / len(events) if events else context.average_quality * 0.5
+        scored = [item.confidence_score for item in events] + [item.confidence_score for item in displacements] + [item.confidence_score for item in zones] + [item.confidence_score for item in dealing_ranges]
+        confidence = sum(scored) / len(scored) if scored else context.average_quality * 0.5
         return SMCAnalysisSnapshot(
             id=stable_id("snapshot", context.symbol, context.timeframe, timestamp.isoformat(), context.boundary, self.config.version, mode.value),
             symbol=context.symbol,
@@ -74,12 +85,21 @@ class BaselineSMCAnalyzer(SMCAnalyzer):
             swings=swings,
             structure_legs=legs,
             structure_events=events,
-            confidence_summary={"overall": max(0.0, min(100.0, confidence)), "structure": max(0.0, min(100.0, confidence))},
+            displacements=displacements,
+            zones=zones,
+            liquidity_references=liquidity_references,
+            dealing_ranges=dealing_ranges,
+            confidence_summary={"overall": max(0.0, min(100.0, confidence)), "structure": self._average(events), "displacement": self._average(displacements), "zones": self._average(zones), "ranges": self._average(dealing_ranges)},
             quality_summary={"minimum": context.minimum_quality, "average": context.average_quality},
             reasoning_metadata={"methodology": "confirmed volatility-aware pivots and explicit structural-level state transitions", "no_lookahead": True},
             configuration_version=self.config.version,
             created_at=timestamp,
         )
+
+    @staticmethod
+    def _average(items: tuple[object, ...]) -> float:
+        scores = [float(getattr(item, "confidence_score", 0.0)) for item in items]
+        return sum(scores) / len(scores) if scores else 0.0
 
     def _bootstrap_break(self, context: CandleContext) -> StructureEvent | None:
         """Seed structure from a confirmed break of the pre-analysis range."""

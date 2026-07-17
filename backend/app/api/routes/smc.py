@@ -8,6 +8,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from backend.app.api.dependencies import get_smc_service
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.smc_engine import (
+    DealingRange,
+    Displacement,
+    DisplacementStrength,
+    LifecycleState,
+    MultiTimeframeContext,
     ProcessingMode,
     SMCAnalysisSnapshot,
     SMCService,
@@ -16,6 +21,9 @@ from backend.app.engines.smc_engine import (
     StructureEventType,
     StructureScope,
     SwingPoint,
+    SMCZone,
+    StructureLiquidityReference,
+    ZoneType,
 )
 from backend.app.engines.smc_engine.exceptions import SMCError
 
@@ -81,3 +89,36 @@ async def smc_metrics(service: Service) -> dict[str, int | float]:
 @router.get("/config")
 async def smc_config(service: Service) -> dict[str, object]:
     return {"configuration": service.config.model_dump(mode="json"), "configuration_version": service.config.version, "engine_version": service.analyzer.version, "processing_modes": [item.value for item in ProcessingMode]}
+
+
+@router.get("/displacements", response_model=list[Displacement])
+async def smc_displacements(service: Service, symbol: str = "XAUUSD", timeframe: Timeframe = Timeframe.M15, timestamp: datetime | None = None, direction: StructureDirection | None = None, strength: DisplacementStrength | None = None, minimum_confidence: Annotated[float, Query(ge=0, le=100)] = 0, offset: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=5000)] = 500) -> list[Displacement]:
+    items = (await _snapshot(service, symbol, timeframe, timestamp, min(5000, offset + limit))).displacements
+    filtered = [item for item in items if (direction is None or item.direction == direction) and (strength is None or item.strength == strength) and item.confidence_score >= minimum_confidence]
+    return filtered[offset : offset + limit]
+
+
+@router.get("/zones", response_model=list[SMCZone])
+async def smc_zones(service: Service, symbol: str = "XAUUSD", timeframe: Timeframe = Timeframe.M15, timestamp: datetime | None = None, zone_type: ZoneType | None = None, lifecycle_state: LifecycleState | None = None, direction: StructureDirection | None = None, active_only: bool = False, minimum_confidence: Annotated[float, Query(ge=0, le=100)] = 0, offset: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=5000)] = 500) -> list[SMCZone]:
+    terminal = {LifecycleState.MITIGATED, LifecycleState.INVALIDATED, LifecycleState.EXPIRED, LifecycleState.ARCHIVED}
+    items = (await _snapshot(service, symbol, timeframe, timestamp, min(5000, offset + limit))).zones
+    filtered = [item for item in items if (zone_type is None or item.zone_type == zone_type) and (lifecycle_state is None or item.lifecycle_state == lifecycle_state) and (direction is None or item.direction == direction) and (not active_only or item.lifecycle_state not in terminal) and item.confidence_score >= minimum_confidence]
+    return filtered[offset : offset + limit]
+
+
+@router.get("/liquidity-references", response_model=list[StructureLiquidityReference])
+async def smc_liquidity_references(service: Service, symbol: str = "XAUUSD", timeframe: Timeframe = Timeframe.M15, timestamp: datetime | None = None, offset: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=5000)] = 500) -> list[StructureLiquidityReference]:
+    items = (await _snapshot(service, symbol, timeframe, timestamp, min(5000, offset + limit))).liquidity_references
+    return list(items[offset : offset + limit])
+
+
+@router.get("/dealing-ranges", response_model=list[DealingRange])
+async def smc_dealing_ranges(service: Service, symbol: str = "XAUUSD", timeframe: Timeframe = Timeframe.M15, timestamp: datetime | None = None, direction: StructureDirection | None = None, offset: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=5000)] = 500) -> list[DealingRange]:
+    items = (await _snapshot(service, symbol, timeframe, timestamp, min(5000, offset + limit))).dealing_ranges
+    filtered = [item for item in items if direction is None or item.direction == direction]
+    return filtered[offset : offset + limit]
+
+
+@router.get("/multi-timeframe", response_model=MultiTimeframeContext)
+async def smc_multi_timeframe(service: Service, symbol: str = "XAUUSD", timeframe: Timeframe = Timeframe.M15, timestamp: datetime | None = None, limit: Annotated[int, Query(ge=5, le=5000)] = 500) -> MultiTimeframeContext:
+    return await service.multi_timeframe(symbol, timeframe, timestamp, limit=limit)

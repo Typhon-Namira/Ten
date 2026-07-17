@@ -2,7 +2,7 @@
 
 The API is read-only in the initial foundation.
 
-SMC Milestone 2A adds bounded read-only `${TEN_API_PREFIX}/smc/state`, `/swings`, `/structure`, `/events`, `/snapshot`, `/replay`, `/health`, `/metrics`, and `/config` endpoints. `TEN_API_PREFIX` is empty by default. See [SMC Engine](SMC_ENGINE.md) for filtering and deterministic semantics.
+SMC Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/smc/state`, `/swings`, `/structure`, `/events`, `/displacements`, `/zones`, `/liquidity-references`, `/dealing-ranges`, `/multi-timeframe`, `/snapshot`, `/replay`, `/health`, `/metrics`, and `/config` endpoints. `TEN_API_PREFIX` is empty by default. See [SMC Engine](SMC_ENGINE.md) for filtering and deterministic semantics.
 
 | Method | Path | Purpose |
 |---|---|---|

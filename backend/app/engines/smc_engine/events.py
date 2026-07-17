@@ -1,4 +1,4 @@
-"""Typed Milestone 2A events carried by TEN's existing Event Bus."""
+"""Typed SMC Production 1.0 events carried by TEN's existing Event Bus."""
 
 from backend.app.events.models import Event
 
@@ -44,4 +44,40 @@ class SMCReplayCompleted(Event):
 
 
 class SMCInputDegraded(Event):
+    pass
+
+
+class DisplacementDetected(Event):
+    pass
+
+
+class ImbalanceDetected(Event):
+    pass
+
+
+class OrderBlockDetected(Event):
+    pass
+
+
+class BreakerBlockDetected(Event):
+    pass
+
+
+class MitigationBlockDetected(Event):
+    pass
+
+
+class LiquidityVoidDetected(Event):
+    pass
+
+
+class DealingRangeUpdated(Event):
+    pass
+
+
+class SMCObjectLifecycleChanged(Event):
+    pass
+
+
+class MultiTimeframeContextUpdated(Event):
     pass

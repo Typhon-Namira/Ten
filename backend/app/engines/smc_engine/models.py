@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 
 from backend.app.engines.market_data_engine import Timeframe
 
-ENGINE_VERSION = "2.0.0"
+ENGINE_VERSION = "3.0.0"
 
 
 class StructureDirection(StrEnum):
@@ -54,14 +54,51 @@ class ConfirmationState(StrEnum):
 
 
 class LifecycleState(StrEnum):
+    CREATED = "created"
     CANDIDATE = "candidate"
     CONFIRMED = "confirmed"
     ACTIVE = "active"
+    TOUCHED = "touched"
     PARTIALLY_MITIGATED = "partially_mitigated"
     MITIGATED = "mitigated"
+    BROKEN = "broken"
     INVALIDATED = "invalidated"
+    ARCHIVED = "archived"
     EXPIRED = "expired"
     SUPERSEDED = "superseded"
+
+
+class DisplacementStrength(StrEnum):
+    WEAK = "weak"
+    STRONG = "strong"
+
+
+class ZoneType(StrEnum):
+    BULLISH_FVG = "bullish_fvg"
+    BEARISH_FVG = "bearish_fvg"
+    BULLISH_INVERSION_FVG = "bullish_inversion_fvg"
+    BEARISH_INVERSION_FVG = "bearish_inversion_fvg"
+    LIQUIDITY_VOID = "liquidity_void"
+    BULLISH_ORDER_BLOCK = "bullish_order_block"
+    BEARISH_ORDER_BLOCK = "bearish_order_block"
+    BULLISH_BREAKER = "bullish_breaker"
+    BEARISH_BREAKER = "bearish_breaker"
+    BULLISH_MITIGATION_BLOCK = "bullish_mitigation_block"
+    BEARISH_MITIGATION_BLOCK = "bearish_mitigation_block"
+
+
+class LiquidityReferenceType(StrEnum):
+    SWING_HIGH = "swing_high"
+    SWING_LOW = "swing_low"
+    INDUCEMENT = "inducement"
+    EXTERNAL_SWEEP = "external_sweep"
+
+
+class MTFConflictState(StrEnum):
+    ALIGNED = "aligned"
+    PARTIAL = "partial"
+    CONFLICTED = "conflicted"
+    INSUFFICIENT = "insufficient"
 
 
 class AnalysisStatus(StrEnum):
@@ -210,6 +247,119 @@ class MarketStructureState(ImmutableModel):
     updated_at: datetime
 
 
+class Displacement(ImmutableModel):
+    id: UUID
+    symbol: str
+    timeframe: Timeframe
+    direction: StructureDirection
+    strength: DisplacementStrength
+    start_timestamp: datetime
+    end_timestamp: datetime
+    source_candle_ids: tuple[str, ...]
+    atr_normalized_impulse: float = Field(ge=0)
+    body_ratio: float = Field(ge=0, le=1)
+    directional_efficiency: float = Field(ge=0, le=1)
+    volume_ratio: float | None = Field(default=None, ge=0)
+    lifecycle_state: LifecycleState
+    invalidated_at: datetime | None = None
+    confidence_score: float = Field(ge=0, le=100)
+    quality_score: float = Field(ge=0, le=100)
+    evidence: tuple[Evidence, ...] = ()
+    algorithm_version: str = ENGINE_VERSION
+    version: int = Field(default=1, ge=1)
+
+
+class SMCZone(ImmutableModel):
+    id: UUID
+    zone_type: ZoneType
+    symbol: str
+    timeframe: Timeframe
+    direction: StructureDirection
+    scope: StructureScope
+    origin_timestamp: datetime
+    confirmation_timestamp: datetime
+    upper_price: float = Field(gt=0)
+    lower_price: float = Field(gt=0)
+    midpoint: float = Field(gt=0)
+    source_candle_ids: tuple[str, ...]
+    trigger_event_id: UUID | None = None
+    parent_zone_id: UUID | None = None
+    lifecycle_state: LifecycleState
+    fill_percentage: float = Field(default=0, ge=0, le=100)
+    mitigation_percentage: float = Field(default=0, ge=0, le=100)
+    first_touch_timestamp: datetime | None = None
+    mitigation_timestamp: datetime | None = None
+    invalidation_timestamp: datetime | None = None
+    expiration_timestamp: datetime | None = None
+    invalidation_reason: str | None = None
+    confidence_score: float = Field(ge=0, le=100)
+    quality_score: float = Field(ge=0, le=100)
+    evidence: tuple[Evidence, ...] = ()
+    algorithm_version: str = ENGINE_VERSION
+    version: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def valid_zone(self) -> "SMCZone":
+        if self.upper_price < self.lower_price:
+            raise ValueError("zone upper price cannot be below lower price")
+        if not self.lower_price <= self.midpoint <= self.upper_price:
+            raise ValueError("zone midpoint must be inside boundaries")
+        return self
+
+
+class StructureLiquidityReference(ImmutableModel):
+    id: UUID
+    symbol: str
+    timeframe: Timeframe
+    reference_type: LiquidityReferenceType
+    direction: StructureDirection
+    price: float = Field(gt=0)
+    timestamp: datetime
+    available_at: datetime
+    source_swing_id: UUID | None = None
+    source_object_id: UUID | None = None
+    external_sweep_id: str | None = None
+    confidence_score: float = Field(ge=0, le=100)
+    evidence: tuple[Evidence, ...] = ()
+    algorithm_version: str = ENGINE_VERSION
+
+
+class DealingRange(ImmutableModel):
+    id: UUID
+    symbol: str
+    timeframe: Timeframe
+    direction: StructureDirection
+    scope: StructureScope
+    range_high: float = Field(gt=0)
+    range_low: float = Field(gt=0)
+    equilibrium: float = Field(gt=0)
+    premium_boundary: float = Field(gt=0)
+    discount_boundary: float = Field(gt=0)
+    ote_low: float = Field(gt=0)
+    ote_high: float = Field(gt=0)
+    golden_zone_low: float = Field(gt=0)
+    golden_zone_high: float = Field(gt=0)
+    source_swing_high_id: UUID
+    source_swing_low_id: UUID
+    start_timestamp: datetime
+    end_timestamp: datetime
+    parent_range_id: UUID | None = None
+    lifecycle_state: LifecycleState
+    confidence_score: float = Field(ge=0, le=100)
+    version: int = Field(default=1, ge=1)
+
+
+class MultiTimeframeContext(ImmutableModel):
+    symbol: str
+    requested_timeframe: str
+    directions: dict[str, StructureDirection] = Field(default_factory=dict)
+    conflict_state: MTFConflictState
+    alignment_score: float = Field(ge=0, le=100)
+    confidence_score: float = Field(ge=0, le=100)
+    analyzed_through: datetime
+    reasoning_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class SMCAnalysisSnapshot(ImmutableModel):
     id: UUID
     symbol: str
@@ -222,6 +372,11 @@ class SMCAnalysisSnapshot(ImmutableModel):
     swings: tuple[SwingPoint, ...] = ()
     structure_legs: tuple[StructureLeg, ...] = ()
     structure_events: tuple[StructureEvent, ...] = ()
+    displacements: tuple[Displacement, ...] = ()
+    zones: tuple[SMCZone, ...] = ()
+    liquidity_references: tuple[StructureLiquidityReference, ...] = ()
+    dealing_ranges: tuple[DealingRange, ...] = ()
+    multi_timeframe_context: MultiTimeframeContext | None = None
     confidence_summary: dict[str, float] = Field(default_factory=dict)
     quality_summary: dict[str, float] = Field(default_factory=dict)
     reasoning_metadata: dict[str, Any] = Field(default_factory=dict)
