@@ -18,6 +18,7 @@ from backend.app.engines.market_data_engine.config import MarketDataConfig
 from backend.app.engines.smc_engine import SMCConfig, SMCService
 from backend.app.engines.smc_engine.repository import InMemorySMCRepository, SMCRepository, SqlAlchemySMCRepository
 from backend.app.engines.liquidity_engine import InMemoryLiquidityRepository, LiquidityConfig, LiquidityRepository, LiquidityService, SqlAlchemyLiquidityRepository
+from backend.app.engines.volume_profile_engine import InMemoryVolumeProfileRepository, SqlAlchemyVolumeProfileRepository, VolumeProfileConfig, VolumeProfileRepository, VolumeProfileService
 from backend.app.core.database.base import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
         app.state.smc_database_engine = None
         app.state.smc_database_session = None
         app.state.liquidity_database_session = None
+        app.state.volume_profile_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         try:
@@ -54,6 +56,7 @@ def create_app() -> FastAPI:
             app.state.smc_database_engine = database_engine
             app.state.smc_database_session = database_session
             app.state.liquidity_database_session = session_factory()
+            app.state.volume_profile_database_session = session_factory()
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
@@ -75,10 +78,20 @@ def create_app() -> FastAPI:
             liquidity_mode = "sqlalchemy"
         app.state.liquidity_service = LiquidityService(app.state.market_data_service, app.state.smc_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, liquidity_config, liquidity_repository, liquidity_mode)
         await app.state.liquidity_service.restore()
+        volume_profile_config = configs.load_model("volume_profile", VolumeProfileConfig)
+        volume_profile_repository: VolumeProfileRepository = InMemoryVolumeProfileRepository()
+        volume_profile_mode = "memory"
+        if app.state.volume_profile_database_session is not None:
+            volume_profile_repository = SqlAlchemyVolumeProfileRepository(app.state.volume_profile_database_session)
+            volume_profile_mode = "sqlalchemy"
+        app.state.volume_profile_service = VolumeProfileService(app.state.market_data_service, app.state.smc_service, app.state.liquidity_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, volume_profile_config, volume_profile_repository, volume_profile_mode)
+        await app.state.volume_profile_service.restore()
         try:
             yield
         finally:
             await app.state.market_data_service.close()
+            if app.state.volume_profile_database_session is not None:
+                await app.state.volume_profile_database_session.close()
             if app.state.liquidity_database_session is not None:
                 await app.state.liquidity_database_session.close()
             if app.state.smc_database_session is not None:

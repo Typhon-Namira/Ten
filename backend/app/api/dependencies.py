@@ -5,6 +5,7 @@ from backend.app.services import EngineRegistry, SignalRepository
 from backend.app.engines.market_data_engine import MarketDataService
 from backend.app.engines.smc_engine import SMCService
 from backend.app.engines.liquidity_engine import LiquidityService
+from backend.app.engines.volume_profile_engine import VolumeProfileService
 
 
 def get_signal_repository(request: Request) -> SignalRepository:
@@ -25,3 +26,7 @@ def get_smc_service(request: Request) -> SMCService:
 
 def get_liquidity_service(request: Request) -> LiquidityService:
     return cast(LiquidityService, request.app.state.liquidity_service)
+
+
+def get_volume_profile_service(request: Request) -> VolumeProfileService:
+    return cast(VolumeProfileService, request.app.state.volume_profile_service)

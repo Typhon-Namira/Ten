@@ -6,6 +6,7 @@ __pycache__/
 .pytest-tmp/
 .pytest-*-tmp/
 .pytest-liquidity-*/
+.pytest-volume-profile-*/
 .pnpm-store/
 .ruff_cache/
 .mypy_cache/

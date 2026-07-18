@@ -6,6 +6,8 @@ SMC Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/smc/state`, `/sw
 
 Liquidity Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/liquidity/health`, `/metrics`, `/config`, `/state`, `/snapshot`, `/levels`, `/equal-levels`, `/pools`, `/events`, `/sweeps`, `/grabs`, `/raids`, `/stop-hunts`, `/false-breaks`, `/sessions`, `/reference-levels`, `/confluences`, `/targets`, `/map`, `/mtf`, and `/replay`. Collection queries support bounded offset/limit pagination; timestamp queries return only snapshots available at that boundary. No Liquidity mutation route exists. See [Liquidity Engine](LIQUIDITY_ENGINE.md).
 
+Volume Profile Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/volume-profile/health`, `/metrics`, `/config`, `/state`, `/snapshot`, `/profiles`, `/developing`, `/completed`, `/fixed-range`, `/sessions`, `/daily`, `/weekly`, `/monthly`, `/composite`, `/anchored`, `/poc`, `/value-area`, `/hvn`, `/lvn`, `/shelves`, `/gaps`, `/shapes`, `/migrations`, `/confluences`, `/mtf`, and `/replay`. Fixed ranges require validated start/end timestamps and enforce configured candle/day limits. See [Volume Profile Engine](VOLUME_PROFILE_ENGINE.md).
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Process liveness |

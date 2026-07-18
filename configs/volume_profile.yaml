@@ -1,3 +1,36 @@
-bins: 24
+price_grid:
+  method: rows
+  rows: 24
+  tick_size: 0.01
+  fixed_increment: 0.25
+  percentage: 0.001
+  atr_multiplier: 0.1
+  minimum_bins: 4
+  maximum_bins: 500
+allocation:
+  method: uniform_range
+  body_weight: 0.7
+  wick_weight: 0.3
+  directional_approximation: false
+nodes:
+  high_percentile: 0.75
+  low_percentile: 0.25
+  minimum_prominence: 0.1
+  merge_distance_bins: 1
+  shelf_minimum_width: 3
+  gap_maximum_ratio: 0.05
+processing:
+  minimum_candles: 2
+  maximum_candles: 100000
+  maximum_range_days: 366
+  maximum_composite_profiles: 32
+multi_timeframe:
+  hierarchy: [M15, H1, H4, D1, W1, MN1]
+  maximum_depth: 4
+persistence:
+  required_in_production: true
 value_area_percent: 0.70
-high_volume_percentile: 0.75
+default_volume_source: unknown
+allowed_volume_sources: [exchange, broker, tick, synthetic, unknown]
+profile_types: [developing, fixed_range, session, daily, weekly, monthly, composite, anchored]
+configuration_name: volume-profile-production-1

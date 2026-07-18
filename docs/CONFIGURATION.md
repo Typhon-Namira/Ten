@@ -4,6 +4,8 @@
 
 `configs/liquidity.yaml` contains immutable validated groups for absolute/tick/ATR/percentage tolerances, equal-level clustering, pool limits, sweep and reclaim classification, DST-aware sessions, previous-period references, symbol-specific round levels, deterministic ranking, multi-timeframe bounds, processing limits, input quality and persistence policy. Its SHA-256-derived version is included in every snapshot, event, feature and persisted object. Exact semantics are documented in [LIQUIDITY_ENGINE.md](LIQUIDITY_ENGINE.md).
 
+`configs/volume_profile.yaml` contains immutable validated volume-source semantics, Decimal-aligned grid methods, allocation assumptions, value-area percentage, node/shelf/gap thresholds, bounded profile windows, multi-timeframe depth, and durable-persistence policy. Unknown, missing, and synthetic semantics remain explicitly degraded. See [VOLUME_PROFILE_ENGINE.md](VOLUME_PROFILE_ENGINE.md).
+
 TEN treats YAML as the runtime composition source.
 
 | File | Purpose |
@@ -15,6 +17,7 @@ TEN treats YAML as the runtime composition source.
 | `market_data.yaml` | Provider-neutral market-data settings |
 | `smc.yaml` | SMC engine settings |
 | `liquidity.yaml` | Liquidity engine settings |
+| `volume_profile.yaml` | Volume Profile grid, allocation, profile, quality, and persistence settings |
 | `flow.yaml` | Flow-estimation settings |
 | `volume_profile.yaml` | Profile settings |
 | `economic.yaml` | Event risk windows |

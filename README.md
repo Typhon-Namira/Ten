@@ -6,6 +6,8 @@ The [SMC Engine Production 1.0](docs/SMC_ENGINE.md) provides deterministic no-lo
 
 The [Liquidity Engine Production 1.0](docs/LIQUIDITY_ENGINE.md) owns inferred equal-level clusters, buy-side and sell-side pools, sweep classifications, session and period references, confluence, analytical target priority, replay-safe lifecycle history, and durable checkpoints. It consumes Market Data and the public SMC liquidity contract and never represents inferred liquidity as observed broker stops or order-book orders.
 
+The [Volume Profile Engine Production 1.0](docs/VOLUME_PROFILE_ENGINE.md) owns deterministic candle-volume allocation across price, POC, Value Area, HVN/LVN, shelves, profile gaps, shapes, migration, period/anchored/composite profiles, tested references, replay, and durable checkpoints. Candle and tick volume limitations remain explicit; outputs are analytical observations rather than order-flow facts or trading instructions.
+
 **TEN is an AI-assisted XAU/USD market analysis and signal-intelligence platform.** It combines independent price-action, liquidity, flow-estimation, volume-profile, macro-risk, and AI quality-scoring engines into explainable market scenarios presented through an internal dashboard.
 
 TEN is not a trading bot. It has no broker connection, order execution, or Telegram integration. Signals are analytical scenarios—not financial advice.
