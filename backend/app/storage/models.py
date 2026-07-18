@@ -346,6 +346,68 @@ class InstitutionalFlowCheckpointRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class MarketRegimeSnapshotRecord(Base):
+    __tablename__ = "market_regime_snapshots"
+    __table_args__ = (Index("ux_market_regime_snapshot_boundary", "symbol", "timeframe", "analysis_timestamp", "configuration_version", unique=True),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    analysis_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    dominant_regime: Mapped[str] = mapped_column(String(64), index=True)
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    engine_version: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class MarketRegimeEvidenceRecord(Base):
+    __tablename__ = "market_regime_evidence"
+    __table_args__ = (Index("ix_market_regime_evidence_series_time", "symbol", "timeframe", "available_at"),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    evidence_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    source_engine: Mapped[str] = mapped_column(String(32), index=True)
+    family: Mapped[str] = mapped_column(String(32), index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    accepted: Mapped[bool] = mapped_column(Boolean)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class MarketRegimeTransitionRecord(Base):
+    __tablename__ = "market_regime_transitions"
+    __table_args__ = (Index("ix_market_regime_transition_series_time", "symbol", "timeframe", "started_at"),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    from_regime: Mapped[str] = mapped_column(String(64), index=True)
+    to_regime: Mapped[str] = mapped_column(String(64), index=True)
+    state: Mapped[str] = mapped_column(String(32), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class MarketRegimeCheckpointRecord(Base):
+    __tablename__ = "market_regime_checkpoints"
+    __table_args__ = (Index("ux_market_regime_checkpoint_series", "symbol", "timeframe", "configuration_version", unique=True),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    engine_name: Mapped[str] = mapped_column(String(32))
+    engine_version: Mapped[str] = mapped_column(String(32))
+    schema_version: Mapped[str] = mapped_column(String(32))
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    algorithm_version: Mapped[str] = mapped_column(String(32))
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    analysis_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    state_payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AnalysisResultRecord(Base):
     """Versioned engine output for reproducibility and audit."""
 

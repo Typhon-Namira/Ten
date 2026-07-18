@@ -6,5 +6,5 @@ flags:
   EnableEconomicFilter: true
   EnableAI: true
   EnableReplay: false
-  EnableMarketRegime: false
+  EnableMarketRegime: true
   EnableDashboardModules: true

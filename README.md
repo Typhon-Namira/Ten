@@ -8,6 +8,8 @@ The [Liquidity Engine Production 1.0](docs/LIQUIDITY_ENGINE.md) owns inferred eq
 
 The [Volume Profile Engine Production 1.0](docs/VOLUME_PROFILE_ENGINE.md) owns deterministic candle-volume allocation across price, POC, Value Area, HVN/LVN, shelves, profile gaps, shapes, migration, period/anchored/composite profiles, tested references, replay, and durable checkpoints. Candle and tick volume limitations remain explicit; outputs are analytical observations rather than order-flow facts or trading instructions.
 
+The [Market Regime Engine Production 1.0](docs/MARKET_REGIME_ENGINE.md) synthesizes time-valid Market Data, SMC, Liquidity, Volume Profile, and Institutional Flow outputs into deterministic and explainable regime context. It classifies conditions only and never emits trading instructions.
+
 **TEN is an AI-assisted XAU/USD market analysis and signal-intelligence platform.** It combines independent price-action, liquidity, flow-estimation, volume-profile, macro-risk, and AI quality-scoring engines into explainable market scenarios presented through an internal dashboard.
 
 TEN is not a trading bot. It has no broker connection, order execution, or Telegram integration. Signals are analytical scenarios—not financial advice.

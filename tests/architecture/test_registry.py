@@ -11,9 +11,9 @@ def test_loader_discovers_versioned_engine_registrations() -> None:
     assert all(definition.metadata.compatibility_version == "1.0" for definition in factory.definitions())
 
 
-def test_registry_respects_disabled_infrastructure_engines() -> None:
+def test_registry_enables_production_engines_and_keeps_future_replay_disabled() -> None:
     registry = build_engine_registry()
     statuses = {status.name: status for status in registry.statuses()}
     assert statuses["smc"].enabled is True
-    assert statuses["market_regime"].enabled is False
+    assert statuses["market_regime"].enabled is True
     assert statuses["replay"].enabled is False

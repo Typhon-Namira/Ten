@@ -20,6 +20,7 @@ from backend.app.engines.smc_engine.repository import InMemorySMCRepository, SMC
 from backend.app.engines.liquidity_engine import InMemoryLiquidityRepository, LiquidityConfig, LiquidityRepository, LiquidityService, SqlAlchemyLiquidityRepository
 from backend.app.engines.volume_profile_engine import InMemoryVolumeProfileRepository, SqlAlchemyVolumeProfileRepository, VolumeProfileConfig, VolumeProfileRepository, VolumeProfileService
 from backend.app.engines.institutional_flow_engine import InMemoryInstitutionalFlowRepository, InstitutionalFlowConfig, InstitutionalFlowRepository, InstitutionalFlowService, SqlAlchemyInstitutionalFlowRepository
+from backend.app.engines.market_regime_engine import InMemoryMarketRegimeRepository, MarketRegimeConfig, MarketRegimeRepository, MarketRegimeService, SqlAlchemyMarketRegimeRepository
 from backend.app.core.database.base import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
         app.state.liquidity_database_session = None
         app.state.volume_profile_database_session = None
         app.state.institutional_flow_database_session = None
+        app.state.market_regime_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         try:
@@ -60,6 +62,7 @@ def create_app() -> FastAPI:
             app.state.liquidity_database_session = session_factory()
             app.state.volume_profile_database_session = session_factory()
             app.state.institutional_flow_database_session = session_factory()
+            app.state.market_regime_database_session = session_factory()
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
@@ -97,10 +100,20 @@ def create_app() -> FastAPI:
             flow_mode = "sqlalchemy"
         app.state.institutional_flow_service = InstitutionalFlowService(app.state.market_data_service, app.state.smc_service, app.state.liquidity_service, app.state.volume_profile_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, flow_config, flow_repository, flow_mode)
         await app.state.institutional_flow_service.restore()
+        regime_config = configs.load_model("market_regime", MarketRegimeConfig)
+        regime_repository: MarketRegimeRepository = InMemoryMarketRegimeRepository()
+        regime_mode = "memory"
+        if app.state.market_regime_database_session is not None:
+            regime_repository = SqlAlchemyMarketRegimeRepository(app.state.market_regime_database_session)
+            regime_mode = "sqlalchemy"
+        app.state.market_regime_service = MarketRegimeService(app.state.market_data_service, app.state.smc_service, app.state.liquidity_service, app.state.volume_profile_service, app.state.institutional_flow_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, regime_config, regime_repository, regime_mode)
+        await app.state.market_regime_service.restore()
         try:
             yield
         finally:
             await app.state.market_data_service.close()
+            if app.state.market_regime_database_session is not None:
+                await app.state.market_regime_database_session.close()
             if app.state.institutional_flow_database_session is not None:
                 await app.state.institutional_flow_database_session.close()
             if app.state.volume_profile_database_session is not None:

@@ -6,6 +6,8 @@
 
 `configs/volume_profile.yaml` contains immutable validated volume-source semantics, Decimal-aligned grid methods, allocation assumptions, value-area percentage, node/shelf/gap thresholds, bounded profile windows, multi-timeframe depth, and durable-persistence policy. Unknown, missing, and synthetic semantics remain explicitly degraded. See [VOLUME_PROFILE_ENGINE.md](VOLUME_PROFILE_ENGINE.md).
 
+`configs/market_regime.yaml` strictly validates version compatibility, dependency policy, source/family weights, classification thresholds, evidence bounds, correlation caps, replay-safe decay, persistence/checkpointing, processing/retention, repository mode, and multi-timeframe hierarchy/depth. Invalid settings fail startup rather than silently changing semantics. See [MARKET_REGIME_ENGINE.md](MARKET_REGIME_ENGINE.md).
+
 TEN treats YAML as the runtime composition source.
 
 | File | Purpose |

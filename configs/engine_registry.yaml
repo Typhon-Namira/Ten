@@ -24,7 +24,7 @@ engines:
     enabled: true
     version: 1.0.0
   market_regime:
-    enabled: false
+    enabled: true
     version: 1.0.0
   replay:
     enabled: false

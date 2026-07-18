@@ -18,6 +18,10 @@ steps:
     enabled: true
     required: true
     confidence_factor: institutional_flow
+  - name: market_regime
+    enabled: true
+    required: true
+    confidence_factor: market_regime
   - name: economic_calendar
     enabled: true
     required: true

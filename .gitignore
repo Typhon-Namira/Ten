@@ -9,6 +9,7 @@ __pycache__/
 .pytest-volume-profile-*/
 .pytest-institutional-flow/
 .pytest-institutional-flow-*/
+.pytest-market-regime-*/
 frontend/.local_modules/
 frontend/.pnpm-store/
 .pnpm-store/

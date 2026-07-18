@@ -1,2 +1,49 @@
-compatibility_version: 1.0
-enabled: false
+version: market-regime-1.0
+compatibility_version: "1.0"
+enabled: true
+versions:
+  schema_version: "1.0"
+  algorithm_version: "1.0.0"
+dependencies:
+  required: [market_data]
+  optional: [smc, liquidity, volume_profile, institutional_flow]
+weights:
+  market_data: 0.8
+  structure: 1.0
+  liquidity: 0.75
+  volume_profile: 1.0
+  institutional_flow: 1.0
+  volatility: 0.9
+  session: 0.5
+  multi_timeframe: 0.7
+  persistence: 0.7
+  transition: 0.6
+thresholds:
+  minimum_candles: 20
+  trend: 0.20
+  strong_trend: 0.48
+  balance: 0.58
+  compression: 0.62
+  expansion: 0.60
+  transition_watch: 0.35
+  transition_confirm: 0.67
+  high_volatility_percentile: 0.80
+  low_volatility_percentile: 0.20
+evidence:
+  maximum_items: 512
+  decay_half_life_candles: 50
+  minimum_quality: 0.10
+  correlation_group_cap: 1.5
+persistence:
+  window: 8
+  checkpoint_enabled: true
+  required_in_production: true
+processing:
+  default_candles: 500
+  maximum_candles: 100000
+  maximum_page_size: 1000
+  retention_snapshots: 5000
+multi_timeframe:
+  hierarchy: [M1, M5, M15, M30, H1, H4, D1, W1, MN1]
+  maximum_depth: 5
+repository_mode: auto

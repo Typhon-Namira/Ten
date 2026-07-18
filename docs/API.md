@@ -8,6 +8,8 @@ Liquidity Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/liquidity/
 
 Volume Profile Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/volume-profile/health`, `/metrics`, `/config`, `/state`, `/snapshot`, `/profiles`, `/developing`, `/completed`, `/fixed-range`, `/sessions`, `/daily`, `/weekly`, `/monthly`, `/composite`, `/anchored`, `/poc`, `/value-area`, `/hvn`, `/lvn`, `/shelves`, `/gaps`, `/shapes`, `/migrations`, `/confluences`, `/mtf`, and `/replay`. Fixed ranges require validated start/end timestamps and enforce configured candle/day limits. See [Volume Profile Engine](VOLUME_PROFILE_ENGINE.md).
 
+Market Regime Production 1.0 exposes bounded read-only `${TEN_API_PREFIX}/market-regime/health`, `/config`, `/metrics`, `/state`, `/history`, `/snapshots/{snapshot_id}`, `/trend`, `/volatility`, `/auction`, `/compression`, `/expansion`, `/transitions`, `/persistence`, `/sessions`, `/mtf`, `/evidence`, and `/explanations`. Responses are probabilistic analytical context and never trading instructions. See [Market Regime Engine](MARKET_REGIME_ENGINE.md).
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Process liveness |

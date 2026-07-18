@@ -7,6 +7,7 @@ from .smc import router as smc_router
 from .liquidity import router as liquidity_router
 from .volume_profile import router as volume_profile_router
 from .institutional_flow import router as institutional_flow_router
+from .market_regime import router as market_regime_router
 from .status import router as status_router
 
 api_router = APIRouter()
@@ -17,4 +18,5 @@ api_router.include_router(smc_router)
 api_router.include_router(liquidity_router)
 api_router.include_router(volume_profile_router)
 api_router.include_router(institutional_flow_router)
+api_router.include_router(market_regime_router)
 api_router.include_router(status_router)
