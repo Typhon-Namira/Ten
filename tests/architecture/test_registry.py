@@ -16,4 +16,5 @@ def test_registry_enables_production_engines_and_keeps_future_replay_disabled() 
     statuses = {status.name: status for status in registry.statuses()}
     assert statuses["smc"].enabled is True
     assert statuses["market_regime"].enabled is True
+    assert statuses["ai_scoring"].state.value == "ready"
     assert statuses["replay"].enabled is False

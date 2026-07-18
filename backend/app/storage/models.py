@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -483,6 +483,47 @@ class EconomicCalendarCheckpointRecord(Base):
     payload_hash: Mapped[str] = mapped_column(String(64))
     state_payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AIScoreSnapshotRecord(Base):
+    __tablename__ = "ai_score_snapshots"
+    __table_args__ = (
+        Index("ux_ai_score_fingerprint_mode", "input_fingerprint", "mode", unique=True),
+        Index("ix_ai_score_series_time", "instrument", "timeframe", "as_of"),
+    )
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    calculated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    mode: Mapped[str] = mapped_column(String(16), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    policy_name: Mapped[str] = mapped_column(String(64))
+    policy_version: Mapped[str] = mapped_column(String(32), index=True)
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    configuration_hash: Mapped[str] = mapped_column(String(64))
+    input_fingerprint: Mapped[str] = mapped_column(String(64))
+    directional_score: Mapped[float] = mapped_column(Float)
+    confidence_score: Mapped[float] = mapped_column(Float)
+    market_risk_score: Mapped[float] = mapped_column(Float)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class AIScoreComponentRecord(Base):
+    __tablename__ = "ai_score_components"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_score_snapshots.id", ondelete="CASCADE"), index=True)
+    source_engine: Mapped[str] = mapped_column(String(32), index=True)
+    source_group: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class AIScoreConflictRecord(Base):
+    __tablename__ = "ai_score_conflicts"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_score_snapshots.id", ondelete="CASCADE"), index=True)
+    severity: Mapped[str] = mapped_column(String(16), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
 
 
 class AnalysisResultRecord(Base):

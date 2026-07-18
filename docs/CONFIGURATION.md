@@ -37,3 +37,6 @@ Feature flags are applied before construction. A required pipeline step referenc
 ## Institutional Flow (`configs/flow.yaml`)
 
 The versioned Institutional Flow configuration controls evidence limits and age, minimum quality, decay, correlation caps and discounts, participation/activity/inventory/conflict thresholds, per-source weights, production persistence requirements, request bounds, and multi-timeframe depth. Configuration is validated at startup and included in every snapshot, feature, checkpoint, and event.
+# AI Scoring
+
+`configs/ai_scoring.yaml` strictly defines the weighted policy, version/hash identity, approved source groups, component direction/confidence/risk weights, source freshness thresholds, minimum evidence/group requirements, confidence ceilings, conflict thresholds/penalties, non-overlapping directional labels, API limits, retention windows, persistence requirement, and replay-event policy. Configuration is data only; arbitrary expressions or module names are never evaluated.

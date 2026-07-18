@@ -1,4 +1,7 @@
-model: meta-llama/llama-3.3-70b-instruct
-prompt_version: signal_analysis_v1
-temperature: 0.1
-max_tokens: 900
+# Legacy pipeline alias. Production service configuration is configs/ai_scoring.yaml.
+enabled: true
+engine_version: "1.0.0"
+schema_version: "1.0"
+policy_name: weighted_intelligence_v1
+policy_version: "1.0.0"
+configuration_version: ai-scoring-1.0

@@ -30,3 +30,24 @@ export interface MarketStatus {
   note: string
 }
 
+export type AIScoreStatus = 'ready' | 'degraded' | 'insufficient_evidence' | 'stale' | 'invalid' | 'replay'
+export type DirectionalLabel = 'strong_bearish' | 'bearish' | 'slightly_bearish' | 'neutral' | 'slightly_bullish' | 'bullish' | 'strong_bullish'
+
+export interface AIScoreSnapshot {
+  snapshot_id: string
+  instrument: string
+  timeframe: string
+  as_of: string
+  policy_version: string
+  directional_score: number
+  directional_label: DirectionalLabel
+  confidence_score: number
+  market_risk_score: number
+  evidence_alignment_score: number
+  data_quality_score: number
+  composite_score: number
+  status: AIScoreStatus
+  missing_sources: string[]
+  degraded_sources: string[]
+}
+

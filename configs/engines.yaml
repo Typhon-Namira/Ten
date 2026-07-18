@@ -12,7 +12,7 @@ economic_calendar:
   high_impact_pre_minutes: 30
   high_impact_post_minutes: 30
 ai_scoring:
-  provider: openrouter
-  model: meta-llama/llama-3.3-70b-instruct
-  prompt_version: signal_analysis_v1
+  policy: weighted_intelligence_v1
+  policy_version: 1.0.0
+  deterministic: true
 

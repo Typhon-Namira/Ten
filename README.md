@@ -89,7 +89,7 @@ port and verifies `/health` before marking a deployment healthy.
 
 1. Create a Railway service from `Typhon-Namira/Ten`.
 2. Keep the service root directory at the repository root.
-3. Add `TEN_OPENROUTER_API_KEY` if AI scoring should be enabled.
+3. AI Scoring Production 1.0 is deterministic and requires no LLM or provider API key.
 4. Add a Railway PostgreSQL service and set `TEN_DATABASE_URL` to its async
    SQLAlchemy URL when durable persistence is enabled.
 5. Generate a public domain under the service's Networking settings.
@@ -146,3 +146,7 @@ TEN includes a persistent, replay-safe Institutional Flow Engine that synthesize
 ## Economic Calendar Engine
 
 TEN includes a provider-neutral, persistent, revision-aware Economic Calendar Engine with deterministic event identity, explicit publication/availability semantics, point-in-time replay, instrument relevance, bounded event-risk context, typed Feature Store/Event Bus integration, and read-only APIs. It produces probabilistic context only and no trading instructions. See [docs/ECONOMIC_CALENDAR_ENGINE.md](docs/ECONOMIC_CALENDAR_ENGINE.md).
+
+## AI Scoring Engine
+
+TEN includes a deterministic, explainable, point-in-time-safe AI Scoring Engine that combines versioned upstream intelligence into separate direction, confidence, risk, alignment, quality, and composite dimensions. It uses no LLM in Production 1.0 and never executes trades or emits trading instructions. See [docs/AI_SCORING_ENGINE.md](docs/AI_SCORING_ENGINE.md).

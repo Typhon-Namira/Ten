@@ -83,8 +83,6 @@ class EngineRegistry:
         for registration in self._engines.values():
             metadata = registration.definition.metadata
             state = EngineState.READY if registration.enabled else EngineState.OFFLINE
-            if metadata.name == "ai_scoring" and registration.enabled and not self.context.settings.openrouter_api_key:
-                state = EngineState.DEGRADED
             statuses.append(
                 EngineStatus(
                     name=metadata.name,

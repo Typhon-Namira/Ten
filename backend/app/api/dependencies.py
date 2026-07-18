@@ -9,6 +9,7 @@ from backend.app.engines.volume_profile_engine import VolumeProfileService
 from backend.app.engines.institutional_flow_engine import InstitutionalFlowService
 from backend.app.engines.market_regime_engine import MarketRegimeService
 from backend.app.engines.economic_calendar_engine import EconomicCalendarService
+from backend.app.engines.ai_scoring_engine import AIScoringService
 
 
 def get_signal_repository(request: Request) -> SignalRepository:
@@ -45,3 +46,7 @@ def get_market_regime_service(request: Request) -> MarketRegimeService:
 
 def get_economic_calendar_service(request: Request) -> EconomicCalendarService:
     return cast(EconomicCalendarService, request.app.state.economic_calendar_service)
+
+
+def get_ai_scoring_service(request: Request) -> AIScoringService:
+    return cast(AIScoringService, request.app.state.ai_scoring_service)

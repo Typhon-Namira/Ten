@@ -22,6 +22,7 @@ from backend.app.engines.volume_profile_engine import InMemoryVolumeProfileRepos
 from backend.app.engines.institutional_flow_engine import InMemoryInstitutionalFlowRepository, InstitutionalFlowConfig, InstitutionalFlowRepository, InstitutionalFlowService, SqlAlchemyInstitutionalFlowRepository
 from backend.app.engines.market_regime_engine import InMemoryMarketRegimeRepository, MarketRegimeConfig, MarketRegimeRepository, MarketRegimeService, SqlAlchemyMarketRegimeRepository
 from backend.app.engines.economic_calendar_engine import EconomicCalendarConfig, EconomicCalendarRepository, EconomicCalendarService, InMemoryEconomicCalendarRepository, SqlAlchemyEconomicCalendarRepository, build_providers
+from backend.app.engines.ai_scoring_engine import AIScoringConfig, AIScoringRepository, AIScoringService, InMemoryAIScoringRepository, SqlAlchemyAIScoringRepository
 from backend.app.core.database.base import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
@@ -50,6 +51,7 @@ def create_app() -> FastAPI:
         app.state.institutional_flow_database_session = None
         app.state.market_regime_database_session = None
         app.state.economic_calendar_database_session = None
+        app.state.ai_scoring_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         try:
@@ -66,6 +68,7 @@ def create_app() -> FastAPI:
             app.state.institutional_flow_database_session = session_factory()
             app.state.market_regime_database_session = session_factory()
             app.state.economic_calendar_database_session = session_factory()
+            app.state.ai_scoring_database_session = session_factory()
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
@@ -120,13 +123,37 @@ def create_app() -> FastAPI:
         calendar_providers = build_providers(calendar_config.providers)
         app.state.economic_calendar_service = EconomicCalendarService(app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, calendar_config, calendar_repository, calendar_providers, calendar_mode)
         await app.state.economic_calendar_service.start()
+        ai_config = configs.load_model("ai_scoring", AIScoringConfig)
+        ai_repository: AIScoringRepository = InMemoryAIScoringRepository()
+        ai_mode = "memory"
+        if app.state.ai_scoring_database_session is not None:
+            ai_repository = SqlAlchemyAIScoringRepository(app.state.ai_scoring_database_session)
+            ai_mode = "postgresql"
+        app.state.ai_scoring_service = AIScoringService(
+            ai_repository,
+            app.state.pipeline_manager.event_bus,
+            app.state.pipeline_manager.feature_store,
+            ai_config,
+            market_data=app.state.market_data_service,
+            smc=app.state.smc_service,
+            liquidity=app.state.liquidity_service,
+            volume_profile=app.state.volume_profile_service,
+            institutional_flow=app.state.institutional_flow_service,
+            market_regime=app.state.market_regime_service,
+            economic_calendar=app.state.economic_calendar_service,
+            repository_mode=ai_mode,
+        )
+        await app.state.ai_scoring_service.start()
         try:
             yield
         finally:
+            await app.state.ai_scoring_service.stop()
             await app.state.economic_calendar_service.stop()
             await app.state.market_data_service.close()
             if app.state.economic_calendar_database_session is not None:
                 await app.state.economic_calendar_database_session.close()
+            if app.state.ai_scoring_database_session is not None:
+                await app.state.ai_scoring_database_session.close()
             if app.state.market_regime_database_session is not None:
                 await app.state.market_regime_database_session.close()
             if app.state.institutional_flow_database_session is not None:

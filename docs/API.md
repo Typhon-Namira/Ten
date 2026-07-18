@@ -43,3 +43,8 @@ Read-only endpoints under `/institutional-flow` expose health, metrics, configur
 ## Economic Calendar
 
 Read-only endpoints under `/economic-calendar` expose health, sanitized configuration, metrics, provider capability/status, bounded events and historical reconstruction, observations, revisions, upcoming/recent/active views, snapshots/history, symbol context, clusters, conflicts, and explanations. List windows and page sizes are bounded; `as_of` timestamps reconstruct only state available at that boundary. See [ECONOMIC_CALENDAR_ENGINE.md](ECONOMIC_CALENDAR_ENGINE.md).
+# AI Scoring Engine
+
+`GET /ai-scoring/health`, `/config`, and `/metrics` expose bounded operational state. `POST /ai-scoring/score` accepts `instrument`, `timeframe`, optional timezone-aware `as_of`, `persist`, `publish_events`, and `mode`. `POST /ai-scoring/replay` requires `as_of` and suppresses events. `GET /ai-scoring/latest`, `/history`, `/snapshots/{id}`, and `/snapshots/{id}/explanation` expose persisted immutable results. History is limited to 200 rows and a configured 365-day range.
+
+AI score responses are analytical, non-executing context. Confidence measures evidence consistency and quality, not trade win probability.
