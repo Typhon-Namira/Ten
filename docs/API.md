@@ -34,3 +34,6 @@ All market-data routes are provider-neutral.
 - `GET /market/health`
 
 Series routes accept `symbol`, `timeframe`, and bounded `limit` parameters. Historical requests also accept `start`, `end`, and `refresh`. Timestamps must be ISO-8601 values with an explicit UTC offset. A refresh requiring an unavailable live provider returns HTTP 503; an absent persisted candle or metric returns HTTP 404.
+## Institutional Flow
+
+Read-only endpoints under `/institutional-flow` expose health, metrics, configuration, snapshots, historical replay, evidence, participation, initiative/responsive activity, absorption-like and exhaustion-like behavior, inventory/campaign inference, directional pressure, persistence, cross-session flow, confluence, explanations, and bounded multi-timeframe context. These are probabilistic analytical observations, not verified participant identity or trading instructions.

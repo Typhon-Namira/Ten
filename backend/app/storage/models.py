@@ -299,6 +299,53 @@ class VolumeProfileCheckpointRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class InstitutionalFlowEvidenceRecord(Base):
+    __tablename__ = "institutional_flow_evidence"
+    __table_args__ = (Index("ix_institutional_flow_evidence_series_time", "symbol", "timeframe", "availability_timestamp"),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    evidence_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    source_engine: Mapped[str] = mapped_column(String(32), index=True)
+    evidence_type: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    availability_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    direction: Mapped[str] = mapped_column(String(32))
+    confidence: Mapped[float] = mapped_column(Float)
+    quality: Mapped[float] = mapped_column(Float)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class InstitutionalFlowSnapshotRecord(Base):
+    __tablename__ = "institutional_flow_snapshots"
+    __table_args__ = (Index("ux_institutional_flow_snapshot_boundary", "symbol", "timeframe", "analysis_timestamp", "configuration_version", "processing_mode", unique=True),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    analysis_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    processing_mode: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    engine_version: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class InstitutionalFlowCheckpointRecord(Base):
+    __tablename__ = "institutional_flow_checkpoints"
+    __table_args__ = (Index("ux_institutional_flow_checkpoint_series", "symbol", "timeframe", "configuration_version", unique=True),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    engine_version: Mapped[str] = mapped_column(String(32))
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    last_processed_candle: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    state_hash: Mapped[str] = mapped_column(String(64))
+    state_payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AnalysisResultRecord(Base):
     """Versioned engine output for reproducibility and audit."""
 

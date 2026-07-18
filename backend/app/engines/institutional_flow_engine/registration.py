@@ -1,6 +1,6 @@
+from collections.abc import Mapping
 from datetime import date
 from typing import Any
-from collections.abc import Mapping
 
 from backend.app.engines.common import EngineMetadata
 from backend.app.events import FlowCompleted
@@ -21,4 +21,17 @@ async def _execute(engine: BaselineInstitutionalFlowEngine, context: PipelineExe
 
 
 def register(factory: EngineFactory) -> None:
-    factory.register(EngineMetadata(name="institutional_flow", version="1.0.0", compatibility_version="1.0", created_date=date(2026, 7, 16), dependencies=("market_data",), description="Transparent OHLCV institutional-flow estimation boundary.", config_key="flow", feature_flag="EnableFlow"), _build, _execute)
+    factory.register(
+        EngineMetadata(
+            name="institutional_flow",
+            version="1.0.0",
+            compatibility_version="1.0",
+            created_date=date(2026, 7, 18),
+            dependencies=("market_data", "smc", "liquidity", "volume_profile"),
+            description="Probabilistic, evidence-supported institutional-flow inference without participant identity claims.",
+            config_key="flow",
+            feature_flag="EnableFlow",
+        ),
+        _build,
+        _execute,
+    )

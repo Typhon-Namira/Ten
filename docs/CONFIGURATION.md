@@ -29,3 +29,6 @@ TEN treats YAML as the runtime composition source.
 `YamlConfigRepository` restricts names to safe stems, uses `yaml.safe_load`, requires mapping roots, and validates documents into Pydantic models. Secrets remain environment variables.
 
 Feature flags are applied before construction. A required pipeline step referencing a disabled engine fails configuration validation rather than silently producing partial analysis.
+## Institutional Flow (`configs/flow.yaml`)
+
+The versioned Institutional Flow configuration controls evidence limits and age, minimum quality, decay, correlation caps and discounts, participation/activity/inventory/conflict thresholds, per-source weights, production persistence requirements, request bounds, and multi-timeframe depth. Configuration is validated at startup and included in every snapshot, feature, checkpoint, and event.

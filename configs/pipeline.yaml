@@ -10,14 +10,14 @@ steps:
     enabled: true
     required: true
     confidence_factor: liquidity
-  - name: institutional_flow
-    enabled: true
-    required: true
-    confidence_factor: institutional_flow
   - name: volume_profile
     enabled: true
     required: true
     confidence_factor: volume_profile
+  - name: institutional_flow
+    enabled: true
+    required: true
+    confidence_factor: institutional_flow
   - name: economic_calendar
     enabled: true
     required: true

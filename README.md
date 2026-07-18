@@ -137,3 +137,6 @@ docker/            Production-oriented container definitions
 ## Data integrity
 
 The institutional-flow baseline is explicitly an **OHLCV estimate** using volume pressure, close location, acceleration, and effort-versus-result. It does not claim access to CME order flow. A future licensed provider can implement the same contract without changing downstream scoring or signal construction.
+## Institutional Flow Engine
+
+TEN includes a persistent, replay-safe Institutional Flow Engine that synthesizes typed Market Data, SMC, Liquidity, and Volume Profile evidence into explainable probabilistic inferences. It does not claim verified institutional identity and produces no trading instructions. See [docs/INSTITUTIONAL_FLOW_ENGINE.md](docs/INSTITUTIONAL_FLOW_ENGINE.md).

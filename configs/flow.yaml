@@ -1,3 +1,42 @@
+version: institutional-flow-1.0
 acceleration_weight: 0.35
 volume_weight: 0.45
 close_location_weight: 0.20
+evidence:
+  maximum_items: 512
+  maximum_age_candles: 200
+  minimum_quality: 0.15
+  decay_per_candle: 0.985
+correlation:
+  maximum_group_contribution: 1.5
+  duplicate_tolerance_seconds: 60
+  correlated_discount: 0.65
+thresholds:
+  moderate_participation: 0.35
+  high_participation: 0.68
+  initiative: 0.48
+  responsive: 0.42
+  absorption: 0.50
+  exhaustion: 0.50
+  inventory: 0.56
+  conflict: 0.35
+  strong_pressure: 0.62
+  moderate_pressure: 0.20
+weights:
+  market_data: 0.75
+  smc: 1.0
+  liquidity: 0.9
+  volume_profile: 0.9
+  quality: 0.3
+  diversity: 0.2
+persistence:
+  required_in_production: true
+  checkpoint_enabled: true
+processing:
+  maximum_candles: 100000
+  default_candles: 500
+  maximum_range_days: 3650
+  maximum_page_size: 1000
+multi_timeframe:
+  hierarchy: [M5, M15, M30, H1, H4, D1, W1, MN1]
+  maximum_depth: 5

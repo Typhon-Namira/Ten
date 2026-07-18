@@ -7,6 +7,10 @@ __pycache__/
 .pytest-*-tmp/
 .pytest-liquidity-*/
 .pytest-volume-profile-*/
+.pytest-institutional-flow/
+.pytest-institutional-flow-*/
+frontend/.local_modules/
+frontend/.pnpm-store/
 .pnpm-store/
 .ruff_cache/
 .mypy_cache/

@@ -6,6 +6,7 @@ from backend.app.engines.market_data_engine import MarketDataService
 from backend.app.engines.smc_engine import SMCService
 from backend.app.engines.liquidity_engine import LiquidityService
 from backend.app.engines.volume_profile_engine import VolumeProfileService
+from backend.app.engines.institutional_flow_engine import InstitutionalFlowService
 
 
 def get_signal_repository(request: Request) -> SignalRepository:
@@ -30,3 +31,7 @@ def get_liquidity_service(request: Request) -> LiquidityService:
 
 def get_volume_profile_service(request: Request) -> VolumeProfileService:
     return cast(VolumeProfileService, request.app.state.volume_profile_service)
+
+
+def get_institutional_flow_service(request: Request) -> InstitutionalFlowService:
+    return cast(InstitutionalFlowService, request.app.state.institutional_flow_service)
