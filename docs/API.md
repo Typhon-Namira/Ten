@@ -39,3 +39,7 @@ Series routes accept `symbol`, `timeframe`, and bounded `limit` parameters. Hist
 ## Institutional Flow
 
 Read-only endpoints under `/institutional-flow` expose health, metrics, configuration, snapshots, historical replay, evidence, participation, initiative/responsive activity, absorption-like and exhaustion-like behavior, inventory/campaign inference, directional pressure, persistence, cross-session flow, confluence, explanations, and bounded multi-timeframe context. These are probabilistic analytical observations, not verified participant identity or trading instructions.
+
+## Economic Calendar
+
+Read-only endpoints under `/economic-calendar` expose health, sanitized configuration, metrics, provider capability/status, bounded events and historical reconstruction, observations, revisions, upcoming/recent/active views, snapshots/history, symbol context, clusters, conflicts, and explanations. List windows and page sizes are bounded; `as_of` timestamps reconstruct only state available at that boundary. See [ECONOMIC_CALENDAR_ENGINE.md](ECONOMIC_CALENDAR_ENGINE.md).

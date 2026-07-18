@@ -8,6 +8,7 @@ from backend.app.engines.liquidity_engine import LiquidityService
 from backend.app.engines.volume_profile_engine import VolumeProfileService
 from backend.app.engines.institutional_flow_engine import InstitutionalFlowService
 from backend.app.engines.market_regime_engine import MarketRegimeService
+from backend.app.engines.economic_calendar_engine import EconomicCalendarService
 
 
 def get_signal_repository(request: Request) -> SignalRepository:
@@ -40,3 +41,7 @@ def get_institutional_flow_service(request: Request) -> InstitutionalFlowService
 
 def get_market_regime_service(request: Request) -> MarketRegimeService:
     return cast(MarketRegimeService, request.app.state.market_regime_service)
+
+
+def get_economic_calendar_service(request: Request) -> EconomicCalendarService:
+    return cast(EconomicCalendarService, request.app.state.economic_calendar_service)

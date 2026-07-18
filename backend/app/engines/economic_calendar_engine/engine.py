@@ -3,12 +3,13 @@ from datetime import datetime
 
 from backend.app.engines.common import AnalysisEngine
 
+from .analyzer import _phase
 from .config import EconomicCalendarConfig
-from .models import EconomicEvent, EventImportance, NewsRiskResult
+from .models import EconomicEvent, EventImportance, NewsRiskResult, RiskWindowPhase
 
 
 class EconomicCalendarEngine(AnalysisEngine[tuple[datetime, list[EconomicEvent]], NewsRiskResult], ABC):
-    """Contract for provider-neutral macro-event risk filtering."""
+    """Provider-neutral compatibility contract for pipeline calendar context."""
 
 
 class BaselineEconomicCalendarEngine(EconomicCalendarEngine):
@@ -20,24 +21,17 @@ class BaselineEconomicCalendarEngine(EconomicCalendarEngine):
 
     def analyze(self, data: tuple[datetime, list[EconomicEvent]]) -> NewsRiskResult:
         now, events = data
-        relevant: list[EconomicEvent] = []
-        nearest: float | None = None
-        level = EventImportance.LOW
-        for event in events:
-            minutes = (event.scheduled_at - now).total_seconds() / 60
-            distance = abs(minutes)
-            nearest = distance if nearest is None else min(nearest, distance)
-            pre, post = self._window(event.importance)
-            if -post <= minutes <= pre:
-                relevant.append(event)
-                if event.importance == EventImportance.HIGH or level == EventImportance.LOW:
-                    level = event.importance
-        return NewsRiskResult(risk_level=level, no_trade=any(item.importance == EventImportance.HIGH for item in relevant), active_events=relevant, minutes_to_nearest=nearest)
-
-    def _window(self, importance: EventImportance) -> tuple[int, int]:
-        if importance == EventImportance.HIGH:
-            return self.config.high_impact_pre_minutes, self.config.high_impact_post_minutes
-        if importance == EventImportance.MEDIUM:
-            return self.config.medium_impact_pre_minutes, self.config.medium_impact_post_minutes
-        return 5, 5
-
+        relevant = tuple(
+            item for item in events if _phase(item, now, self.config) not in {RiskWindowPhase.OUTSIDE, RiskWindowPhase.COOLDOWN, RiskWindowPhase.UNKNOWN}
+        )
+        scheduled = [item for item in events if item.scheduled_at_utc]
+        nearest = min((abs((item.scheduled_at_utc - now).total_seconds() / 60) for item in scheduled), default=None)  # type: ignore[operator]
+        rank = {EventImportance.UNKNOWN: 0, EventImportance.LOW: 1, EventImportance.MEDIUM: 2, EventImportance.HIGH: 3, EventImportance.CRITICAL: 4}
+        level = max((item.importance for item in relevant), key=rank.__getitem__, default=EventImportance.LOW)
+        return NewsRiskResult(
+            risk_level=level,
+            no_trade=False,
+            active_events=relevant,
+            minutes_to_nearest=nearest,
+            observations=("Context only; the engine does not create trading restrictions or instructions.",),
+        )

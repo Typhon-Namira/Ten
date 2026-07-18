@@ -142,3 +142,7 @@ The institutional-flow baseline is explicitly an **OHLCV estimate** using volume
 ## Institutional Flow Engine
 
 TEN includes a persistent, replay-safe Institutional Flow Engine that synthesizes typed Market Data, SMC, Liquidity, and Volume Profile evidence into explainable probabilistic inferences. It does not claim verified institutional identity and produces no trading instructions. See [docs/INSTITUTIONAL_FLOW_ENGINE.md](docs/INSTITUTIONAL_FLOW_ENGINE.md).
+
+## Economic Calendar Engine
+
+TEN includes a provider-neutral, persistent, revision-aware Economic Calendar Engine with deterministic event identity, explicit publication/availability semantics, point-in-time replay, instrument relevance, bounded event-risk context, typed Feature Store/Event Bus integration, and read-only APIs. It produces probabilistic context only and no trading instructions. See [docs/ECONOMIC_CALENDAR_ENGINE.md](docs/ECONOMIC_CALENDAR_ENGINE.md).

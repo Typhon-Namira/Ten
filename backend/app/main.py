@@ -21,6 +21,7 @@ from backend.app.engines.liquidity_engine import InMemoryLiquidityRepository, Li
 from backend.app.engines.volume_profile_engine import InMemoryVolumeProfileRepository, SqlAlchemyVolumeProfileRepository, VolumeProfileConfig, VolumeProfileRepository, VolumeProfileService
 from backend.app.engines.institutional_flow_engine import InMemoryInstitutionalFlowRepository, InstitutionalFlowConfig, InstitutionalFlowRepository, InstitutionalFlowService, SqlAlchemyInstitutionalFlowRepository
 from backend.app.engines.market_regime_engine import InMemoryMarketRegimeRepository, MarketRegimeConfig, MarketRegimeRepository, MarketRegimeService, SqlAlchemyMarketRegimeRepository
+from backend.app.engines.economic_calendar_engine import EconomicCalendarConfig, EconomicCalendarRepository, EconomicCalendarService, InMemoryEconomicCalendarRepository, SqlAlchemyEconomicCalendarRepository, build_providers
 from backend.app.core.database.base import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
         app.state.volume_profile_database_session = None
         app.state.institutional_flow_database_session = None
         app.state.market_regime_database_session = None
+        app.state.economic_calendar_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         try:
@@ -63,6 +65,7 @@ def create_app() -> FastAPI:
             app.state.volume_profile_database_session = session_factory()
             app.state.institutional_flow_database_session = session_factory()
             app.state.market_regime_database_session = session_factory()
+            app.state.economic_calendar_database_session = session_factory()
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
@@ -108,10 +111,22 @@ def create_app() -> FastAPI:
             regime_mode = "sqlalchemy"
         app.state.market_regime_service = MarketRegimeService(app.state.market_data_service, app.state.smc_service, app.state.liquidity_service, app.state.volume_profile_service, app.state.institutional_flow_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, regime_config, regime_repository, regime_mode)
         await app.state.market_regime_service.restore()
+        calendar_config = configs.load_model("economic_calendar", EconomicCalendarConfig)
+        calendar_repository: EconomicCalendarRepository = InMemoryEconomicCalendarRepository()
+        calendar_mode = "memory"
+        if app.state.economic_calendar_database_session is not None:
+            calendar_repository = SqlAlchemyEconomicCalendarRepository(app.state.economic_calendar_database_session)
+            calendar_mode = "postgresql"
+        calendar_providers = build_providers(calendar_config.providers)
+        app.state.economic_calendar_service = EconomicCalendarService(app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, calendar_config, calendar_repository, calendar_providers, calendar_mode)
+        await app.state.economic_calendar_service.start()
         try:
             yield
         finally:
+            await app.state.economic_calendar_service.stop()
             await app.state.market_data_service.close()
+            if app.state.economic_calendar_database_session is not None:
+                await app.state.economic_calendar_database_session.close()
             if app.state.market_regime_database_session is not None:
                 await app.state.market_regime_database_session.close()
             if app.state.institutional_flow_database_session is not None:

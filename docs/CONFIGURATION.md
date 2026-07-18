@@ -8,6 +8,8 @@
 
 `configs/market_regime.yaml` strictly validates version compatibility, dependency policy, source/family weights, classification thresholds, evidence bounds, correlation caps, replay-safe decay, persistence/checkpointing, processing/retention, repository mode, and multi-timeframe hierarchy/depth. Invalid settings fail startup rather than silently changing semantics. See [MARKET_REGIME_ENGINE.md](MARKET_REGIME_ENGINE.md).
 
+`configs/economic_calendar.yaml` strictly validates provider modes and priority, timezone, timeout/retry/rate bounds, importance/relevance weights, risk-window ordering, freshness thresholds, API limits, retention, cache, batch size, repository mode, and version compatibility. The production default is explicitly disabled/degraded until a real authenticated live adapter is configured. See [ECONOMIC_CALENDAR_ENGINE.md](ECONOMIC_CALENDAR_ENGINE.md).
+
 TEN treats YAML as the runtime composition source.
 
 | File | Purpose |
@@ -23,6 +25,7 @@ TEN treats YAML as the runtime composition source.
 | `flow.yaml` | Flow-estimation settings |
 | `volume_profile.yaml` | Profile settings |
 | `economic.yaml` | Event risk windows |
+| `economic_calendar.yaml` | Economic Calendar providers, normalization, risk context, retention, and API bounds |
 | `ai.yaml` | OpenRouter model and prompt version |
 | `signal.yaml` | Scenario construction settings |
 | `market_regime.yaml` | Disabled future regime contract |

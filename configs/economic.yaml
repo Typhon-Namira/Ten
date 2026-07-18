@@ -1,4 +1,7 @@
-high_impact_pre_minutes: 30
-high_impact_post_minutes: 30
-medium_impact_pre_minutes: 15
-medium_impact_post_minutes: 15
+version: "1.0.0"
+enabled: true
+versions: {schema_version: "1.0", normalization_version: "1.0.0"}
+providers:
+  - {name: disabled, mode: disabled, enabled: false, version: "1"}
+provider_priority: [disabled]
+repository_mode: memory

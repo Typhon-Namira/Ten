@@ -408,6 +408,83 @@ class MarketRegimeCheckpointRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class EconomicCalendarObservationRecord(Base):
+    __tablename__ = "economic_calendar_provider_observations"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    provider_name: Mapped[str] = mapped_column(String(64), index=True)
+    provider_event_id: Mapped[str] = mapped_column(String(256), index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class EconomicCalendarEventRecord(Base):
+    __tablename__ = "economic_calendar_events"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    canonical_name: Mapped[str] = mapped_column(String(256), index=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    country_code: Mapped[str | None] = mapped_column(String(2), nullable=True, index=True)
+    currency_codes: Mapped[list[str]] = mapped_column(JSONB)
+    category: Mapped[str] = mapped_column(String(64), index=True)
+    importance: Mapped[str] = mapped_column(String(16), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class EconomicCalendarRevisionRecord(Base):
+    __tablename__ = "economic_calendar_event_revisions"
+    __table_args__ = (Index("ux_economic_calendar_revision_number", "event_id", "revision_number", unique=True),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    revision_number: Mapped[int] = mapped_column(Integer)
+    revision_type: Mapped[str] = mapped_column(String(32), index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class EconomicCalendarSnapshotRecord(Base):
+    __tablename__ = "economic_calendar_snapshots"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    analysis_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    historical_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class EconomicCalendarContextRecord(Base):
+    __tablename__ = "economic_calendar_instrument_contexts"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    historical_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class EconomicCalendarSyncStateRecord(Base):
+    __tablename__ = "economic_calendar_sync_state"
+    provider_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class EconomicCalendarCheckpointRecord(Base):
+    __tablename__ = "economic_calendar_checkpoints"
+    __table_args__ = (Index("ux_economic_calendar_checkpoint_engine", "engine_name", "configuration_version", unique=True),)
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    engine_name: Mapped[str] = mapped_column(String(64))
+    engine_version: Mapped[str] = mapped_column(String(32))
+    schema_version: Mapped[str] = mapped_column(String(32))
+    configuration_version: Mapped[str] = mapped_column(String(32))
+    normalization_version: Mapped[str] = mapped_column(String(32))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    state_payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class AnalysisResultRecord(Base):
     """Versioned engine output for reproducibility and audit."""
 

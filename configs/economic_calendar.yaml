@@ -1,0 +1,33 @@
+version: "1.0.0"
+enabled: true
+versions:
+  schema_version: "1.0"
+  normalization_version: "1.0.0"
+providers:
+  - name: disabled
+    mode: disabled
+    enabled: false
+    version: "1"
+    timezone: UTC
+    priority: 100
+    timeout_seconds: 10
+    retry_count: 2
+    requests_per_minute: 30
+    circuit_failure_threshold: 5
+provider_priority: [disabled]
+windows:
+  low: {pre_minutes: 5, imminent_minutes: 2, post_minutes: 5, cooldown_minutes: 5}
+  medium: {pre_minutes: 15, imminent_minutes: 5, post_minutes: 15, cooldown_minutes: 15}
+  high: {pre_minutes: 30, imminent_minutes: 10, post_minutes: 30, cooldown_minutes: 30}
+  critical: {pre_minutes: 60, imminent_minutes: 15, post_minutes: 60, cooldown_minutes: 60}
+  unknown: {pre_minutes: 10, imminent_minutes: 5, post_minutes: 10, cooldown_minutes: 10}
+importance_weights: {low: 0.2, medium: 0.45, high: 0.75, critical: 1.0, unknown: 0.25}
+relevance_weights: {direct: 1.0, strong: 0.8, moderate: 0.55, weak: 0.25, none: 0.0, unknown: 0.1}
+cluster_window_minutes: 30
+country_currency: {US: USD, GB: GBP, JP: JPY, CA: CAD, AU: AUD, NZ: NZD, CH: CHF, EU: EUR}
+symbol_overrides: {XAUUSD: [USD], BTCUSD: [USD], SPX: [USD], DAX: [EUR]}
+inverted_surprise_categories: [employment]
+freshness: {aging_minutes: 30, stale_minutes: 120, critical_minutes: 1440}
+api: {default_page_size: 50, maximum_page_size: 500, maximum_query_window_days: 366, maximum_history_window_days: 3650, maximum_observation_records: 500, maximum_revision_records: 500}
+processing: {polling_interval_seconds: 300, retention_events: 100000, retention_observations: 500000, retention_snapshots: 5000, cache_size: 1000, maximum_batch_size: 10000}
+repository_mode: memory
