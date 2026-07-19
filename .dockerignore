@@ -1,0 +1,14 @@
+.git
+.venv
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+frontend/node_modules
+frontend/.local_modules
+frontend/.pnpm-store
+frontend/dist
+node_modules
+dist
+htmlcov
+.coverage

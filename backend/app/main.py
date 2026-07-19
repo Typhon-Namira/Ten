@@ -4,13 +4,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import logging
+from pathlib import Path
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.types import ASGIApp
 
 from backend.app.api.routes import api_router
-from backend.app.core.config import get_settings
+from backend.app.core.config import Settings, get_settings
 from backend.app.core.exceptions import TenError
 from backend.app.core.logging import configure_logging
 from backend.app.core.config import YamlConfigRepository
@@ -48,10 +52,50 @@ from backend.app.services import InMemorySignalRepository, PipelineManager, buil
 from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, SqlAlchemyIntegrationRepository
 
 
-def create_app() -> FastAPI:
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+SPA_ROUTES = frozenset(
+    {
+        "/",
+        "/signals",
+        "/market",
+        "/smc",
+        "/liquidity",
+        "/institutional-flow",
+        "/volume-profile",
+        "/economic-calendar",
+        "/ai-analysis",
+        "/engine-status",
+        "/logs",
+        "/configuration",
+    }
+)
+
+
+class SpaNavigationMiddleware(BaseHTTPMiddleware):
+    """Serve the dashboard for browser navigations without shadowing JSON APIs."""
+
+    def __init__(self, app: ASGIApp, index_file: Path) -> None:
+        super().__init__(app)
+        self.index_file = index_file
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        wants_html = "text/html" in request.headers.get("accept", "")
+        if request.method == "GET" and request.url.path in SPA_ROUTES and wants_html:
+            if not self.index_file.is_file():
+                return JSONResponse(status_code=503, content={"detail": "TEN dashboard build is unavailable: frontend/dist/index.html is missing"})
+            return FileResponse(self.index_file)
+        return await call_next(request)
+
+
+def create_app(*, frontend_dist: Path | None = None, settings_override: Settings | None = None) -> FastAPI:
     """Construct the HTTP application and inject its adapters."""
 
-    settings = get_settings()
+    settings = settings_override or get_settings()
+    resolved_frontend_dist = (frontend_dist or DEFAULT_FRONTEND_DIST).resolve()
+    frontend_index = resolved_frontend_dist / "index.html"
+    if settings.environment.lower() == "production" and not frontend_index.is_file():
+        raise RuntimeError(f"TEN dashboard build is missing: expected {frontend_index}")
     configure_logging(settings.log_level)
     logger = logging.getLogger(__name__)
 
@@ -303,6 +347,21 @@ def create_app() -> FastAPI:
     @application.exception_handler(TenError)
     async def handle_ten_error(_: Request, exc: TenError) -> JSONResponse:
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
+
+    # Static assets and SPA fallback are deliberately registered after every API router.
+    assets_directory = resolved_frontend_dist / "assets"
+    if assets_directory.is_dir():
+        application.mount("/assets", StaticFiles(directory=assets_directory), name="frontend-assets")
+    application.add_middleware(SpaNavigationMiddleware, index_file=frontend_index)
+
+    @application.get("/{spa_path:path}", include_in_schema=False)
+    async def spa_fallback(spa_path: str) -> Response:
+        route = f"/{spa_path}" if spa_path else "/"
+        if route not in SPA_ROUTES:
+            raise HTTPException(status_code=404, detail="Not Found")
+        if not frontend_index.is_file():
+            raise HTTPException(status_code=503, detail="TEN dashboard build is unavailable: frontend/dist/index.html is missing")
+        return FileResponse(frontend_index)
 
     return application
 
