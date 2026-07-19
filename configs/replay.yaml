@@ -1,3 +1,75 @@
-enabled: false
-clock_mode: deterministic
-checkpoint_interval: 1000
+enabled: true
+engine:
+  version: 1.0.0
+  schema_version: "1.0"
+  ordering_version: "1.0"
+  graph_version: "1.0"
+limits:
+  max_instruments: 10
+  max_timeframes: 7
+  max_duration_days: 90
+  max_events_per_session: 10000000
+  max_concurrent_sessions: 4
+  max_sessions_per_owner: 2
+  max_step_units: 100
+  max_history_range_days: 365
+  max_metadata_bytes: 4096
+processing:
+  source_batch_size: 1000
+  event_queue_capacity: 5000
+  timestamp_group_limit: 50000
+  generated_event_limit_per_timestamp: 10000
+  max_chain_depth: 32
+  event_processing_timeout_seconds: 30
+  timestamp_group_timeout_seconds: 120
+speed:
+  default_mode: maximum_speed
+  max_multiplier: 1000
+  max_real_time_idle_wait_seconds: 60
+checkpoint:
+  enabled: true
+  every_events: 10000
+  every_virtual_seconds: 3600
+  on_pause: true
+  on_shutdown: true
+  after_timestamp_group: false
+  retain_latest: 20
+worker:
+  enabled: true
+  embedded_api_worker: false
+  max_concurrency: 2
+  poll_interval_seconds: 2
+  lease_seconds: 30
+  heartbeat_seconds: 10
+  graceful_shutdown_seconds: 30
+isolation:
+  require_replay_event_bus: true
+  require_replay_feature_store: true
+  allow_live_event_publication: false
+  allow_live_feature_writes: false
+determinism:
+  fail_on_unpinned_engine_version: true
+  fail_on_unpinned_policy_version: true
+  fail_on_mutable_dataset: true
+  produce_semantic_hash: true
+point_in_time:
+  strict: true
+  fail_on_latest_query: true
+  future_clock_skew_seconds: 0
+trace:
+  enabled: false
+  max_records_per_session: 100000
+  payload_storage: metadata_only
+retention:
+  completed_days: 90
+  failed_days: 30
+  cancelled_days: 30
+  cleanup_batch_size: 100
+events:
+  publish_lifecycle_events: true
+  publish_progress_events: true
+  progress_event_interval_seconds: 5
+  publish_full_trace_events: false
+approved_instruments: [XAUUSD]
+approved_timeframes: [M1, M5, M15, M30, H1, H4, D1]
+approved_sources: [historical_candles, economic_calendar]

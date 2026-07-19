@@ -12,6 +12,6 @@
 | Signal decision | Trusted persisted `AIScoreSnapshot` plus event/regime context | `SignalDecision` | Fail-closed eligibility, observation, blocking, sufficiency, validity, cooldown, and reversal policy | Extend approved rule/policy registries; execution remains prohibited |
 | Signal | All validated engine results | `Signal` | Apply risk gating and create entry/stop/target scenarios | Implement `SignalEngine`; execution is out of scope |
 | Market regime | Feature snapshot | `MarketRegimeResult` | Infrastructure only; no detection | Implement `MarketRegimeEngine` and enable its flag |
-| Replay | Historical event source | `ReplayState` | Infrastructure only; no simulation | Implement `ReplayEngine` and enable its flag |
+| Replay | Version-pinned point-in-time historical sources | `ReplaySession`, checkpoints, trace and analytical output references | Deterministic reconstruction of historical analytical behavior | Add typed source/processor adapters; backtesting, P&L and execution remain out of scope |
 
 Baseline analyzers are intentionally transparent and deterministic. Runtime instances are selected by the registry, never directly constructed by the pipeline. Results are foundations for research, not claims that every future capability listed in the project vision is already implemented. All timestamps must be timezone-aware, all external observations must retain provider provenance, and all scoring changes must be replayable against frozen inputs.

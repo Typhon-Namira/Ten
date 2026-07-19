@@ -154,3 +154,7 @@ TEN includes a deterministic, explainable, point-in-time-safe AI Scoring Engine 
 ## Signal Decision Engine
 
 TEN includes a deterministic, fail-closed [Signal Decision Engine Production 1.0](docs/SIGNAL_DECISION_ENGINE.md). It loads trusted persisted AI Scoring snapshots and applies versioned integrity, freshness, evidence, risk, event, regime, conflict, dependency, duplicate, cooldown, reversal, and validity rules. Outputs are analytical states (`eligible`, `observe_only`, `blocked`, `insufficient_evidence`, `expired`, or `invalid`)—never orders or trading instructions.
+
+## Replay Engine
+
+TEN includes a deterministic, point-in-time-safe [Replay Engine Production 1.0](docs/REPLAY_ENGINE.md). It merges version-pinned historical sources in canonical order, advances an isolated virtual clock, checkpoints durable progress, supports distributed worker leases and safe recovery, and records semantic hashes for reproducibility comparisons. Replay reconstructs analytical behavior; it is not backtesting, P&L simulation, brokerage, or order execution.

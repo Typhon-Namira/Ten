@@ -81,3 +81,32 @@ export interface SignalDecisionSnapshot {
   mode: 'live' | 'replay'
 }
 
+export type ReplayStatus = 'created' | 'validating' | 'ready' | 'running' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'recovering'
+export type ReplayMode = 'maximum_speed' | 'accelerated' | 'real_time' | 'step'
+
+export interface ReplaySessionOverview {
+  replay_id: string
+  request_fingerprint: string
+  status: ReplayStatus
+  request: {
+    name: string | null
+    instruments: string[]
+    timeframes: string[]
+    start_at: string
+    end_at: string
+    mode: ReplayMode
+    speed_multiplier: string | null
+    dataset: { dataset_id: string; dataset_version: string; manifest_hash: string }
+  }
+  virtual_cursor_at: string
+  processed_events: number
+  generated_events: number
+  progress_percent: string | null
+  latest_checkpoint_id: string | null
+  semantic_output_hash: string
+  failure: { category: string; reason_code: string; detail: string } | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+}
+

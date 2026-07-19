@@ -56,3 +56,9 @@ AI score responses are analytical, non-executing context. Confidence measures ev
 `GET /signal-decisions/latest` returns only a currently active, non-expired decision. `/history`, `/{decision_id}`, `/{decision_id}/rules`, and `/{decision_id}/explanation` expose bounded immutable history and structured reasoning. Valid blocked and insufficient decisions return HTTP 200 because they are successful policy evaluations. Missing trusted snapshots return 404; validation and policy errors return 422.
 
 Responses contain analytical direction, state, eligibility metadata, validity, blockers, warnings, policy versions, and an explicit safety notice. They contain no execution, order, position-size, entry, stop-loss, or take-profit fields.
+
+# Replay Engine
+
+`GET /replays/health`, `/config`, and `/metrics` expose operational state. `POST /replays` creates a bounded request against an immutable dataset identity and query cutoff. Control routes provide start, pause, resume, cancel, and single-step actions. Read routes expose sessions, checkpoints, transitions, summaries, output references, AI-score references, Signal Decision references, and bounded trace records. `POST /replays/compare` compares compatible completed runs by semantic output hash.
+
+Replay reconstructs analytical behavior only. It does not simulate orders, fills, positions, brokerage, profit, loss, or performance.

@@ -5,6 +5,6 @@ flags:
   EnableVolumeProfile: true
   EnableEconomicFilter: true
   EnableAI: true
-  EnableReplay: false
+  EnableReplay: true
   EnableMarketRegime: true
   EnableDashboardModules: true

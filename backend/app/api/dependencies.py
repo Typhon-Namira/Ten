@@ -11,6 +11,7 @@ from backend.app.engines.market_regime_engine import MarketRegimeService
 from backend.app.engines.economic_calendar_engine import EconomicCalendarService
 from backend.app.engines.ai_scoring_engine import AIScoringService
 from backend.app.engines.signal_decision_engine import SignalDecisionService
+from backend.app.engines.replay_engine import ReplayService
 
 
 def get_signal_repository(request: Request) -> SignalRepository:
@@ -55,3 +56,7 @@ def get_ai_scoring_service(request: Request) -> AIScoringService:
 
 def get_signal_decision_service(request: Request) -> SignalDecisionService:
     return cast(SignalDecisionService, request.app.state.signal_decision_service)
+
+
+def get_replay_service(request: Request) -> ReplayService:
+    return cast(ReplayService, request.app.state.replay_service)

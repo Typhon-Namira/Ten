@@ -21,4 +21,9 @@ signal_decision:
   deterministic: true
   fail_closed: true
   trade_execution: false
+replay:
+  deterministic: true
+  point_in_time_safe: true
+  isolated: true
+  trade_execution: false
 

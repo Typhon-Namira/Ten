@@ -30,5 +30,5 @@ engines:
     enabled: true
     version: 1.0.0
   replay:
-    enabled: false
+    enabled: true
     version: 1.0.0

@@ -1,20 +1,42 @@
-from datetime import date
-from typing import Any, NoReturn
 from collections.abc import Mapping
+from datetime import date
+from typing import Any
 
-from backend.app.core.exceptions import ConfigurationError
 from backend.app.engines.common import EngineLifecycleStatus, EngineMetadata
+from backend.app.events import Event
 from backend.app.services.engine_factory import EngineBuildContext, EngineFactory
 from backend.app.services.pipeline_contracts import EngineExecutionResult, PipelineExecutionContext
 
-
-def _build(_: EngineBuildContext, __: Mapping[str, Any]) -> NoReturn:
-    raise ConfigurationError("Replay engine infrastructure is not implemented")
+from .config import ReplayConfig
 
 
-async def _execute(_: Any, __: PipelineExecutionContext) -> EngineExecutionResult:
-    raise ConfigurationError("Replay engine infrastructure is not implemented")
+def _build(_: EngineBuildContext, config: Mapping[str, Any]) -> ReplayConfig:
+    return ReplayConfig.model_validate(config)
+
+
+async def _execute(config: ReplayConfig, _: PipelineExecutionContext) -> EngineExecutionResult:
+    return EngineExecutionResult(
+        output={"status": "controlled_by_replay_worker", "trade_execution": False},
+        features={"version": config.engine.version, "historical_reconstruction": True},
+        namespace="replay",
+        event_type=Event,
+    )
 
 
 def register(factory: EngineFactory) -> None:
-    factory.register(EngineMetadata(name="replay", version="1.0.0", compatibility_version="1.0", created_date=date(2026, 7, 16), status=EngineLifecycleStatus.EXPERIMENTAL, dependencies=("market_data",), description="Future historical replay and simulation contract; execution intentionally absent.", enabled=False, config_key="replay", feature_flag="EnableReplay"), _build, _execute)
+    factory.register(
+        EngineMetadata(
+            name="replay",
+            version="1.0.0",
+            compatibility_version="1.0",
+            created_date=date(2026, 7, 19),
+            status=EngineLifecycleStatus.STABLE,
+            dependencies=("market_data", "ai_scoring", "signal_decision"),
+            description="Deterministic point-in-time historical reconstruction with isolated events, durable checkpoints and database leases.",
+            enabled=True,
+            config_key="replay",
+            feature_flag="EnableReplay",
+        ),
+        _build,
+        _execute,
+    )

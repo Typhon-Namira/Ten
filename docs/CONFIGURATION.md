@@ -31,7 +31,7 @@ TEN treats YAML as the runtime composition source.
 | `signal_decision.yaml` | Fail-closed analytical decision policy, rules, validity, and replay controls |
 | `signal.yaml` | Scenario construction settings |
 | `market_regime.yaml` | Disabled future regime contract |
-| `replay.yaml` | Disabled future replay contract |
+| `replay.yaml` | Strict Replay Production 1.0 ordering, graph, limits, speed, checkpoint, lease, isolation, point-in-time, trace, retention, and source policy |
 
 `YamlConfigRepository` restricts names to safe stems, uses `yaml.safe_load`, requires mapping roots, and validates documents into Pydantic models. Secrets remain environment variables.
 
@@ -46,3 +46,7 @@ The versioned Institutional Flow configuration controls evidence limits and age,
 # Signal Decision
 
 `configs/signal_decision.yaml` defines the approved policy/version, exhaustive AI-label direction mapping, observation/eligibility thresholds, hard risk and quality gates, conflict penalty ceiling, timeframe freshness windows, Economic Calendar phases, exhaustive Market Regime outcomes, cooldown, reversal, hysteresis, validity, API limits, retention, persistence policy, and replay publication controls. Pydantic validation rejects unknown keys, missing mappings/timeframes, overlapping thresholds, negative durations, invalid versions, unknown outcomes, and zero validity. YAML never selects arbitrary imports or executable expressions.
+
+# Replay
+
+`configs/replay.yaml` is fail-closed and strictly validates compatibility, canonical ordering, the dependency graph, approved scope and sources, resource bounds, speed, checkpoints, worker leases, isolation, deterministic hashing, point-in-time enforcement, trace limits, retention, and event-cycle ceilings. It cannot import providers or execute arbitrary expressions. See [REPLAY_ENGINE.md](REPLAY_ENGINE.md).

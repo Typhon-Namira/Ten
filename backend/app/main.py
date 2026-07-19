@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 import logging
 
 from fastapi import FastAPI, Request, status
@@ -24,6 +25,23 @@ from backend.app.engines.market_regime_engine import InMemoryMarketRegimeReposit
 from backend.app.engines.economic_calendar_engine import EconomicCalendarConfig, EconomicCalendarRepository, EconomicCalendarService, InMemoryEconomicCalendarRepository, SqlAlchemyEconomicCalendarRepository, build_providers
 from backend.app.engines.ai_scoring_engine import AIScoringConfig, AIScoringRepository, AIScoringService, InMemoryAIScoringRepository, SqlAlchemyAIScoringRepository
 from backend.app.engines.signal_decision_engine import InMemorySignalDecisionRepository, SignalDecisionConfig, SignalDecisionRepository, SignalDecisionService, SqlAlchemySignalDecisionRepository
+from backend.app.engines.replay_engine import (
+    HistoricalSourceRegistry,
+    InMemoryHistoricalSource,
+    InMemoryReplayRepository,
+    ReplayConfig,
+    ReplayCoordinator,
+    ReplayDatasetReference,
+    ReplayDatasetRegistry,
+    ReplayRepository,
+    ReplayService,
+    ReplayWorker,
+    SqlAlchemyEconomicRevisionSource,
+    SqlAlchemyHistoricalCandleSource,
+    SqlAlchemyReplayRepository,
+    dataset_manifest_hash,
+    production_replay_registry,
+)
 from backend.app.core.database.base import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
@@ -54,6 +72,8 @@ def create_app() -> FastAPI:
         app.state.economic_calendar_database_session = None
         app.state.ai_scoring_database_session = None
         app.state.signal_decision_database_session = None
+        app.state.replay_database_session = None
+        app.state.replay_source_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         try:
@@ -72,6 +92,8 @@ def create_app() -> FastAPI:
             app.state.economic_calendar_database_session = session_factory()
             app.state.ai_scoring_database_session = session_factory()
             app.state.signal_decision_database_session = session_factory()
+            app.state.replay_database_session = session_factory()
+            app.state.replay_source_database_session = session_factory()
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
@@ -164,9 +186,48 @@ def create_app() -> FastAPI:
             repository_mode=decision_mode,
         )
         await app.state.signal_decision_service.start()
+        replay_config = configs.load_model("replay", ReplayConfig)
+        replay_repository: ReplayRepository = InMemoryReplayRepository()
+        replay_mode = "memory"
+        replay_sources = HistoricalSourceRegistry((InMemoryHistoricalSource("historical_candles", ()),))
+        if app.state.replay_database_session is not None and app.state.replay_source_database_session is not None:
+            replay_repository = SqlAlchemyReplayRepository(app.state.replay_database_session)
+            replay_sources = HistoricalSourceRegistry(
+                (
+                    SqlAlchemyHistoricalCandleSource(app.state.replay_source_database_session),
+                    SqlAlchemyEconomicRevisionSource(app.state.replay_source_database_session),
+                )
+            )
+            replay_mode = "postgresql"
+        dataset_created_at = datetime(2026, 7, 19, tzinfo=UTC)
+        dataset_id = "ten-historical-postgres"
+        dataset_version = "2026-07-19"
+        dataset = ReplayDatasetReference(
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+            source_name="historical_candles",
+            created_at=dataset_created_at,
+            available_from=datetime(2000, 1, 1, tzinfo=UTC),
+            available_until=dataset_created_at,
+            manifest_hash=dataset_manifest_hash(dataset_id, dataset_version, dataset_created_at, "historical_candles"),
+        )
+        replay_coordinator = ReplayCoordinator(
+            replay_repository,
+            ReplayDatasetRegistry((dataset,)),
+            replay_sources,
+            production_replay_registry(),
+            replay_config,
+        )
+        app.state.replay_service = ReplayService(replay_repository, replay_coordinator, app.state.pipeline_manager.event_bus, replay_config, repository_mode=replay_mode)
+        app.state.replay_worker = ReplayWorker(app.state.replay_service, replay_config)
+        await app.state.replay_service.start()
+        if replay_config.worker.enabled and replay_config.worker.embedded_api_worker:
+            app.state.replay_worker.start()
         try:
             yield
         finally:
+            await app.state.replay_worker.stop()
+            await app.state.replay_service.stop()
             await app.state.signal_decision_service.stop()
             await app.state.ai_scoring_service.stop()
             await app.state.economic_calendar_service.stop()
@@ -177,6 +238,10 @@ def create_app() -> FastAPI:
                 await app.state.ai_scoring_database_session.close()
             if app.state.signal_decision_database_session is not None:
                 await app.state.signal_decision_database_session.close()
+            if app.state.replay_source_database_session is not None:
+                await app.state.replay_source_database_session.close()
+            if app.state.replay_database_session is not None:
+                await app.state.replay_database_session.close()
             if app.state.market_regime_database_session is not None:
                 await app.state.market_regime_database_session.close()
             if app.state.institutional_flow_database_session is not None:
