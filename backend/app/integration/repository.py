@@ -23,6 +23,7 @@ class IntegrationRepository(Protocol):
     async def processed(self, event_id: str) -> bool: ...
     async def mark_processed(self, event_id: str) -> None: ...
     async def save_snapshot(self, value: IntegrationSnapshot) -> IntegrationSnapshot: ...
+    async def latest_snapshot(self, instrument: str | None = None, timeframe: str | None = None) -> IntegrationSnapshot | None: ...
     async def save_signal(self, value: OperationalSignal) -> OperationalSignal: ...
     async def latest_signal(self, instrument: str | None = None, timeframe: str | None = None) -> OperationalSignal | None: ...
     async def signals(self, limit: int = 100) -> tuple[OperationalSignal, ...]: ...
@@ -85,6 +86,11 @@ class InMemoryIntegrationRepository:
         async with self._lock:
             self._snapshots[value.snapshot_id] = value
         return value
+
+    async def latest_snapshot(self, instrument: str | None = None, timeframe: str | None = None) -> IntegrationSnapshot | None:
+        async with self._lock:
+            values = [item for item in self._snapshots.values() if (instrument is None or item.instrument == instrument) and (timeframe is None or item.timeframe == timeframe)]
+        return max(values, key=lambda item: (item.analytical_boundary, str(item.snapshot_id)), default=None)
 
     async def save_signal(self, value: OperationalSignal) -> OperationalSignal:
         async with self._lock:
@@ -173,6 +179,15 @@ class SqlAlchemyIntegrationRepository:
         await self.session.commit()
         self._metrics["snapshots"] += 1
         return value
+
+    async def latest_snapshot(self, instrument: str | None = None, timeframe: str | None = None) -> IntegrationSnapshot | None:
+        query = select(IntegrationSnapshotRecord)
+        if instrument:
+            query = query.where(IntegrationSnapshotRecord.instrument == instrument)
+        if timeframe:
+            query = query.where(IntegrationSnapshotRecord.timeframe == timeframe)
+        record = (await self.session.scalars(query.order_by(IntegrationSnapshotRecord.analytical_boundary.desc()).limit(1))).first()
+        return IntegrationSnapshot.model_validate(record.payload) if record else None
 
     async def save_signal(self, value: OperationalSignal) -> OperationalSignal:
         await self.session.execute(insert(OperationalSignalRecord).values(operational_signal_id=value.operational_signal_id, semantic_hash=value.semantic_hash, decision_id=value.decision_id, ai_score_id=value.ai_score_id, snapshot_id=value.snapshot_id, trace_id=value.trace_id, mode=value.mode.value, instrument=value.instrument, timeframe=value.timeframe, effective_at=value.effective_at, expires_at=value.expires_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["semantic_hash"]))

@@ -18,8 +18,9 @@ from backend.app.core.config import Settings, get_settings
 from backend.app.core.exceptions import TenError
 from backend.app.core.logging import configure_logging
 from backend.app.core.config import YamlConfigRepository
-from backend.app.engines.market_data_engine import build_market_data_service
+from backend.app.engines.market_data_engine import MarketDataWorker, Timeframe, build_market_data_service
 from backend.app.engines.market_data_engine.config import MarketDataConfig
+from backend.app.engines.market_data_engine.repository import InMemoryMarketDataRepository, MarketDataRepository, SqlAlchemyMarketDataRepository
 from backend.app.engines.smc_engine import SMCConfig, SMCService
 from backend.app.engines.smc_engine.repository import InMemorySMCRepository, SMCRepository, SqlAlchemySMCRepository
 from backend.app.engines.liquidity_engine import InMemoryLiquidityRepository, LiquidityConfig, LiquidityRepository, LiquidityService, SqlAlchemyLiquidityRepository
@@ -49,7 +50,7 @@ from backend.app.engines.replay_engine import (
 from backend.app.core.database.base import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
-from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, SqlAlchemyIntegrationRepository
+from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, IntegrationWorker, SqlAlchemyIntegrationRepository
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -101,13 +102,18 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.settings = settings
         configs = YamlConfigRepository()
         app.state.signal_repository = InMemorySignalRepository()
         app.state.engine_registry = build_engine_registry(configs=configs)
         app.state.pipeline_manager = PipelineManager.from_yaml(app.state.engine_registry, configs)
-        market_config = configs.load_model("market_data", MarketDataConfig)
-        app.state.market_data_service = build_market_data_service(market_config)
-        app.state.market_data_service.event_bus = app.state.pipeline_manager.event_bus
+        market_config = configs.load_model("market_data", MarketDataConfig).model_copy(
+            update={
+                "symbols": settings.market_data_symbols,
+                "timeframes": tuple(Timeframe(item) for item in settings.market_data_timeframes),
+                "preferred_provider": settings.market_data_provider,
+            }
+        )
         smc_config = configs.load_model("smc", SMCConfig)
         app.state.smc_database_engine = None
         app.state.smc_database_session = None
@@ -121,6 +127,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         app.state.replay_database_session = None
         app.state.replay_source_database_session = None
         app.state.integration_database_session = None
+        app.state.market_data_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         try:
@@ -142,11 +149,29 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             app.state.replay_database_session = session_factory()
             app.state.replay_source_database_session = session_factory()
             app.state.integration_database_session = session_factory()
+            app.state.market_data_database_session = session_factory()
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
                 await database_engine.dispose()
             logger.warning("SMC database unavailable; using bounded in-memory persistence", extra={"engine": "smc", "error_type": type(exc).__name__})
+        market_repository: MarketDataRepository = InMemoryMarketDataRepository()
+        if app.state.market_data_database_session is not None:
+            market_repository = SqlAlchemyMarketDataRepository(app.state.market_data_database_session)
+        app.state.market_data_service = build_market_data_service(market_config)
+        app.state.market_data_service.repository = market_repository
+        app.state.market_data_service.event_bus = app.state.pipeline_manager.event_bus
+        logger.info(
+            "market_data.configuration",
+            extra={
+                "provider": settings.market_data_provider,
+                "configured_symbols": settings.market_data_symbols,
+                "timeframes": settings.market_data_timeframes,
+                "market_worker_enabled": settings.market_data_worker_enabled,
+                "integration_worker_enabled": settings.integration_worker_enabled,
+                "database_configured": app.state.market_data_database_session is not None,
+            },
+        )
         app.state.smc_service = SMCService(
             app.state.market_data_service,
             app.state.pipeline_manager.event_bus,
@@ -237,6 +262,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         integration_config = IntegrationConfig(
             enabled=settings.integration_enabled,
             live_pipeline_enabled=settings.live_pipeline_enabled,
+            limits={"maximum_candles": settings.market_data_bootstrap_candles},
+            policy={"stale_after_seconds": settings.max_candle_staleness_seconds},
             worker={"enabled": settings.integration_worker_enabled, "embedded_api_worker": False},
         )
         integration_repository: IntegrationRepository = InMemoryIntegrationRepository()
@@ -262,7 +289,11 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         if integration_config.enabled and integration_config.live_pipeline_enabled:
             await app.state.integration_service.start()
+        app.state.integration_worker = IntegrationWorker(app.state.integration_service)
         replay_config = configs.load_model("replay", ReplayConfig)
+        replay_config = replay_config.model_copy(
+            update={"worker": replay_config.worker.model_copy(update={"enabled": settings.replay_worker_enabled, "embedded_api_worker": settings.replay_worker_enabled})}
+        )
         replay_repository: ReplayRepository = InMemoryReplayRepository()
         replay_mode = "memory"
         replay_sources = HistoricalSourceRegistry((InMemoryHistoricalSource("historical_candles", ()),))
@@ -299,9 +330,24 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         await app.state.replay_service.start()
         if replay_config.worker.enabled and replay_config.worker.embedded_api_worker:
             app.state.replay_worker.start()
+        app.state.market_data_worker = MarketDataWorker(
+            app.state.market_data_service,
+            enabled=settings.market_data_worker_enabled,
+            symbols=settings.market_data_symbols,
+            timeframes=tuple(Timeframe(item) for item in settings.market_data_timeframes),
+            bootstrap_enabled=settings.market_data_bootstrap_enabled,
+            bootstrap_candles=settings.market_data_bootstrap_candles,
+            poll_seconds=settings.market_data_poll_seconds,
+            historical_analysis=app.state.integration_service.process_historical_candle,
+        )
+        app.state.market_data_worker.start()
+        if settings.integration_worker_enabled and integration_config.enabled and integration_config.live_pipeline_enabled:
+            app.state.integration_worker.start()
         try:
             yield
         finally:
+            await app.state.market_data_worker.stop()
+            await app.state.integration_worker.stop()
             await app.state.integration_service.stop()
             await app.state.replay_worker.stop()
             await app.state.replay_service.stop()
@@ -322,6 +368,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 await app.state.replay_database_session.close()
             if app.state.integration_database_session is not None:
                 await app.state.integration_database_session.close()
+            if app.state.market_data_database_session is not None:
+                await app.state.market_data_database_session.close()
             if app.state.market_regime_database_session is not None:
                 await app.state.market_regime_database_session.close()
             if app.state.institutional_flow_database_session is not None:

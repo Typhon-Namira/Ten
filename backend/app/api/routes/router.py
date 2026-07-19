@@ -14,6 +14,7 @@ from .signal_decisions import router as signal_decisions_router
 from .replays import router as replays_router
 from .status import router as status_router
 from .integration import router as integration_router
+from .system import router as system_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -30,3 +31,4 @@ api_router.include_router(signal_decisions_router)
 api_router.include_router(replays_router)
 api_router.include_router(status_router)
 api_router.include_router(integration_router)
+api_router.include_router(system_router)

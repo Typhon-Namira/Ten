@@ -39,6 +39,32 @@ class MarketSession(StrEnum):
     HOLIDAY = "holiday"
 
 
+class MarketStatusCode(StrEnum):
+    OPEN = "OPEN"
+    CLOSED_WEEKEND = "CLOSED_WEEKEND"
+    CLOSED_DAILY_BREAK = "CLOSED_DAILY_BREAK"
+    HOLIDAY_OR_PROVIDER_CLOSED = "HOLIDAY_OR_PROVIDER_CLOSED"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketScheduleStatus(BaseModel):
+    market_status: MarketStatusCode
+    market_open: bool
+    active_session: MarketSession | None
+    closure_reason: str | None = None
+    next_expected_open_at: datetime | None = None
+    server_time_utc: datetime
+
+    @field_validator("server_time_utc", "next_expected_open_at")
+    @classmethod
+    def schedule_timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("market schedule timestamps must be timezone-aware")
+        return value.astimezone(UTC)
+
+
 class DataQualityLevel(StrEnum):
     NATIVE = "native"
     VERIFIED = "verified"

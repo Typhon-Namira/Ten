@@ -84,6 +84,12 @@ class FailingProvider(MarketDataProvider):
         raise RuntimeError("down")
 
 
+class ReversedDuplicateProvider(InMemoryMarketDataProvider):
+    async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        values = await super().fetch_history(request)
+        return [*reversed(values), values[-1]]
+
+
 @pytest.mark.asyncio
 async def test_provider_manager_fails_over_and_records_health() -> None:
     registry = ProviderRegistry()
@@ -119,6 +125,21 @@ async def test_history_realtime_replay_and_events(tmp_path: Path) -> None:
     assert exact == candles[2]
     assert any(isinstance(event, HistoricalUpdated) for event in bus.history())
     assert any(isinstance(event, NewCandle) for event in bus.history())
+
+
+@pytest.mark.asyncio
+async def test_history_normalizes_provider_order_and_duplicates(tmp_path: Path) -> None:
+    registry = ProviderRegistry()
+    expected = series()
+    registry.register(ReversedDuplicateProvider(expected))
+    service = MarketDataService(
+        ProviderManager(registry, preferred=ProviderName.MEMORY.value),
+        repository=InMemoryMarketDataRepository(),
+        cache=MarketDataCache(tmp_path),
+    )
+    result = await service.history("XAUUSD", Timeframe.M1, refresh=True)
+    assert result == expected
+    assert await service.repository.count("XAUUSD", Timeframe.M1) == len(expected)
 
 
 def test_sessions_are_dst_aware_and_weekends_close() -> None:

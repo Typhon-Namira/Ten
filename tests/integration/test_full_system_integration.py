@@ -47,6 +47,11 @@ class FakeDecision:
         return SimpleNamespace(decision_id=uuid4(), input_fingerprint="b" * 64, direction=SimpleNamespace(value="neutral"), state=SimpleNamespace(value="blocked"), confidence_score=50.0, as_of=NOW, valid_until=NOW + timedelta(minutes=15), blockers=(SimpleNamespace(reason_code="analytical_only"),), warnings=(), decision_policy_version="1.0.0")
 
 
+class FakeEligibleDecision(FakeDecision):
+    async def evaluate(self, request: object) -> object:
+        return SimpleNamespace(decision_id=uuid4(), input_fingerprint="c" * 64, direction=SimpleNamespace(value="bullish"), state=SimpleNamespace(value="eligible"), confidence_score=82.0, as_of=NOW, valid_until=NOW + timedelta(minutes=15), blockers=(), warnings=(), decision_policy_version="1.0.0")
+
+
 NOW = datetime(2026, 7, 19, 12, 30, tzinfo=UTC)
 
 
@@ -61,19 +66,15 @@ def service(bus: InMemoryEventBus, repository: InMemoryIntegrationRepository) ->
 
 
 @pytest.mark.asyncio
-async def test_market_event_drives_one_persisted_traceable_signal() -> None:
+async def test_blocked_market_event_persists_decision_without_false_signal() -> None:
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     coordinator = service(bus, repository)
     await coordinator.start()
     event = NewCandle(correlation_id=uuid4(), source="market_data", payload=candle().model_dump(mode="json"))
     await bus.publish(event)
     await bus.publish(event)
-    signals = await repository.signals()
-    assert len(signals) == 1
-    assert signals[0].provider_provenance == ("golden",)
-    assert signals[0].analytical_only and not signals[0].trade_execution
-    trace = await repository.trace(signals[0].trace_id)
-    assert trace and trace[0].output_references[-1] == str(signals[0].operational_signal_id)
+    assert await repository.signals() == ()
+    assert repository.metrics()["snapshots"] == 1
     assert coordinator.health()["ready"] is True
     await coordinator.stop()
 
@@ -119,3 +120,30 @@ async def test_missing_mandatory_evidence_blocks_scoring() -> None:
     assert await coordinator.process(envelope) is None
     assert repository.metrics()["snapshots"] == 1
     assert await repository.signals() == ()
+
+
+@pytest.mark.asyncio
+async def test_historical_bootstrap_runs_replay_analysis_without_live_signal() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    await coordinator.process_historical_candle(candle())
+    await coordinator.process_historical_candle(candle())
+    snapshot = await repository.latest_snapshot("XAUUSD", "M15")
+    assert snapshot is not None
+    assert snapshot.mode == IntegrationMode.REPLAY
+    assert repository.metrics()["snapshots"] == 1
+    assert await repository.signals() == ()
+
+
+@pytest.mark.asyncio
+async def test_only_eligible_live_decision_publishes_traceable_scenario() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    coordinator.signal_decision = FakeEligibleDecision()
+    signal = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+    assert signal is not None
+    assert signal.state == "eligible"
+    assert signal.mode == IntegrationMode.LIVE
+    assert signal.provider_provenance == ("golden",)
+    trace = await repository.trace(signal.trace_id)
+    assert trace and trace[0].output_references[-1] == str(signal.operational_signal_id)

@@ -4,7 +4,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,10 @@ class MarketDataRepository(ABC):
     @abstractmethod
     async def candle_at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> Candle | None:
         """Return the exact candle visible at a historical timestamp."""
+
+    @abstractmethod
+    async def count(self, symbol: str, timeframe: Timeframe) -> int:
+        """Return the durable candle count for one series."""
 
 
 class InMemoryMarketDataRepository(MarketDataRepository):
@@ -65,14 +69,24 @@ class InMemoryMarketDataRepository(MarketDataRepository):
         candles = await self.history(symbol, timeframe, end=timestamp, limit=1)
         return candles[-1] if candles else None
 
+    async def count(self, symbol: str, timeframe: Timeframe) -> int:
+        normalized = canonical_symbol(symbol)
+        async with self._lock:
+            return sum(1 for item_symbol, item_timeframe, _ in self._historical if item_symbol == normalized and item_timeframe == timeframe)
+
 
 class SqlAlchemyMarketDataRepository(MarketDataRepository):
     """PostgreSQL adapter using bulk conflict-safe writes and indexed range reads."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self._lock = asyncio.Lock()
 
     async def upsert_historical(self, candles: list[Candle]) -> int:
+        async with self._lock:
+            return await self._upsert_historical(candles)
+
+    async def _upsert_historical(self, candles: list[Candle]) -> int:
         if not candles:
             return 0
         values = [self._values(item) for item in candles]
@@ -86,16 +100,17 @@ class SqlAlchemyMarketDataRepository(MarketDataRepository):
         return len(candles)
 
     async def append_realtime(self, candle: Candle) -> None:
-        self.session.add(
-            RealtimeCandleRecord(
-                symbol=candle.symbol,
-                timeframe=candle.timeframe.value,
-                timestamp=candle.timestamp,
-                payload=candle.model_dump(mode="json"),
-                received_at=candle.ingestion_timestamp,
+        async with self._lock:
+            self.session.add(
+                RealtimeCandleRecord(
+                    symbol=candle.symbol,
+                    timeframe=candle.timeframe.value,
+                    timestamp=candle.timestamp,
+                    payload=candle.model_dump(mode="json"),
+                    received_at=candle.ingestion_timestamp,
+                )
             )
-        )
-        await self.upsert_historical([candle])
+            await self._upsert_historical([candle])
 
     async def history(self, symbol: str, timeframe: Timeframe, start: datetime | None = None, end: datetime | None = None, limit: int = 500) -> list[Candle]:
         statement = select(HistoricalCandleRecord).where(
@@ -107,12 +122,21 @@ class SqlAlchemyMarketDataRepository(MarketDataRepository):
         if end is not None:
             statement = statement.where(HistoricalCandleRecord.timestamp <= end)
         statement = statement.order_by(HistoricalCandleRecord.timestamp.desc()).limit(limit)
-        records = list((await self.session.scalars(statement)).all())
+        async with self._lock:
+            records = list((await self.session.scalars(statement)).all())
         return [self._candle(item) for item in reversed(records)]
 
     async def candle_at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> Candle | None:
         candles = await self.history(symbol, timeframe, end=timestamp, limit=1)
         return candles[-1] if candles else None
+
+    async def count(self, symbol: str, timeframe: Timeframe) -> int:
+        query = select(func.count()).select_from(HistoricalCandleRecord).where(
+            HistoricalCandleRecord.symbol == canonical_symbol(symbol),
+            HistoricalCandleRecord.timeframe == timeframe.value,
+        )
+        async with self._lock:
+            return int((await self.session.scalar(query)) or 0)
 
     @staticmethod
     def _values(candle: Candle) -> dict[str, object]:

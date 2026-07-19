@@ -3,18 +3,21 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
+import logging
 from time import perf_counter
 from typing import Any
 
 from backend.app.engines.ai_scoring_engine import ScoreMode, ScoreRequest
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.engines.market_data_engine.events import NewCandle
-from backend.app.engines.signal_decision_engine import DecisionMode, DecisionRequest
+from backend.app.engines.signal_decision_engine import DecisionMode, DecisionRequest, DecisionState
 from backend.app.events import Event, EventBus
 
 from .config import IntegrationConfig
-from .models import CanonicalEventEnvelope, DataQualityIssue, DataQualityStatus, EvidenceReference, IntegrationMode, IntegrationSnapshot, IntegrationTraceRecord, OperationalSignal, SnapshotStatus, TraceStatus, canonical_hash, semantic_uuid
+from .models import CanonicalEventEnvelope, DataQualityIssue, DataQualityStatus, EvidenceReference, IntegrationMode, IntegrationSnapshot, IntegrationTraceRecord, MarketCandlePayload, OperationalSignal, SnapshotStatus, TraceStatus, canonical_hash, semantic_uuid
 from .repository import IntegrationRepository
+
+logger = logging.getLogger(__name__)
 
 
 class FullSystemIntegrationService:
@@ -83,7 +86,8 @@ class FullSystemIntegrationService:
                 await self.repository.mark_processed(envelope.event_id)
                 await self._trace(envelope, TraceStatus.BLOCKED, "quality", (), ())
                 return None
-            age = (self.clock() - envelope.available_at).total_seconds()
+            assert isinstance(envelope.payload, MarketCandlePayload)
+            age = (self.clock() - envelope.payload.close_time).total_seconds()
             if age > self.config.policy.stale_after_seconds:
                 await self._quality_issue(envelope, DataQualityStatus.STALE, ("final_candle_stale",))
                 await self.repository.mark_processed(envelope.event_id)
@@ -91,12 +95,25 @@ class FullSystemIntegrationService:
                 return None
             return await self._run(envelope)
 
-    async def _run(self, envelope: CanonicalEventEnvelope) -> OperationalSignal | None:
+    async def process_historical_candle(self, candle: Candle) -> None:
+        """Build persisted replay-mode evidence during bootstrap without a live signal."""
+        envelope = CanonicalEventEnvelope.historical_candle(candle, semantic_uuid("bootstrap", candle.symbol, candle.timeframe.value), self.clock())
+        if await self.repository.processed(envelope.event_id):
+            return
+        assert envelope.instrument_id and envelope.timeframe
+        self.config.instrument(candle.symbol)
+        lock = self._locks.setdefault((envelope.instrument_id, envelope.timeframe), asyncio.Lock())
+        async with lock:
+            if not await self.repository.processed(envelope.event_id):
+                await self._run(envelope, publish_signal=False)
+
+    async def _run(self, envelope: CanonicalEventEnvelope, *, publish_signal: bool = True) -> OperationalSignal | None:
         started = perf_counter()
         symbol, timeframe_name = envelope.instrument_id or "", envelope.timeframe
         assert timeframe_name is not None
         timeframe = Timeframe(timeframe_name)
         boundary = envelope.available_at
+        logger.info("snapshot.started", extra={"symbol": symbol, "timeframe": timeframe.value, "mode": envelope.mode.value, "candle_timestamp": boundary.isoformat()})
         candles = await self.market_data.history(symbol, timeframe, end=boundary, limit=self.config.limits.maximum_candles)
         outputs: list[tuple[str, object]] = []
         correlation = envelope.correlation_id
@@ -115,19 +132,29 @@ class FullSystemIntegrationService:
         missing = tuple(name for name in self.config.policy.required_evidence if name not in {item.engine for item in evidence})
         evidence_payload = [item.model_dump(mode="json") for item in evidence]
         snapshot_hash = canonical_hash({"event": envelope.event_id, "policy": self.config.policy.version, "evidence": evidence_payload, "missing": missing})
-        snapshot = IntegrationSnapshot(snapshot_id=semantic_uuid("snapshot", snapshot_hash), semantic_hash=snapshot_hash, mode=IntegrationMode.LIVE, instrument=symbol, timeframe=timeframe.value, analytical_boundary=boundary, market_event_id=envelope.event_id, evidence=tuple(evidence), missing_required=missing, data_quality_status=envelope.data_quality_status, status=SnapshotStatus.READY if not missing else SnapshotStatus.INSUFFICIENT_DATA, created_at=self.clock())
+        snapshot = IntegrationSnapshot(snapshot_id=semantic_uuid("snapshot", snapshot_hash), semantic_hash=snapshot_hash, mode=envelope.mode, instrument=symbol, timeframe=timeframe.value, analytical_boundary=boundary, market_event_id=envelope.event_id, evidence=tuple(evidence), missing_required=missing, data_quality_status=envelope.data_quality_status, status=SnapshotStatus.READY if not missing else SnapshotStatus.INSUFFICIENT_DATA, created_at=self.clock())
         await self.repository.save_snapshot(snapshot)
         if missing:
+            logger.warning("snapshot.incomplete", extra={"snapshot_id": str(snapshot.snapshot_id), "symbol": symbol, "timeframe": timeframe.value, "missing": missing})
             await self.repository.mark_processed(envelope.event_id)
             await self._trace(envelope, TraceStatus.BLOCKED, "snapshot_barrier", (envelope.event_id,), (str(snapshot.snapshot_id),), started)
             return None
-        score = await self.ai_scoring.calculate(ScoreRequest(instrument=symbol, timeframe=timeframe.value, as_of=boundary, mode=ScoreMode.LIVE))
-        decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=DecisionMode.LIVE))
+        score_mode = ScoreMode.LIVE if envelope.mode == IntegrationMode.LIVE else ScoreMode.REPLAY
+        decision_mode = DecisionMode.LIVE if envelope.mode == IntegrationMode.LIVE else DecisionMode.REPLAY
+        score = await self.ai_scoring.calculate(ScoreRequest(instrument=symbol, timeframe=timeframe.value, as_of=boundary, mode=score_mode))
+        decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=decision_mode))
+        logger.info("signal_decision.completed", extra={"snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "state": decision.state.value, "mode": envelope.mode.value})
         blocker_codes = tuple(item.reason_code for item in decision.blockers)
         warning_codes = tuple(item.reason_code for item in decision.warnings)
         semantic = canonical_hash({"snapshot": snapshot.semantic_hash, "score": score.metadata.input_fingerprint, "decision": decision.input_fingerprint, "policies": (score.policy_version, decision.decision_policy_version)})
-        signal = OperationalSignal(operational_signal_id=semantic_uuid("signal", semantic), semantic_hash=semantic, decision_id=decision.decision_id, ai_score_id=score.snapshot_id, snapshot_id=snapshot.snapshot_id, trace_id=envelope.trace_id, market_event_id=envelope.event_id, instrument=symbol, timeframe=timeframe.value, mode=IntegrationMode.LIVE, direction=decision.direction.value, state=decision.state.value, confidence=decision.confidence_score, effective_at=decision.as_of, expires_at=decision.valid_until, data_quality_status=envelope.data_quality_status, provider_provenance=(envelope.source_name,), evidence=tuple(evidence), blockers=blocker_codes, warnings=warning_codes, ai_scoring_policy_version=score.policy_version, signal_decision_policy_version=decision.decision_policy_version, created_at=self.clock())
+        if not publish_signal or decision.state.value != DecisionState.ELIGIBLE.value:
+            await self.repository.mark_processed(envelope.event_id)
+            await self._trace(envelope, TraceStatus.COMPLETED, "full_system", (envelope.event_id,), (str(snapshot.snapshot_id), str(score.snapshot_id), str(decision.decision_id)), started)
+            logger.info("snapshot.completed", extra={"snapshot_id": str(snapshot.snapshot_id), "symbol": symbol, "timeframe": timeframe.value, "scenario_published": False, "duration_ms": (perf_counter() - started) * 1000})
+            return None
+        signal = OperationalSignal(operational_signal_id=semantic_uuid("signal", semantic), semantic_hash=semantic, decision_id=decision.decision_id, ai_score_id=score.snapshot_id, snapshot_id=snapshot.snapshot_id, trace_id=envelope.trace_id, market_event_id=envelope.event_id, instrument=symbol, timeframe=timeframe.value, mode=envelope.mode, direction=decision.direction.value, state=decision.state.value, confidence=decision.confidence_score, effective_at=decision.as_of, expires_at=decision.valid_until, data_quality_status=envelope.data_quality_status, provider_provenance=(envelope.source_name,), evidence=tuple(evidence), blockers=blocker_codes, warnings=warning_codes, ai_scoring_policy_version=score.policy_version, signal_decision_policy_version=decision.decision_policy_version, created_at=self.clock())
         signal = await self.repository.save_signal(signal)
+        logger.info("scenario.published", extra={"snapshot_id": str(snapshot.snapshot_id), "signal_id": str(signal.operational_signal_id), "symbol": symbol, "timeframe": timeframe.value})
         await self.repository.mark_processed(envelope.event_id)
         await self._trace(envelope, TraceStatus.COMPLETED, "full_system", (envelope.event_id,), (str(snapshot.snapshot_id), str(score.snapshot_id), str(decision.decision_id), str(signal.operational_signal_id)), started)
         return signal

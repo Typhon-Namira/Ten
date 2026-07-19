@@ -58,7 +58,11 @@ class MarketDataService:
         self.sync_status = SyncStatus.SYNCING
         try:
             raw = await self.manager.history(ProviderRequest(symbol=symbol, timeframe=timeframe, start=start, end=end, limit=limit))
-            report = self.validator.validate(raw)
+            unique = {(item.timestamp, canonical_symbol(item.symbol), item.timeframe): item for item in raw}
+            normalized = sorted(unique.values(), key=lambda item: item.timestamp)
+            if len(normalized) != len(raw):
+                logger.warning("market_data.duplicates_removed", extra={"symbol": symbol, "timeframe": timeframe.value, "duplicate_count": len(raw) - len(normalized)})
+            report = self.validator.validate(normalized)
             if any(anomaly.missing_count for anomaly in report.anomalies):
                 recovered = await self._recover_gaps(symbol, timeframe, report.candles, limit)
                 if recovered != report.candles:

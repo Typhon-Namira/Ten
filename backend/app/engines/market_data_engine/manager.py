@@ -31,6 +31,7 @@ class ProviderStatistics(BaseModel):
     healthy: bool = True
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
+    last_error: str | None = None
 
 
 class ProviderRegistry:
@@ -88,8 +89,8 @@ class ProviderManager:
             result = await provider.fetch_history(request)
             await self._record_success(provider_name, (perf_counter() - started) * 1000, result)
             return result
-        except Exception:
-            await self._record_failure(provider_name, (perf_counter() - started) * 1000)
+        except Exception as exc:
+            await self._record_failure(provider_name, (perf_counter() - started) * 1000, type(exc).__name__)
             raise
 
     async def _execute(self, symbol: str, timeframe: Timeframe, operation: Callable[[MarketDataProvider], Awaitable[ResultT]], *, realtime: bool) -> ResultT:
@@ -104,7 +105,7 @@ class ProviderManager:
                 self.current_provider = name
                 return result
             except Exception as exc:
-                await self._record_failure(name, (perf_counter() - started) * 1000)
+                await self._record_failure(name, (perf_counter() - started) * 1000, type(exc).__name__)
                 errors.append(f"{name}: {exc}")
         raise ProviderUnavailableError("all eligible providers failed: " + "; ".join(errors))
 
@@ -118,6 +119,7 @@ class ProviderManager:
             stats.last_latency_ms = latency
             stats.average_latency_ms += (latency - stats.average_latency_ms) / stats.successes
             stats.last_success_at = datetime.now(UTC)
+            stats.last_error = None
             candles = result if isinstance(result, list) else [result]
             timestamps = [item.timestamp for item in candles if isinstance(item, Candle)]
             stats.freshness_seconds = max(0, (datetime.now(UTC) - max(timestamps)).total_seconds()) if timestamps else None
@@ -127,7 +129,7 @@ class ProviderManager:
                 stats.healthy = True
             stats.quota = await self.registry.get(name).quota()
 
-    async def _record_failure(self, name: str, latency: float) -> None:
+    async def _record_failure(self, name: str, latency: float, error_type: str) -> None:
         async with self._lock:
             stats = self.statistics[name]
             stats.requests += 1
@@ -136,6 +138,7 @@ class ProviderManager:
             stats.consecutive_successes = 0
             stats.last_latency_ms = latency
             stats.last_failure_at = datetime.now(UTC)
+            stats.last_error = error_type
             stats.uptime_ratio = stats.successes / stats.requests
             stats.confidence = max(0, stats.uptime_ratio * 70 - stats.consecutive_failures * 10)
             if stats.consecutive_failures >= self.failure_threshold:

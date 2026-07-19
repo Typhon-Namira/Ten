@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { tenApi } from '../services/api'
-import type { AIScoreSnapshot, EngineStatus, MarketStatus, OperationalSignal, ReplaySessionOverview, Signal, SignalDecisionSnapshot } from '../types'
+import type { AIScoreSnapshot, EngineStatus, MarketStatus, OperationalSignal, ReplaySessionOverview, Signal, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 interface DashboardState {
   signals: Signal[]
@@ -10,6 +10,7 @@ interface DashboardState {
   signalDecision: SignalDecisionSnapshot | null
   operationalSignal: OperationalSignal | null
   replays: ReplaySessionOverview[]
+  diagnostics: SystemDiagnostics | null
   loading: boolean
   error: string | null
   refresh: () => Promise<void>
@@ -23,13 +24,14 @@ export function useDashboard(): DashboardState {
   const [signalDecision, setSignalDecision] = useState<SignalDecisionSnapshot | null>(null)
   const [operationalSignal, setOperationalSignal] = useState<OperationalSignal | null>(null)
   const [replays, setReplays] = useState<ReplaySessionOverview[]>([])
+  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [nextSignals, nextEngines, nextMarket, nextAIScore, nextDecision, nextOperational, nextReplays] = await Promise.all([
+      const [nextSignals, nextEngines, nextMarket, nextAIScore, nextDecision, nextOperational, nextReplays, nextDiagnostics] = await Promise.all([
         tenApi.signals(),
         tenApi.engines(),
         tenApi.market(),
@@ -37,6 +39,7 @@ export function useDashboard(): DashboardState {
         tenApi.latestSignalDecision(),
         tenApi.latestOperationalSignal(),
         tenApi.replays(),
+        tenApi.diagnostics(),
       ])
       setSignals(nextSignals)
       setEngines(nextEngines)
@@ -45,6 +48,7 @@ export function useDashboard(): DashboardState {
       setSignalDecision(nextDecision)
       setOperationalSignal(nextOperational)
       setReplays(nextReplays)
+      setDiagnostics(nextDiagnostics)
       setError(null)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to reach TEN API')
@@ -59,6 +63,6 @@ export function useDashboard(): DashboardState {
     return () => window.clearInterval(timer)
   }, [refresh])
 
-  return { signals, engines, market, aiScore, signalDecision, operationalSignal, replays, loading, error, refresh }
+  return { signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics, loading, error, refresh }
 }
 

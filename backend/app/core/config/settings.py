@@ -1,6 +1,7 @@
 """Environment-backed application configuration."""
 
 from functools import lru_cache
+import os
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,12 +26,25 @@ class Settings(BaseSettings):
     live_pipeline_enabled: bool = True
     integration_worker_enabled: bool = False
     market_data_worker_enabled: bool = False
+    market_data_provider: str = "twelve_data"
+    market_data_symbols: tuple[str, ...] = ("XAUUSD",)
+    market_data_timeframes: tuple[str, ...] = ("M15",)
+    market_data_bootstrap_enabled: bool = True
+    market_data_bootstrap_candles: int = Field(default=2500, ge=50, le=5000)
+    market_data_poll_seconds: float = Field(default=60, ge=5, le=3600)
+    max_candle_staleness_seconds: int = Field(default=900, ge=60, le=604800)
     replay_worker_enabled: bool = False
     public_read_access: bool = True
     api_keys: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def production_security(self) -> "Settings":
+        railway_runtime = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+        if self.environment.lower() == "production" or railway_runtime:
+            if "market_data_worker_enabled" not in self.model_fields_set:
+                self.market_data_worker_enabled = True
+            if "integration_worker_enabled" not in self.model_fields_set:
+                self.integration_worker_enabled = True
         if self.environment.lower() == "production" and self.integration_enabled:
             if self.public_read_access:
                 raise ValueError("production integration requires TEN_PUBLIC_READ_ACCESS=false")
@@ -40,6 +54,16 @@ class Settings(BaseSettings):
                 raise ValueError("production CORS cannot allow every origin")
         if set(self.api_keys.values()) - {"viewer", "operator", "admin"}:
             raise ValueError("TEN_API_KEYS roles must be viewer, operator, or admin")
+        supported_providers = {"twelve_data", "oanda", "alpha_vantage", "financial_modeling_prep"}
+        if self.market_data_provider not in supported_providers:
+            raise ValueError("TEN_MARKET_DATA_PROVIDER is unsupported")
+        supported_timeframes = {"M1", "M5", "M15", "M30", "H1", "H4", "D1"}
+        if not self.market_data_symbols or any(not item.strip() for item in self.market_data_symbols):
+            raise ValueError("TEN_MARKET_DATA_SYMBOLS must contain at least one symbol")
+        if not self.market_data_timeframes or set(self.market_data_timeframes) - supported_timeframes:
+            raise ValueError("TEN_MARKET_DATA_TIMEFRAMES contains an unsupported timeframe")
+        if self.market_data_worker_enabled and not self.database_url.startswith(("postgresql+asyncpg://", "sqlite+aiosqlite://")):
+            raise ValueError("TEN_DATABASE_URL must use an asynchronous SQLAlchemy driver")
         return self
 
 

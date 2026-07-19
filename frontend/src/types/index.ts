@@ -24,10 +24,32 @@ export interface EngineStatus {
 
 export interface MarketStatus {
   symbol: string
-  session: string
+  session: string | null
   is_open: boolean
   checked_at: string
   note: string
+  market_status: 'OPEN' | 'CLOSED_WEEKEND' | 'CLOSED_DAILY_BREAK' | 'HOLIDAY_OR_PROVIDER_CLOSED' | 'UNKNOWN'
+  closure_reason: string | null
+  next_expected_open_at: string | null
+  server_time_utc: string
+  latest_candle_at: string | null
+  latest_candle_age_seconds: number | null
+  provider_status: string
+}
+
+export interface SystemDiagnostics {
+  application_version: string
+  operational_state: string
+  database: { status: string; mode: string }
+  provider: { name: string; configured_symbol: string; provider_symbol: string; status: string; authentication_configured: boolean; last_success_at: string | null; last_failure_at: string | null; last_error: string | null }
+  market: { symbol: string; market_status: MarketStatus['market_status']; market_open: boolean; active_session: string | null; closure_reason: string | null; next_expected_open_at: string | null; server_time_utc: string; latest_candle_at: string | null; latest_candle_age_seconds: number | null; freshness: string }
+  history: { candle_count: number; required_candle_count: number; initialized: boolean }
+  workers: {
+    market_data_worker: { enabled: boolean; running: boolean; last_heartbeat_at: string | null; last_success_at: string | null; last_error: string | null; consecutive_failures: number; processing_state: string; loaded_candles: number }
+    integration_worker: { enabled: boolean; running: boolean; last_heartbeat_at: string | null; last_success_at: string | null; last_error: string | null; consecutive_failures: number }
+  }
+  pipeline: { status: string; latest_snapshot: Record<string, unknown> | null; latest_decision: SignalDecisionSnapshot | null; latest_scenario: OperationalSignal | null }
+  replay: { enabled: boolean; status: string }
 }
 
 export type AIScoreStatus = 'ready' | 'degraded' | 'insufficient_evidence' | 'stale' | 'invalid' | 'replay'

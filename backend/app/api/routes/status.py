@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends
 from backend.app.api.dependencies import get_engine_registry
 from backend.app.api.schemas import MarketStatusResponse
 from backend.app.engines.common import EngineStatus
+from backend.app.engines.market_data_engine import MarketDataService, Timeframe
+from backend.app.api.dependencies import get_market_data_service
 from backend.app.services import EngineRegistry
 
 router = APIRouter(tags=["status"])
@@ -19,12 +21,24 @@ async def engine_status(registry: Annotated[EngineRegistry, Depends(get_engine_r
 
 
 @router.get("/market/status", response_model=MarketStatusResponse)
-async def market_status() -> MarketStatusResponse:
-    """Return a transparent weekday/session approximation, not broker status."""
-
+async def market_status(service: Annotated[MarketDataService, Depends(get_market_data_service)]) -> MarketStatusResponse:
+    """Return timezone-aware XAU/USD trading availability and data freshness."""
     now = datetime.now(UTC)
-    weekday_open = now.weekday() < 5
-    hour = now.hour
-    session = "asia" if hour < 7 else "london" if hour < 13 else "new_york" if hour < 21 else "after_hours"
-    return MarketStatusResponse(symbol="XAU/USD", session=session, is_open=weekday_open, checked_at=now, note="Indicative weekday/session status; validate against the selected data provider.")
+    schedule = service.sessions.status_at(now)
+    candle = await service.repository.candle_at("XAUUSD", Timeframe.M15, now)
+    state = await service.state("XAUUSD", Timeframe.M15, at=now)
+    return MarketStatusResponse(
+        symbol="XAU/USD",
+        session=schedule.active_session.value if schedule.active_session else None,
+        is_open=schedule.market_open,
+        checked_at=now,
+        note="Schedule-aware XAU/USD status; provider freshness is reported separately.",
+        market_status=schedule.market_status.value,
+        closure_reason=schedule.closure_reason,
+        next_expected_open_at=schedule.next_expected_open_at,
+        server_time_utc=schedule.server_time_utc,
+        latest_candle_at=candle.timestamp if candle else None,
+        latest_candle_age_seconds=max(0, (now - candle.timestamp).total_seconds()) if candle else None,
+        provider_status=state.provider_health,
+    )
 

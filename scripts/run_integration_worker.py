@@ -12,7 +12,7 @@ async def main() -> None:
         try:
             await worker.run()
         finally:
-            worker.stop()
+            await worker.stop()
 
 
 if __name__ == "__main__":

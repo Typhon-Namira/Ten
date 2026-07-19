@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from .exceptions import ProviderResponseError
-from .models import Candle, Timeframe, canonical_symbol
+from .models import Candle, Timeframe
 from .providers import (
     MarketDataProvider,
     ProviderCapabilities,
@@ -17,6 +17,7 @@ from .providers import (
     ProviderQuota,
     ProviderRequest,
 )
+from .symbols import provider_symbol
 
 
 class HttpMarketDataProvider(MarketDataProvider):
@@ -107,7 +108,7 @@ class TwelveDataProvider(HttpMarketDataProvider):
         data = await self._get(
             "/time_series",
             params={
-                "symbol": "XAU/USD" if canonical_symbol(request.symbol) == "XAUUSD" else request.symbol,
+                "symbol": provider_symbol(self.provider_name.value, request.symbol),
                 "interval": self._intervals[request.timeframe],
                 "outputsize": min(request.limit, 5000),
                 "start_date": request.start.isoformat() if request.start else None,
@@ -208,7 +209,7 @@ class FinancialModelingPrepProvider(HttpMarketDataProvider):
 
     async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
         interval = self._intervals[request.timeframe]
-        path = f"/historical-chart/{interval}/XAUUSD"
+        path = f"/historical-chart/{interval}/{provider_symbol(self.provider_name.value, request.symbol)}"
         data = await self._get(
             path,
             params={
@@ -258,7 +259,7 @@ class OandaProvider(HttpMarketDataProvider):
 
     async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
         data = await self._get(
-            "/v3/instruments/XAU_USD/candles",
+            f"/v3/instruments/{provider_symbol(self.provider_name.value, request.symbol)}/candles",
             params={
                 "granularity": self._granularity[request.timeframe],
                 "count": min(request.limit, 5000),

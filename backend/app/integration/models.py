@@ -216,6 +216,23 @@ class CanonicalEventEnvelope(IntegrationModel):
             payload=payload,
         )
 
+    @classmethod
+    def historical_candle(cls, candle: Candle, correlation_id: UUID, produced_at: datetime) -> CanonicalEventEnvelope:
+        """Create a mode-isolated envelope for bootstrap analysis, never live publication."""
+        live = cls.final_candle(candle, correlation_id, max(produced_at, candle.timestamp + candle.timeframe.duration, candle.ingestion_timestamp))
+        close_time = candle.timestamp + candle.timeframe.duration
+        event_id = canonical_hash({"live_event_id": live.event_id, "mode": IntegrationMode.REPLAY.value, "purpose": "historical_bootstrap"})
+        return live.model_copy(
+            update={
+                "event_id": event_id,
+                "trace_id": semantic_uuid("trace", event_id),
+                "mode": IntegrationMode.REPLAY,
+                "available_at": close_time,
+                "produced_at": max(produced_at, close_time),
+                "idempotency_key": event_id,
+            }
+        )
+
 
 class EvidenceReference(IntegrationModel):
     engine: str
