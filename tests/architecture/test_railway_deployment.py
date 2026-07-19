@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import tomllib
 
 
 def test_railway_config_starts_nested_fastapi_app() -> None:
@@ -11,6 +12,11 @@ def test_railway_config_starts_nested_fastapi_app() -> None:
         "uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT"
     )
     assert config["deploy"]["healthcheckPath"] == "/health"
+
+    toml_config = tomllib.loads(Path("railway.toml").read_text(encoding="utf-8"))
+    assert toml_config["deploy"]["startCommand"] == (
+        "uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT"
+    )
 
     dockerfile = Path("docker/backend.Dockerfile").read_text(encoding="utf-8")
     assert "FROM node:22-slim AS frontend-build" in dockerfile
