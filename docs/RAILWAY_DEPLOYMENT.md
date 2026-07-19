@@ -14,7 +14,9 @@ cd frontend && npm install
 cd frontend && npm run build
 ```
 
-The one production process remains:
+Railway does not override the Docker start command because Docker-service overrides
+are executed without shell variable expansion. The image expands Railway's
+`PORT` and then uses `exec`, leaving Uvicorn as the single production process:
 
 ```text
 uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
