@@ -5,7 +5,7 @@ import json
 import os
 from typing import Annotated, Any
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -41,14 +41,34 @@ class Settings(BaseSettings):
 
     @field_validator("market_data_symbols", "market_data_timeframes", mode="before")
     @classmethod
-    def parse_market_data_sequence(cls, value: Any) -> Any:
+    def parse_market_data_sequence(cls, value: Any, info: ValidationInfo) -> Any:
         """Accept both JSON arrays and comma-separated Railway variables."""
         if not isinstance(value, str):
             return value
         raw = value.strip()
         if raw.startswith("["):
-            return json.loads(raw)
-        return tuple(item.strip() for item in raw.split(",") if item.strip())
+            items = json.loads(raw)
+        else:
+            items = tuple(item.strip() for item in raw.split(",") if item.strip())
+        if info.field_name != "market_data_timeframes":
+            return items
+        aliases = {
+            "1m": "M1",
+            "m1": "M1",
+            "5m": "M5",
+            "m5": "M5",
+            "15m": "M15",
+            "m15": "M15",
+            "30m": "M30",
+            "m30": "M30",
+            "1h": "H1",
+            "h1": "H1",
+            "4h": "H4",
+            "h4": "H4",
+            "1d": "D1",
+            "d1": "D1",
+        }
+        return tuple(aliases.get(str(item).strip().lower(), str(item).strip()) for item in items)
 
     @model_validator(mode="after")
     def production_security(self) -> "Settings":
