@@ -1,5 +1,9 @@
 # TEN
 
+TEN is a ten-engine analytical market-intelligence platform. Full-system integration now connects production-configured Market Data through SMC, Liquidity, Volume Profile, Institutional Flow, Market Regime, Economic Calendar, AI Scoring, and Signal Decision, while Replay remains isolated. See [Full-System Integration Production 1.0](docs/FULL_SYSTEM_INTEGRATION.md) for contracts, API, security, worker topology, Railway configuration, and failure behavior.
+
+Signals are analytical evidence summaries only. TEN does not place orders, manage positions, connect to brokerage execution, or promise trading outcomes.
+
 TEN's Market Data Engine is the provider-neutral single source of truth for historical, realtime, and replayable market observations. It includes TwelveData, Alpha Vantage, Financial Modeling Prep, and OANDA adapters; health-ranked automatic failover; deterministic validation and quality scoring; memory/persistent caching; SQLAlchemy persistence; DST-aware sessions; metrics; events; and time-travel APIs. See [Market Data Engine](docs/MARKET_DATA_ENGINE.md).
 
 The [SMC Engine Production 1.0](docs/SMC_ENGINE.md) provides deterministic no-lookahead structure, displacement, imbalance, institutional-zone lifecycles, dealing ranges, multi-timeframe context, durable replay, typed events, and structural features without generating trading decisions.

@@ -1,0 +1,19 @@
+enabled: true
+live_pipeline_enabled: true
+delivery_semantics: at_least_once
+trigger: final_candle_available
+schema_version: "1.0"
+policy_version: "1.0.0"
+required_evidence:
+  - market_data
+  - smc
+  - liquidity
+  - volume_profile
+  - institutional_flow
+  - market_regime
+  - economic_calendar
+worker:
+  enabled: true
+  embedded_api_worker: false
+  outbox_batch_size: 100
+  poll_seconds: 1

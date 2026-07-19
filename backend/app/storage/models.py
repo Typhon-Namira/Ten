@@ -679,3 +679,84 @@ class EngineLogRecord(Base):
     message: Mapped[str] = mapped_column(Text)
     context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class IntegrationEventRecord(Base):
+    __tablename__ = "integration_events"
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(96), index=True)
+    trace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    correlation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    mode: Mapped[str] = mapped_column(String(16), index=True)
+    instrument: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    timeframe: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class IntegrationOutboxRecord(Base):
+    __tablename__ = "integration_outbox"
+    outbox_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(64), ForeignKey("integration_events.event_id", ondelete="CASCADE"), unique=True, index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(96), nullable=True)
+
+
+class IntegrationProcessedEventRecord(Base):
+    __tablename__ = "integration_processed_events"
+    event_id: Mapped[str] = mapped_column(String(64), ForeignKey("integration_events.event_id", ondelete="CASCADE"), primary_key=True)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class IntegrationSnapshotRecord(Base):
+    __tablename__ = "integration_snapshots"
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    semantic_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    trace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    mode: Mapped[str] = mapped_column(String(16), index=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    analytical_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class OperationalSignalRecord(Base):
+    __tablename__ = "operational_signals"
+    operational_signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    semantic_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    decision_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("signal_decisions.id", ondelete="RESTRICT"), index=True)
+    ai_score_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_score_snapshots.id", ondelete="RESTRICT"), index=True)
+    snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("integration_snapshots.snapshot_id", ondelete="RESTRICT"), index=True)
+    trace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    mode: Mapped[str] = mapped_column(String(16), index=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class IntegrationEventTraceRecord(Base):
+    __tablename__ = "integration_event_trace"
+    trace_record_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    trace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    event_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class IntegrationDataQualityIssueRecord(Base):
+    __tablename__ = "integration_data_quality_issues"
+    issue_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)

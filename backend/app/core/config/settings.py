@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +21,26 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "meta-llama/llama-3.3-70b-instruct"
     request_timeout_seconds: float = 30.0
+    integration_enabled: bool = True
+    live_pipeline_enabled: bool = True
+    integration_worker_enabled: bool = False
+    market_data_worker_enabled: bool = False
+    replay_worker_enabled: bool = False
+    public_read_access: bool = True
+    api_keys: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def production_security(self) -> "Settings":
+        if self.environment.lower() == "production" and self.integration_enabled:
+            if self.public_read_access:
+                raise ValueError("production integration requires TEN_PUBLIC_READ_ACCESS=false")
+            if not self.api_keys:
+                raise ValueError("production integration requires TEN_API_KEYS")
+            if "*" in self.cors_origins:
+                raise ValueError("production CORS cannot allow every origin")
+        if set(self.api_keys.values()) - {"viewer", "operator", "admin"}:
+            raise ValueError("TEN_API_KEYS roles must be viewer, operator, or admin")
+        return self
 
 
 @lru_cache

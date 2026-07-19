@@ -13,6 +13,7 @@ from .ai_scoring import router as ai_scoring_router
 from .signal_decisions import router as signal_decisions_router
 from .replays import router as replays_router
 from .status import router as status_router
+from .integration import router as integration_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -28,3 +29,4 @@ api_router.include_router(ai_scoring_router)
 api_router.include_router(signal_decisions_router)
 api_router.include_router(replays_router)
 api_router.include_router(status_router)
+api_router.include_router(integration_router)

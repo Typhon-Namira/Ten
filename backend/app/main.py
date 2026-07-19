@@ -45,6 +45,7 @@ from backend.app.engines.replay_engine import (
 from backend.app.core.database.base import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
+from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, SqlAlchemyIntegrationRepository
 
 
 def create_app() -> FastAPI:
@@ -62,6 +63,7 @@ def create_app() -> FastAPI:
         app.state.pipeline_manager = PipelineManager.from_yaml(app.state.engine_registry, configs)
         market_config = configs.load_model("market_data", MarketDataConfig)
         app.state.market_data_service = build_market_data_service(market_config)
+        app.state.market_data_service.event_bus = app.state.pipeline_manager.event_bus
         smc_config = configs.load_model("smc", SMCConfig)
         app.state.smc_database_engine = None
         app.state.smc_database_session = None
@@ -74,6 +76,7 @@ def create_app() -> FastAPI:
         app.state.signal_decision_database_session = None
         app.state.replay_database_session = None
         app.state.replay_source_database_session = None
+        app.state.integration_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         try:
@@ -94,6 +97,7 @@ def create_app() -> FastAPI:
             app.state.signal_decision_database_session = session_factory()
             app.state.replay_database_session = session_factory()
             app.state.replay_source_database_session = session_factory()
+            app.state.integration_database_session = session_factory()
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
@@ -186,6 +190,34 @@ def create_app() -> FastAPI:
             repository_mode=decision_mode,
         )
         await app.state.signal_decision_service.start()
+        integration_config = IntegrationConfig(
+            enabled=settings.integration_enabled,
+            live_pipeline_enabled=settings.live_pipeline_enabled,
+            worker={"enabled": settings.integration_worker_enabled, "embedded_api_worker": False},
+        )
+        integration_repository: IntegrationRepository = InMemoryIntegrationRepository()
+        integration_mode = "memory"
+        if app.state.integration_database_session is not None:
+            integration_repository = SqlAlchemyIntegrationRepository(app.state.integration_database_session)
+            integration_mode = "postgresql"
+        app.state.integration_repository = integration_repository
+        app.state.integration_service = FullSystemIntegrationService(
+            event_bus=app.state.pipeline_manager.event_bus,
+            repository=app.state.integration_repository,
+            config=integration_config,
+            market_data=app.state.market_data_service,
+            smc=app.state.smc_service,
+            liquidity=app.state.liquidity_service,
+            volume_profile=app.state.volume_profile_service,
+            institutional_flow=app.state.institutional_flow_service,
+            market_regime=app.state.market_regime_service,
+            economic_calendar=app.state.economic_calendar_service,
+            ai_scoring=app.state.ai_scoring_service,
+            signal_decision=app.state.signal_decision_service,
+            repository_mode=integration_mode,
+        )
+        if integration_config.enabled and integration_config.live_pipeline_enabled:
+            await app.state.integration_service.start()
         replay_config = configs.load_model("replay", ReplayConfig)
         replay_repository: ReplayRepository = InMemoryReplayRepository()
         replay_mode = "memory"
@@ -226,12 +258,14 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            await app.state.integration_service.stop()
             await app.state.replay_worker.stop()
             await app.state.replay_service.stop()
             await app.state.signal_decision_service.stop()
             await app.state.ai_scoring_service.stop()
             await app.state.economic_calendar_service.stop()
             await app.state.market_data_service.close()
+            await app.state.pipeline_manager.event_bus.drain()
             if app.state.economic_calendar_database_session is not None:
                 await app.state.economic_calendar_database_session.close()
             if app.state.ai_scoring_database_session is not None:
@@ -242,6 +276,8 @@ def create_app() -> FastAPI:
                 await app.state.replay_source_database_session.close()
             if app.state.replay_database_session is not None:
                 await app.state.replay_database_session.close()
+            if app.state.integration_database_session is not None:
+                await app.state.integration_database_session.close()
             if app.state.market_regime_database_session is not None:
                 await app.state.market_regime_database_session.close()
             if app.state.institutional_flow_database_session is not None:

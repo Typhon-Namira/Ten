@@ -81,6 +81,30 @@ export interface SignalDecisionSnapshot {
   mode: 'live' | 'replay'
 }
 
+export interface OperationalSignal {
+  operational_signal_id: string
+  semantic_hash: string
+  decision_id: string
+  ai_score_id: string
+  snapshot_id: string
+  trace_id: string
+  market_event_id: string
+  instrument: string
+  timeframe: string
+  mode: 'live' | 'replay'
+  direction: string
+  state: string
+  confidence: number
+  effective_at: string
+  expires_at: string
+  data_quality_status: 'valid' | 'suspect' | 'stale' | 'incomplete' | 'rejected'
+  provider_provenance: string[]
+  blockers: string[]
+  warnings: string[]
+  analytical_only: true
+  trade_execution: false
+}
+
 export type ReplayStatus = 'created' | 'validating' | 'ready' | 'running' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'recovering'
 export type ReplayMode = 'maximum_speed' | 'accelerated' | 'real_time' | 'step'
 
