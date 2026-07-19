@@ -2,7 +2,7 @@ FROM node:22-slim AS frontend-build
 WORKDIR /app
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
 # There is no npm package-lock, so npm install is intentionally used instead of npm ci.
-RUN cd frontend && npm install --ignore-scripts
+RUN cd frontend && npm install
 COPY frontend ./frontend
 RUN cd frontend && npm run build
 

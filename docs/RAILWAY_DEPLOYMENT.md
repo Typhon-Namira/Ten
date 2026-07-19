@@ -10,7 +10,7 @@ uses `npm install` rather than an invalid `npm ci` invocation. The effective
 frontend build commands are:
 
 ```text
-cd frontend && npm install --ignore-scripts
+cd frontend && npm install
 cd frontend && npm run build
 ```
 
