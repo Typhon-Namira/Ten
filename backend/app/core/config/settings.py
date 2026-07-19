@@ -1,10 +1,12 @@
 """Environment-backed application configuration."""
 
 from functools import lru_cache
+import json
 import os
+from typing import Annotated, Any
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -27,8 +29,8 @@ class Settings(BaseSettings):
     integration_worker_enabled: bool = False
     market_data_worker_enabled: bool = False
     market_data_provider: str = "twelve_data"
-    market_data_symbols: tuple[str, ...] = ("XAUUSD",)
-    market_data_timeframes: tuple[str, ...] = ("M15",)
+    market_data_symbols: Annotated[tuple[str, ...], NoDecode] = ("XAUUSD",)
+    market_data_timeframes: Annotated[tuple[str, ...], NoDecode] = ("M15",)
     market_data_bootstrap_enabled: bool = True
     market_data_bootstrap_candles: int = Field(default=2500, ge=50, le=5000)
     market_data_poll_seconds: float = Field(default=60, ge=5, le=3600)
@@ -36,6 +38,17 @@ class Settings(BaseSettings):
     replay_worker_enabled: bool = False
     public_read_access: bool = True
     api_keys: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("market_data_symbols", "market_data_timeframes", mode="before")
+    @classmethod
+    def parse_market_data_sequence(cls, value: Any) -> Any:
+        """Accept both JSON arrays and comma-separated Railway variables."""
+        if not isinstance(value, str):
+            return value
+        raw = value.strip()
+        if raw.startswith("["):
+            return json.loads(raw)
+        return tuple(item.strip() for item in raw.split(",") if item.strip())
 
     @model_validator(mode="after")
     def production_security(self) -> "Settings":
