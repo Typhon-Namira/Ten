@@ -23,6 +23,7 @@ from backend.app.engines.institutional_flow_engine import InMemoryInstitutionalF
 from backend.app.engines.market_regime_engine import InMemoryMarketRegimeRepository, MarketRegimeConfig, MarketRegimeRepository, MarketRegimeService, SqlAlchemyMarketRegimeRepository
 from backend.app.engines.economic_calendar_engine import EconomicCalendarConfig, EconomicCalendarRepository, EconomicCalendarService, InMemoryEconomicCalendarRepository, SqlAlchemyEconomicCalendarRepository, build_providers
 from backend.app.engines.ai_scoring_engine import AIScoringConfig, AIScoringRepository, AIScoringService, InMemoryAIScoringRepository, SqlAlchemyAIScoringRepository
+from backend.app.engines.signal_decision_engine import InMemorySignalDecisionRepository, SignalDecisionConfig, SignalDecisionRepository, SignalDecisionService, SqlAlchemySignalDecisionRepository
 from backend.app.core.database.base import Base
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
         app.state.market_regime_database_session = None
         app.state.economic_calendar_database_session = None
         app.state.ai_scoring_database_session = None
+        app.state.signal_decision_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         try:
@@ -69,6 +71,7 @@ def create_app() -> FastAPI:
             app.state.market_regime_database_session = session_factory()
             app.state.economic_calendar_database_session = session_factory()
             app.state.ai_scoring_database_session = session_factory()
+            app.state.signal_decision_database_session = session_factory()
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
@@ -144,9 +147,27 @@ def create_app() -> FastAPI:
             repository_mode=ai_mode,
         )
         await app.state.ai_scoring_service.start()
+        decision_config = configs.load_model("signal_decision", SignalDecisionConfig)
+        decision_repository: SignalDecisionRepository = InMemorySignalDecisionRepository()
+        decision_mode = "memory"
+        if app.state.signal_decision_database_session is not None:
+            decision_repository = SqlAlchemySignalDecisionRepository(app.state.signal_decision_database_session)
+            decision_mode = "postgresql"
+        app.state.signal_decision_service = SignalDecisionService(
+            decision_repository,
+            app.state.ai_scoring_service,
+            app.state.pipeline_manager.event_bus,
+            app.state.pipeline_manager.feature_store,
+            decision_config,
+            economic_calendar=app.state.economic_calendar_service,
+            market_regime=app.state.market_regime_service,
+            repository_mode=decision_mode,
+        )
+        await app.state.signal_decision_service.start()
         try:
             yield
         finally:
+            await app.state.signal_decision_service.stop()
             await app.state.ai_scoring_service.stop()
             await app.state.economic_calendar_service.stop()
             await app.state.market_data_service.close()
@@ -154,6 +175,8 @@ def create_app() -> FastAPI:
                 await app.state.economic_calendar_database_session.close()
             if app.state.ai_scoring_database_session is not None:
                 await app.state.ai_scoring_database_session.close()
+            if app.state.signal_decision_database_session is not None:
+                await app.state.signal_decision_database_session.close()
             if app.state.market_regime_database_session is not None:
                 await app.state.market_regime_database_session.close()
             if app.state.institutional_flow_database_session is not None:

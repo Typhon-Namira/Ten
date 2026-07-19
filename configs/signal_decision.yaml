@@ -1,0 +1,100 @@
+enabled: true
+engine_version: 1.0.0
+schema_version: "1.0"
+policy_name: conservative_signal_policy
+policy_version: 1.0.0
+configuration_version: signal-decision-1.0
+direction_mapping:
+  strong_bullish: bullish
+  bullish: bullish
+  slightly_bullish: bullish
+  neutral: neutral
+  slightly_bearish: bearish
+  bearish: bearish
+  strong_bearish: bearish
+directional_strength:
+  minimum_for_observation: 20
+  minimum_for_eligibility: 45
+confidence:
+  minimum_for_observation: 45
+  minimum_for_eligibility: 70
+risk:
+  preferred_maximum: 40
+  hard_block_minimum: 65
+data_quality:
+  invalid_below: 10
+  minimum_for_observation: 45
+  minimum_for_eligibility: 70
+alignment:
+  minimum_for_observation: 35
+  minimum_for_eligibility: 60
+conflicts:
+  severe_penalty_threshold: 25
+freshness:
+  M1: {eligible_max_age_seconds: 90, observe_max_age_seconds: 180}
+  M5: {eligible_max_age_seconds: 300, observe_max_age_seconds: 600}
+  M15: {eligible_max_age_seconds: 900, observe_max_age_seconds: 1800}
+  M30: {eligible_max_age_seconds: 1800, observe_max_age_seconds: 3600}
+  H1: {eligible_max_age_seconds: 3600, observe_max_age_seconds: 7200}
+  H4: {eligible_max_age_seconds: 14400, observe_max_age_seconds: 28800}
+  D1: {eligible_max_age_seconds: 86400, observe_max_age_seconds: 172800}
+  W1: {eligible_max_age_seconds: 604800, observe_max_age_seconds: 1209600}
+  MN1: {eligible_max_age_seconds: 2592000, observe_max_age_seconds: 5184000}
+economic_event:
+  enabled: true
+  fail_closed_when_source_unavailable: true
+  hard_phases: [imminent, at_event, overlapping]
+  caution_phases: [pre_event, post_event, cooldown]
+market_regimes:
+  trending_bull: eligible
+  trending_bear: eligible
+  imbalanced_bull: eligible
+  imbalanced_bear: eligible
+  markup_like: eligible
+  markdown_like: eligible
+  expansion_bull: eligible
+  expansion_bear: eligible
+  ranging: observe_only
+  balanced: observe_only
+  accumulation_like: observe_only
+  distribution_like: observe_only
+  reaccumulation_like: observe_only
+  redistribution_like: observe_only
+  compression: observe_only
+  transition: observe_only
+  high_volatility: observe_only
+  low_volatility: observe_only
+  uncertain: blocked
+  insufficient_data: blocked
+cooldown:
+  enabled: true
+  eligible_repeat_seconds: 900
+  observe_repeat_seconds: 300
+  blocked_repeat_seconds: 300
+reversal:
+  enabled: true
+  lock_seconds: 600
+  additional_strength_required: 10
+  additional_confidence_required: 5
+hysteresis:
+  enabled: true
+  strength_relief: 5
+  confidence_relief: 5
+validity:
+  eligible: {M1: 60, M5: 300, M15: 900, M30: 1800, H1: 3600, H4: 14400, D1: 86400, W1: 604800, MN1: 2592000}
+  observe_only: {M1: 30, M5: 180, M15: 600, M30: 1200, H1: 1800, H4: 7200, D1: 43200, W1: 302400, MN1: 1296000}
+  blocked: {default: 300}
+  insufficient_evidence: {default: 180}
+  invalid: {default: 60}
+api:
+  maximum_page_size: 200
+  maximum_history_days: 365
+retention:
+  live_days: 180
+  replay_days: 30
+  cleanup_batch_size: 500
+future_clock_skew_seconds: 5
+output_precision: 4
+persistence_required_in_production: true
+publish_replay_events: false
+publish_replay_features: false

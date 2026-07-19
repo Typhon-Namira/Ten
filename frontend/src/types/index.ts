@@ -51,3 +51,33 @@ export interface AIScoreSnapshot {
   degraded_sources: string[]
 }
 
+export type SignalDecisionState = 'eligible' | 'observe_only' | 'blocked' | 'insufficient_evidence' | 'expired' | 'invalid'
+export type SignalDecisionDirection = 'bullish' | 'bearish' | 'neutral'
+
+export interface DecisionReason {
+  reason_code: string
+  severity: string
+  message_key: string
+  rule_id: string
+}
+
+export interface SignalDecisionSnapshot {
+  decision_id: string
+  instrument: string
+  timeframe: string
+  direction: SignalDecisionDirection
+  state: SignalDecisionState
+  as_of: string
+  valid_until: string
+  ai_score_snapshot_id: string
+  decision_policy_version: string
+  eligibility_score: number
+  confidence_score: number
+  market_risk_score: number
+  data_quality_score: number
+  evidence_alignment_score: number
+  blockers: DecisionReason[]
+  warnings: DecisionReason[]
+  mode: 'live' | 'replay'
+}
+

@@ -10,7 +10,7 @@ def test_health_and_status_endpoints() -> None:
         market = client.get("/market/status")
     assert health.status_code == 200
     assert health.json()["status"] == "healthy"
-    assert engines.status_code == 200 and len(engines.json()) == 10
+    assert engines.status_code == 200 and len(engines.json()) == 11
     assert market.status_code == 200 and market.json()["symbol"] == "XAU/USD"
 
 

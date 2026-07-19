@@ -5,7 +5,7 @@ import { SignalTable } from '../components/SignalTable'
 import { useDashboard } from '../hooks/useDashboard'
 
 export function Dashboard() {
-  const { signals, engines, market, aiScore, loading, error, refresh } = useDashboard()
+  const { signals, engines, market, aiScore, signalDecision, loading, error, refresh } = useDashboard()
   const latest = signals[0]
   const ready = engines.filter((engine) => engine.state === 'ready').length
   return <div className="page">
@@ -13,7 +13,7 @@ export function Dashboard() {
     {error && <div className="alert"><span>API offline</span>{error}. Dashboard will retry automatically.</div>}
     <section className="metrics" id="overview">
       <MetricCard label="Market" value={market?.is_open ? 'OPEN' : 'CLOSED'} detail={`${market?.session ?? '—'} session · XAU/USD`} icon={<Clock3 size={18} />} accent={market?.is_open ? 'green' : 'red'} />
-      <MetricCard label="Analytical bias" value={aiScore?.directional_label.replaceAll('_', ' ').toUpperCase() ?? latest?.direction.toUpperCase() ?? 'NEUTRAL'} detail={aiScore ? `${aiScore.timeframe} · score ${aiScore.directional_score.toFixed(1)} · ${aiScore.status}` : 'Awaiting deterministic evidence'} icon={<SignalIcon size={18} />} />
+      <MetricCard label="Decision gate" value={signalDecision?.state.replaceAll('_', ' ').toUpperCase() ?? 'NO ACTIVE DECISION'} detail={signalDecision ? `${signalDecision.direction.toUpperCase()} · eligibility ${signalDecision.eligibility_score.toFixed(1)} · policy ${signalDecision.decision_policy_version}` : 'Awaiting a persisted policy decision'} icon={<SignalIcon size={18} />} accent={signalDecision?.state === 'eligible' ? 'green' : signalDecision?.state === 'blocked' || signalDecision?.state === 'invalid' ? 'red' : 'gold'} />
       <MetricCard label="Confidence / risk" value={aiScore ? `${Math.round(aiScore.confidence_score)}% / ${Math.round(aiScore.market_risk_score)}%` : latest ? `${Math.round(latest.confidence * 100)}% / —` : '—'} detail={aiScore ? `Quality ${Math.round(aiScore.data_quality_score)}% · policy ${aiScore.policy_version}` : 'Evidence quality, not win probability'} icon={<Activity size={18} />} />
       <MetricCard label="System" value={`${ready}/${engines.length || '—'}`} detail="Analysis engines ready" icon={<ShieldCheck size={18} />} accent={ready === engines.length && ready > 0 ? 'green' : 'gold'} />
     </section>

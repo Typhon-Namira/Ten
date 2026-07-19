@@ -8,7 +8,8 @@
 | Institutional flow | Ordered OHLCV | `FlowScore` | Estimate pressure, acceleration, delta proxy, and absorption probability | Implement `InstitutionalFlowEngine`; label licensed exchange data explicitly |
 | Volume profile | Ordered OHLCV | `VolumeProfileResult` | POC, VAH, VAL, HVN/LVN nodes from configurable price bins | Implement `VolumeProfileAnalyzer` |
 | Economic calendar | Timestamp and events | `NewsRiskResult` | Impact-aware risk windows and high-impact no-trade flag | Implement `EconomicCalendarEngine` and a provider adapter |
-| AI scoring | `ScoringContext` only | `SignalScore` | Conservative confluence and quality assessment through OpenRouter | Implement `AIScoringEngine`; version every prompt |
+| AI scoring | Versioned point-in-time engine evidence | `AIScoreSnapshot` | Deterministic direction, confidence, risk, alignment, quality, and composite intelligence | Extend approved deterministic policies; preserve replay and explanation contracts |
+| Signal decision | Trusted persisted `AIScoreSnapshot` plus event/regime context | `SignalDecision` | Fail-closed eligibility, observation, blocking, sufficiency, validity, cooldown, and reversal policy | Extend approved rule/policy registries; execution remains prohibited |
 | Signal | All validated engine results | `Signal` | Apply risk gating and create entry/stop/target scenarios | Implement `SignalEngine`; execution is out of scope |
 | Market regime | Feature snapshot | `MarketRegimeResult` | Infrastructure only; no detection | Implement `MarketRegimeEngine` and enable its flag |
 | Replay | Historical event source | `ReplayState` | Infrastructure only; no simulation | Implement `ReplayEngine` and enable its flag |

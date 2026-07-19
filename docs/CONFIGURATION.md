@@ -27,6 +27,8 @@ TEN treats YAML as the runtime composition source.
 | `economic.yaml` | Event risk windows |
 | `economic_calendar.yaml` | Economic Calendar providers, normalization, risk context, retention, and API bounds |
 | `ai.yaml` | OpenRouter model and prompt version |
+| `ai_scoring.yaml` | Deterministic intelligence aggregation policy |
+| `signal_decision.yaml` | Fail-closed analytical decision policy, rules, validity, and replay controls |
 | `signal.yaml` | Scenario construction settings |
 | `market_regime.yaml` | Disabled future regime contract |
 | `replay.yaml` | Disabled future replay contract |
@@ -40,3 +42,7 @@ The versioned Institutional Flow configuration controls evidence limits and age,
 # AI Scoring
 
 `configs/ai_scoring.yaml` strictly defines the weighted policy, version/hash identity, approved source groups, component direction/confidence/risk weights, source freshness thresholds, minimum evidence/group requirements, confidence ceilings, conflict thresholds/penalties, non-overlapping directional labels, API limits, retention windows, persistence requirement, and replay-event policy. Configuration is data only; arbitrary expressions or module names are never evaluated.
+
+# Signal Decision
+
+`configs/signal_decision.yaml` defines the approved policy/version, exhaustive AI-label direction mapping, observation/eligibility thresholds, hard risk and quality gates, conflict penalty ceiling, timeframe freshness windows, Economic Calendar phases, exhaustive Market Regime outcomes, cooldown, reversal, hysteresis, validity, API limits, retention, persistence policy, and replay publication controls. Pydantic validation rejects unknown keys, missing mappings/timeframes, overlapping thresholds, negative durations, invalid versions, unknown outcomes, and zero validity. YAML never selects arbitrary imports or executable expressions.

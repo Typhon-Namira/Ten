@@ -15,4 +15,10 @@ ai_scoring:
   policy: weighted_intelligence_v1
   policy_version: 1.0.0
   deterministic: true
+signal_decision:
+  policy: conservative_signal_policy
+  policy_version: 1.0.0
+  deterministic: true
+  fail_closed: true
+  trade_execution: false
 

@@ -10,6 +10,7 @@ from .institutional_flow import router as institutional_flow_router
 from .market_regime import router as market_regime_router
 from .economic_calendar import router as economic_calendar_router
 from .ai_scoring import router as ai_scoring_router
+from .signal_decisions import router as signal_decisions_router
 from .status import router as status_router
 
 api_router = APIRouter()
@@ -23,4 +24,5 @@ api_router.include_router(institutional_flow_router)
 api_router.include_router(market_regime_router)
 api_router.include_router(economic_calendar_router)
 api_router.include_router(ai_scoring_router)
+api_router.include_router(signal_decisions_router)
 api_router.include_router(status_router)

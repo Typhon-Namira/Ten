@@ -526,6 +526,53 @@ class AIScoreConflictRecord(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
 
 
+class SignalDecisionRecord(Base):
+    __tablename__ = "signal_decisions"
+    __table_args__ = (
+        Index("ux_signal_decision_fingerprint_mode", "input_fingerprint", "mode", unique=True),
+        Index("ix_signal_decision_active", "instrument", "timeframe", "valid_until"),
+        Index("ix_signal_decision_history", "instrument", "timeframe", "as_of"),
+    )
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    decision_key: Mapped[str] = mapped_column(String(256), index=True)
+    input_fingerprint: Mapped[str] = mapped_column(String(64))
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    direction: Mapped[str] = mapped_column(String(16), index=True)
+    state: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    mode: Mapped[str] = mapped_column(String(16), index=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ai_score_snapshot_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_score_snapshots.id", ondelete="RESTRICT"), index=True)
+    decision_policy_version: Mapped[str] = mapped_column(String(32), index=True)
+    eligibility_score: Mapped[float] = mapped_column(Float)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class SignalDecisionRuleRecord(Base):
+    __tablename__ = "signal_decision_rules"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    decision_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("signal_decisions.id", ondelete="CASCADE"), index=True)
+    rule_id: Mapped[str] = mapped_column(String(96), index=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    outcome: Mapped[str] = mapped_column(String(24), index=True)
+    severity: Mapped[str] = mapped_column(String(24), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class SignalDecisionReasonRecord(Base):
+    __tablename__ = "signal_decision_reasons"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    decision_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("signal_decisions.id", ondelete="CASCADE"), index=True)
+    reason_type: Mapped[str] = mapped_column(String(24), index=True)
+    reason_code: Mapped[str] = mapped_column(String(96), index=True)
+    severity: Mapped[str] = mapped_column(String(24), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
 class AnalysisResultRecord(Base):
     """Versioned engine output for reproducibility and audit."""
 

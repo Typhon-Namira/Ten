@@ -48,3 +48,11 @@ Read-only endpoints under `/economic-calendar` expose health, sanitized configur
 `GET /ai-scoring/health`, `/config`, and `/metrics` expose bounded operational state. `POST /ai-scoring/score` accepts `instrument`, `timeframe`, optional timezone-aware `as_of`, `persist`, `publish_events`, and `mode`. `POST /ai-scoring/replay` requires `as_of` and suppresses events. `GET /ai-scoring/latest`, `/history`, `/snapshots/{id}`, and `/snapshots/{id}/explanation` expose persisted immutable results. History is limited to 200 rows and a configured 365-day range.
 
 AI score responses are analytical, non-executing context. Confidence measures evidence consistency and quality, not trade win probability.
+
+# Signal Decision Engine
+
+`GET /signal-decisions/health`, `/config`, and `/metrics` expose safe operational state. `POST /signal-decisions/evaluate` requires a trusted `ai_score_snapshot_id`; arbitrary raw score injection is not accepted. `POST /signal-decisions/replay` additionally requires a timezone-aware `as_of` and suppresses live events/features by default.
+
+`GET /signal-decisions/latest` returns only a currently active, non-expired decision. `/history`, `/{decision_id}`, `/{decision_id}/rules`, and `/{decision_id}/explanation` expose bounded immutable history and structured reasoning. Valid blocked and insufficient decisions return HTTP 200 because they are successful policy evaluations. Missing trusted snapshots return 404; validation and policy errors return 422.
+
+Responses contain analytical direction, state, eligibility metadata, validity, blockers, warnings, policy versions, and an explicit safety notice. They contain no execution, order, position-size, entry, stop-loss, or take-profit fields.

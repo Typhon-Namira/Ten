@@ -37,9 +37,9 @@ flowchart TD
   EC[Economic events] --> PM
   PM --> FS[(Versioned feature store)]
   PM --> EB[Typed event bus]
-  FS --> OR[OpenRouter quality scoring]
-  OR --> CC[Deterministic confidence]
-  CC --> SE[Signal engine]
+  FS --> AI[Deterministic AI Scoring]
+  AI --> SD[Signal Decision safety policy]
+  SD --> SE[Analytical scenario presentation]
   SE --> DB[(PostgreSQL-ready storage)]
   DB --> API[FastAPI REST API]
   API --> FE[React dashboard]
@@ -150,3 +150,7 @@ TEN includes a provider-neutral, persistent, revision-aware Economic Calendar En
 ## AI Scoring Engine
 
 TEN includes a deterministic, explainable, point-in-time-safe AI Scoring Engine that combines versioned upstream intelligence into separate direction, confidence, risk, alignment, quality, and composite dimensions. It uses no LLM in Production 1.0 and never executes trades or emits trading instructions. See [docs/AI_SCORING_ENGINE.md](docs/AI_SCORING_ENGINE.md).
+
+## Signal Decision Engine
+
+TEN includes a deterministic, fail-closed [Signal Decision Engine Production 1.0](docs/SIGNAL_DECISION_ENGINE.md). It loads trusted persisted AI Scoring snapshots and applies versioned integrity, freshness, evidence, risk, event, regime, conflict, dependency, duplicate, cooldown, reversal, and validity rules. Outputs are analytical states (`eligible`, `observe_only`, `blocked`, `insufficient_evidence`, `expired`, or `invalid`)—never orders or trading instructions.

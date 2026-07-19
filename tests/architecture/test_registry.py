@@ -6,7 +6,7 @@ def test_loader_discovers_versioned_engine_registrations() -> None:
     loaded = EngineLoader(factory).discover()
     names = {definition.metadata.name for definition in factory.definitions()}
     assert "backend.app.engines.smc_engine" in loaded
-    assert {"market_data", "smc", "liquidity", "institutional_flow", "volume_profile", "economic_calendar", "ai_scoring", "signal", "market_regime", "replay"} <= names
+    assert {"market_data", "smc", "liquidity", "institutional_flow", "volume_profile", "economic_calendar", "ai_scoring", "signal_decision", "signal", "market_regime", "replay"} <= names
     assert all(definition.metadata.version == "1.0.0" for definition in factory.definitions())
     assert all(definition.metadata.compatibility_version == "1.0" for definition in factory.definitions())
 
@@ -17,4 +17,5 @@ def test_registry_enables_production_engines_and_keeps_future_replay_disabled() 
     assert statuses["smc"].enabled is True
     assert statuses["market_regime"].enabled is True
     assert statuses["ai_scoring"].state.value == "ready"
+    assert statuses["signal_decision"].state.value == "ready"
     assert statuses["replay"].enabled is False

@@ -1,4 +1,4 @@
-import type { AIScoreSnapshot, EngineStatus, MarketStatus, Signal } from '../types'
+import type { AIScoreSnapshot, EngineStatus, MarketStatus, Signal, SignalDecisionSnapshot } from '../types'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
@@ -22,5 +22,6 @@ export const tenApi = {
   engines: () => request<EngineStatus[]>('/engines/status'),
   market: () => request<MarketStatus>('/market/status'),
   latestAIScore: () => requestOptional<AIScoreSnapshot>('/ai-scoring/latest?instrument=XAUUSD&timeframe=M15'),
+  latestSignalDecision: () => requestOptional<SignalDecisionSnapshot>('/signal-decisions/latest?instrument=XAUUSD&timeframe=M15'),
 }
 
