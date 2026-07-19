@@ -17,7 +17,7 @@ export function Dashboard() {
   const pipelineHealthy = diagnostics?.operational_state.startsWith('HEALTHY') ?? false
   const operationalValue = !market?.is_open ? 'MARKET CLOSED'
     : operationalSignal?.state.replaceAll('_', ' ').toUpperCase()
-      ?? latestDecision?.state.replaceAll('_', ' ').toUpperCase()
+      ?? (latestDecision ? latestDecision.state === 'eligible' ? 'QUALIFIED SIGNAL' : 'NO QUALIFIED CONFLUENCE' : undefined)
       ?? (diagnostics?.operational_state.replaceAll('_', ' ') ?? 'NO QUALIFIED CONFLUENCE')
   const operationalDetail = !market?.is_open
     ? diagnostics?.history.initialized

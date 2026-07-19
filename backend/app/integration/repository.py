@@ -103,12 +103,12 @@ class InMemoryIntegrationRepository:
 
     async def latest_signal(self, instrument: str | None = None, timeframe: str | None = None) -> OperationalSignal | None:
         async with self._lock:
-            values = [item for item in self._signals.values() if (instrument is None or item.instrument == instrument) and (timeframe is None or item.timeframe == timeframe)]
+            values = [item for item in self._signals.values() if item.state == "eligible" and (instrument is None or item.instrument == instrument) and (timeframe is None or item.timeframe == timeframe)]
         return max(values, key=lambda item: (item.effective_at, str(item.operational_signal_id)), default=None)
 
     async def signals(self, limit: int = 100) -> tuple[OperationalSignal, ...]:
         async with self._lock:
-            values = sorted(self._signals.values(), key=lambda item: (item.effective_at, str(item.operational_signal_id)), reverse=True)
+            values = sorted((item for item in self._signals.values() if item.state == "eligible"), key=lambda item: (item.effective_at, str(item.operational_signal_id)), reverse=True)
         return tuple(values[:limit])
 
     async def trace(self, trace_id: UUID) -> tuple[IntegrationTraceRecord, ...]:
@@ -198,7 +198,7 @@ class SqlAlchemyIntegrationRepository:
         return OperationalSignal.model_validate(record.payload) if record else value
 
     async def latest_signal(self, instrument: str | None = None, timeframe: str | None = None) -> OperationalSignal | None:
-        query = select(OperationalSignalRecord)
+        query = select(OperationalSignalRecord).where(OperationalSignalRecord.payload["state"].astext == "eligible")
         if instrument:
             query = query.where(OperationalSignalRecord.instrument == instrument)
         if timeframe:
@@ -207,7 +207,7 @@ class SqlAlchemyIntegrationRepository:
         return OperationalSignal.model_validate(record.payload) if record else None
 
     async def signals(self, limit: int = 100) -> tuple[OperationalSignal, ...]:
-        records = (await self.session.scalars(select(OperationalSignalRecord).order_by(OperationalSignalRecord.effective_at.desc()).limit(limit))).all()
+        records = (await self.session.scalars(select(OperationalSignalRecord).where(OperationalSignalRecord.payload["state"].astext == "eligible").order_by(OperationalSignalRecord.effective_at.desc()).limit(limit))).all()
         return tuple(OperationalSignal.model_validate(item.payload) for item in records)
 
     async def trace(self, trace_id: UUID) -> tuple[IntegrationTraceRecord, ...]:

@@ -7,7 +7,7 @@ import pytest
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.engines.market_data_engine.events import NewCandle
 from backend.app.events import InMemoryEventBus
-from backend.app.integration import CanonicalEventEnvelope, FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationMode, canonical_hash
+from backend.app.integration import CanonicalEventEnvelope, FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationMode, OperationalSignal, canonical_hash
 
 
 class FakeMarketData:
@@ -147,3 +147,17 @@ async def test_only_eligible_live_decision_publishes_traceable_scenario() -> Non
     assert signal.provider_provenance == ("golden",)
     trace = await repository.trace(signal.trace_id)
     assert trace and trace[0].output_references[-1] == str(signal.operational_signal_id)
+
+
+@pytest.mark.asyncio
+async def test_legacy_blocked_signal_is_not_exposed_as_operational_scenario() -> None:
+    repository = InMemoryIntegrationRepository()
+    eligible = OperationalSignal(
+        operational_signal_id=uuid4(), semantic_hash="d" * 64, decision_id=uuid4(), ai_score_id=uuid4(), snapshot_id=uuid4(), trace_id=uuid4(), market_event_id="e" * 64,
+        instrument="XAUUSD", timeframe="M15", mode=IntegrationMode.LIVE, direction="neutral", state="blocked", confidence=50, effective_at=NOW,
+        expires_at=NOW + timedelta(minutes=15), data_quality_status="valid", provider_provenance=("legacy",), evidence=(), blockers=("legacy_blocked",), created_at=NOW,
+        ai_scoring_policy_version="1.0.0", signal_decision_policy_version="1.0.0",
+    )
+    await repository.save_signal(eligible)
+    assert await repository.latest_signal() is None
+    assert await repository.signals() == ()
