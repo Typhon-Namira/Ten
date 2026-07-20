@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 
 from backend.app.engines.market_data_engine import (
@@ -14,6 +15,7 @@ from backend.app.engines.market_data_engine import (
     ProviderRegistry,
     Timeframe,
 )
+from backend.app.engines.market_data_engine.adapters import TwelveDataProvider
 from backend.app.engines.market_data_engine.events import HistoricalUpdated, NewCandle
 from backend.app.engines.market_data_engine.exceptions import ProviderRateLimitedError, ProviderUnavailableError
 from backend.app.engines.market_data_engine.metrics import calculate_metrics
@@ -102,6 +104,34 @@ async def test_provider_manager_fails_over_and_records_health() -> None:
     assert manager.current_provider == ProviderName.MEMORY.value
     assert manager.statistics[ProviderName.TWELVE_DATA.value].healthy is False
     assert manager.statistics[ProviderName.MEMORY.value].successes == 1
+
+
+@pytest.mark.asyncio
+async def test_manager_statistics_prefer_the_providers_true_latency_over_the_wrapping_timer() -> None:
+    """Regression test: `ProviderManager._execute()`'s own outer timer wraps the whole retrying
+    call, so a provider that retried twice before succeeding used to have that entire multi-second
+    span recorded as `last_latency_ms` — indistinguishable from a genuinely slow single request.
+    The manager must prefer the provider's own true single-call latency when the provider tracks
+    one, and separately expose the retry-inclusive total."""
+    calls = {"count": 0}
+
+    def handler(request):
+        calls["count"] += 1
+        if calls["count"] < 2:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, json={"values": [{"datetime": "2026-07-13T12:00:00Z", "open": "1", "high": "3", "low": "1", "close": "2", "volume": "4"}]})
+
+    provider = TwelveDataProvider(api_key="key", base_url="https://example.test")
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    registry = ProviderRegistry()
+    registry.register(provider)
+    manager = ProviderManager(registry, preferred=ProviderName.TWELVE_DATA.value)
+    await manager.history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.M1))
+    stats = manager.statistics[ProviderName.TWELVE_DATA.value]
+    assert stats.last_retry_count == 1
+    assert stats.last_total_latency_ms >= stats.last_latency_ms
+    await provider.close()
 
 
 class RateLimitedProvider(MarketDataProvider):

@@ -163,6 +163,7 @@ def build_market_intelligence(
     decision: Any,
     errors: dict[str, str | None],
     stage_attempts: dict[str, dict[str, Any] | None] | None = None,
+    economic_stages: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     smc_summary = _smc_summary(smc)
     stage_attempts = stage_attempts or {}
@@ -225,6 +226,14 @@ def build_market_intelligence(
             "risk_window_phase": getattr(economic_context, "risk_window_phase", None) and economic_context.risk_window_phase.value,
             "risk_score": getattr(economic_context, "risk_score", None),
             "next_relevant_event": getattr(economic_context, "next_relevant_event", None) and economic_context.next_relevant_event.display_name,
+            # Provider health -> downloaded events -> mapped events -> relevant events -> trading
+            # context, each reported independently (see
+            # `economic_calendar_engine.analyzer.staged_diagnostics`). Without this, "degraded"
+            # here and "economic_context_unavailable" in a rejected decision's blockers read as
+            # two different, contradictory-looking states even when they trace back to the exact
+            # same fact (no relevant event mapping right now, which is routine, not a provider
+            # outage) — this is what lets the dashboard show *why*, not just *that*.
+            "stages": economic_stages,
         },
         "confidence_percent": getattr(ai_score, "confidence_score", None),
         "ai_directional_label": getattr(ai_score, "directional_label", None) and ai_score.directional_label.value,

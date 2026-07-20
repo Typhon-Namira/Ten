@@ -35,6 +35,12 @@ class ProviderStatistics(BaseModel):
     last_failure_at: datetime | None = None
     last_error: str | None = None
     backoff_until: datetime | None = None
+    # `last_latency_ms` above is the true single-HTTP-call bottleneck. `last_total_latency_ms`
+    # includes retry backoff/rate-gate wait time on top of it; `last_retry_count` says how many of
+    # those retries happened — together they explain a large `last_total_latency_ms` instead of
+    # letting it read as an unexplained slow API response.
+    last_total_latency_ms: float = 0
+    last_retry_count: int = 0
 
 
 class ProviderRegistry:
@@ -90,10 +96,10 @@ class ProviderManager:
         started = perf_counter()
         try:
             result = await provider.fetch_history(request)
-            await self._record_success(provider_name, (perf_counter() - started) * 1000, result)
+            await self._record_success(provider_name, (perf_counter() - started) * 1000, result, provider=provider)
             return result
         except Exception as exc:
-            await self._record_failure(provider_name, (perf_counter() - started) * 1000, type(exc).__name__)
+            await self._record_failure(provider_name, (perf_counter() - started) * 1000, type(exc).__name__, provider=provider)
             raise
 
     async def _execute(self, symbol: str, timeframe: Timeframe, operation: Callable[[MarketDataProvider], Awaitable[ResultT]], *, realtime: bool) -> ResultT:
@@ -108,23 +114,32 @@ class ProviderManager:
             started = perf_counter()
             try:
                 result = await operation(provider)
-                latency = (perf_counter() - started) * 1000
-                await self._record_success(name, latency, result)
+                wrapper_latency = (perf_counter() - started) * 1000
+                await self._record_success(name, wrapper_latency, result, provider=provider)
                 self.current_provider = name
                 return result
             except Exception as exc:
-                await self._record_failure(name, (perf_counter() - started) * 1000, type(exc).__name__, retry_after_seconds=getattr(exc, "retry_after_seconds", None))
+                wrapper_latency = (perf_counter() - started) * 1000
+                await self._record_failure(name, wrapper_latency, type(exc).__name__, retry_after_seconds=getattr(exc, "retry_after_seconds", None), provider=provider)
                 errors.append(f"{name}: {exc}")
         raise ProviderUnavailableError("all eligible providers failed: " + "; ".join(errors))
 
-    async def _record_success(self, name: str, latency: float, result: object) -> None:
+    async def _record_success(self, name: str, wrapper_latency: float, result: object, *, provider: MarketDataProvider | None = None) -> None:
         async with self._lock:
             stats = self.statistics[name]
+            # `wrapper_latency` times the whole call including any retries the provider made
+            # internally; `provider.last_latency_ms` (when the adapter tracks it) is the true
+            # single-HTTP-call duration — prefer the latter so a retried-then-succeeded call
+            # doesn't get reported as one large, unexplained latency spike.
+            latency = getattr(provider, "last_latency_ms", None)
+            latency = wrapper_latency if latency is None else latency
             stats.requests += 1
             stats.successes += 1
             stats.consecutive_successes += 1
             stats.consecutive_failures = 0
             stats.last_latency_ms = latency
+            stats.last_total_latency_ms = getattr(provider, "last_total_latency_ms", wrapper_latency)
+            stats.last_retry_count = getattr(provider, "last_retry_count", 0)
             stats.average_latency_ms += (latency - stats.average_latency_ms) / stats.successes
             stats.last_success_at = datetime.now(UTC)
             stats.last_error = None
@@ -138,14 +153,18 @@ class ProviderManager:
                 stats.healthy = True
             stats.quota = await self.registry.get(name).quota()
 
-    async def _record_failure(self, name: str, latency: float, error_type: str, *, retry_after_seconds: float | None = None) -> None:
+    async def _record_failure(self, name: str, wrapper_latency: float, error_type: str, *, retry_after_seconds: float | None = None, provider: MarketDataProvider | None = None) -> None:
         async with self._lock:
             stats = self.statistics[name]
+            latency = getattr(provider, "last_latency_ms", None)
+            latency = wrapper_latency if latency is None else latency
             stats.requests += 1
             stats.failures += 1
             stats.consecutive_failures += 1
             stats.consecutive_successes = 0
             stats.last_latency_ms = latency
+            stats.last_total_latency_ms = getattr(provider, "last_total_latency_ms", wrapper_latency)
+            stats.last_retry_count = getattr(provider, "last_retry_count", 0)
             stats.last_failure_at = datetime.now(UTC)
             stats.last_error = error_type
             stats.uptime_ratio = stats.successes / stats.requests

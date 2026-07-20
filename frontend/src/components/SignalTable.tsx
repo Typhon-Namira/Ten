@@ -1,13 +1,14 @@
 import { Minus, TrendingDown, TrendingUp } from 'lucide-react'
-import type { Signal } from '../types'
+import type { OperationalSignal } from '../types'
 
-const number = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const DIRECTION_ICON: Record<string, typeof TrendingUp> = { bullish: TrendingUp, bearish: TrendingDown }
 
-function DirectionIcon({ direction }: Pick<Signal, 'direction'>) {
-  return direction === 'long' ? <TrendingUp size={15} /> : direction === 'short' ? <TrendingDown size={15} /> : <Minus size={15} />
+function DirectionIcon({ direction }: { direction: string }) {
+  const Icon = DIRECTION_ICON[direction] ?? Minus
+  return <Icon size={15} />
 }
 
-export function SignalTable({ signals }: { signals: Signal[] }) {
+export function SignalTable({ signals }: { signals: OperationalSignal[] }) {
   if (!signals.length) {
     return (
       <div className="empty-state">
@@ -21,20 +22,19 @@ export function SignalTable({ signals }: { signals: Signal[] }) {
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr><th>Market</th><th>Bias</th><th>Entry zone</th><th>Stop</th><th>Target</th><th>Confidence</th><th>Generated</th></tr></thead>
+        <thead><tr><th>Market</th><th>Bias</th><th>State</th><th>Confidence</th><th>Data quality</th><th>Effective</th><th>Expires</th></tr></thead>
         <tbody>{signals.map((signal) => (
-          <tr key={`${signal.symbol}-${signal.timestamp}`}>
-            <td><strong>{signal.symbol}</strong><small>{signal.timeframe}</small></td>
+          <tr key={signal.operational_signal_id}>
+            <td><strong>{signal.instrument}</strong><small>{signal.timeframe}</small></td>
             <td><span className={`direction direction--${signal.direction}`}><DirectionIcon direction={signal.direction} />{signal.direction}</span></td>
-            <td>{number.format(signal.entry_zone[0])}–{number.format(signal.entry_zone[1])}</td>
-            <td>{number.format(signal.stop_loss)}</td>
-            <td>{number.format(signal.take_profit)}</td>
-            <td><div className="confidence"><span style={{ width: `${signal.confidence * 100}%` }} /><b>{Math.round(signal.confidence * 100)}%</b></div></td>
-            <td>{new Date(signal.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
+            <td>{signal.state.replaceAll('_', ' ')}</td>
+            <td><div className="confidence"><span style={{ width: `${signal.confidence}%` }} /><b>{Math.round(signal.confidence)}%</b></div></td>
+            <td>{signal.data_quality_status}</td>
+            <td>{new Date(signal.effective_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
+            <td>{new Date(signal.expires_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
           </tr>
         ))}</tbody>
       </table>
     </div>
   )
 }
-

@@ -72,6 +72,12 @@ async def test_http_provider_retries_429_then_succeeds() -> None:
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     assert await provider._get("/ok", params={}) == {"ok": True}
     assert calls["count"] == 3
+    # `last_retry_count` records the 2 retries that happened; `last_total_latency_ms` (the whole
+    # retrying call) must be at least as large as `last_latency_ms` (just the final, successful
+    # attempt) — collapsing these into one number is what made a provider that only took a few ms
+    # to actually respond look like a multi-second bottleneck once retry backoff was folded in.
+    assert provider.last_retry_count == 2
+    assert provider.last_total_latency_ms >= provider.last_latency_ms
     await provider.close()
 
 

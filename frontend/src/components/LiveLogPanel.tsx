@@ -34,7 +34,7 @@ export function LiveLogPanel({ status, events }: { status: StreamStatus; events:
             <div key={event.id} className="live-log__line">
               <span className="live-log__time">{new Date(event.occurred_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
               <span className="live-log__source">{event.source}</span>
-              <span>{humanize(event.type)}</span>
+              <span>{humanize(event.type)}{event.count > 1 && <b className="live-log__count"> ×{event.count}</b>}</span>
               {detail(event) && <em>{detail(event)}</em>}
             </div>
           ))

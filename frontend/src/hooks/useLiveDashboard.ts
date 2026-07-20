@@ -25,8 +25,10 @@ async function settle<T>(key: string, promise: Promise<T>, previous: T, errors: 
 }
 
 /** Polls the Part 3/4/5/7 aggregation endpoints every few seconds; the SSE stream (useEventStream)
- * covers the raw live log, this covers the composed "current state" views those events feed into. */
-export function useLiveDashboard(): LiveDashboardState {
+ * covers the raw live log, this covers the composed "current state" views those events feed into.
+ * `instrument`/`timeframe` must come from `useActiveSelection()` — see that hook's docstring for
+ * why hardcoding a default here was the root cause of several dashboard/log inconsistencies. */
+export function useLiveDashboard(instrument: string, timeframe: string): LiveDashboardState {
   const [stages, setStages] = useState<PipelineStagesResponse | null>(null)
   const [rejections, setRejections] = useState<RejectionsResponse | null>(null)
   const [marketIntelligence, setMarketIntelligence] = useState<MarketIntelligence | null>(null)
@@ -40,10 +42,10 @@ export function useLiveDashboard(): LiveDashboardState {
     const current = latest.current
     const nextErrors: Record<string, string> = {}
     const [nextStages, nextRejections, nextIntelligence, nextPerformance] = await Promise.all([
-      settle('stages', tenApi.pipelineStages(), current.stages, nextErrors),
-      settle('rejections', tenApi.rejections(), current.rejections, nextErrors),
-      settle('marketIntelligence', tenApi.marketIntelligence(), current.marketIntelligence, nextErrors),
-      settle('performance', tenApi.performance(), current.performance, nextErrors),
+      settle('stages', tenApi.pipelineStages(instrument, timeframe), current.stages, nextErrors),
+      settle('rejections', tenApi.rejections(instrument, timeframe), current.rejections, nextErrors),
+      settle('marketIntelligence', tenApi.marketIntelligence(instrument, timeframe), current.marketIntelligence, nextErrors),
+      settle('performance', tenApi.performance(instrument, timeframe), current.performance, nextErrors),
     ])
     setStages(nextStages)
     setRejections(nextRejections)
@@ -51,7 +53,7 @@ export function useLiveDashboard(): LiveDashboardState {
     setPerformance(nextPerformance)
     setErrors(nextErrors)
     setLastUpdated(new Date())
-  }, [])
+  }, [instrument, timeframe])
 
   useEffect(() => {
     void refresh()

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { tenApi } from '../services/api'
-import type { AIScoreSnapshot, EngineStatus, MarketStatus, OperationalSignal, ReplaySessionOverview, Signal, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { AIScoreSnapshot, EngineStatus, MarketStatus, OperationalSignal, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 interface DashboardState {
-  signals: Signal[]
+  signals: OperationalSignal[]
   engines: EngineStatus[]
   market: MarketStatus | null
   aiScore: AIScoreSnapshot | null
@@ -25,8 +25,8 @@ async function settle<T>(promise: Promise<T>, previous: T): Promise<{ value: T; 
   }
 }
 
-export function useDashboard(): DashboardState {
-  const [signals, setSignals] = useState<Signal[]>([])
+export function useDashboard(instrument: string, timeframe: string): DashboardState {
+  const [signals, setSignals] = useState<OperationalSignal[]>([])
   const [engines, setEngines] = useState<EngineStatus[]>([])
   const [market, setMarket] = useState<MarketStatus | null>(null)
   const [aiScore, setAIScore] = useState<AIScoreSnapshot | null>(null)
@@ -46,9 +46,9 @@ export function useDashboard(): DashboardState {
       settle(tenApi.signals(), current.signals),
       settle(tenApi.engines(), current.engines),
       settle(tenApi.market(), current.market),
-      settle(tenApi.latestAIScore(), current.aiScore),
-      settle(tenApi.latestSignalDecision(), current.signalDecision),
-      settle(tenApi.latestOperationalSignal(), current.operationalSignal),
+      settle(tenApi.latestAIScore(instrument, timeframe), current.aiScore),
+      settle(tenApi.latestSignalDecision(instrument, timeframe), current.signalDecision),
+      settle(tenApi.latestOperationalSignal(instrument, timeframe), current.operationalSignal),
       settle(tenApi.replays(), current.replays),
       settle(tenApi.diagnostics(), current.diagnostics),
     ])
@@ -63,7 +63,7 @@ export function useDashboard(): DashboardState {
     const firstError = [nextSignals, nextEngines, nextMarket, nextAIScore, nextDecision, nextOperational, nextReplays, nextDiagnostics].find((item) => item.error)?.error
     setError(firstError ?? null)
     setLoading(false)
-  }, [])
+  }, [instrument, timeframe])
 
   useEffect(() => {
     void refresh()

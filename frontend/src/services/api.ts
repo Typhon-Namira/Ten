@@ -1,4 +1,4 @@
-import type { AIScoreSnapshot, EngineStatus, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, RejectionsResponse, ReplaySessionOverview, Signal, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { ActiveSelection, AIScoreSnapshot, EngineStatus, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
 
@@ -17,19 +17,30 @@ async function requestOptional<T>(path: string): Promise<T | null> {
   return response.json() as Promise<T>
 }
 
+/** `instrument`/`timeframe` must always come from `tenApi.selection()` (see useActiveSelection) —
+ * never a literal — so every endpoint below is queried about the same candle series. */
+function scoped(instrument: string, timeframe: string): string {
+  return `instrument=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}`
+}
+
 export const tenApi = {
-  signals: () => request<Signal[]>('/signals?limit=20'),
+  selection: () => request<ActiveSelection>('/api/v1/system/selection'),
+  // `/signals` (backend.app.engines.signal_engine) is a disconnected legacy repository that
+  // nothing in the live pipeline ever writes to — it is permanently empty regardless of pipeline
+  // activity. `/integration/signals` reads the real `OperationalSignal` records `_run()` actually
+  // persists, which is what "Current signals" must reflect.
+  signals: () => request<OperationalSignal[]>('/integration/signals?limit=20'),
   engines: () => request<EngineStatus[]>('/engines/status'),
   market: () => request<MarketStatus>('/market/status'),
   diagnostics: () => request<SystemDiagnostics>('/api/v1/system/diagnostics'),
-  latestAIScore: () => requestOptional<AIScoreSnapshot>('/ai-scoring/latest?instrument=XAUUSD&timeframe=M15'),
-  latestSignalDecision: () => requestOptional<SignalDecisionSnapshot>('/signal-decisions/latest?instrument=XAUUSD&timeframe=M15'),
-  latestOperationalSignal: () => requestOptional<OperationalSignal>('/integration/signals/latest?instrument=XAUUSD&timeframe=M15'),
+  latestAIScore: (instrument: string, timeframe: string) => requestOptional<AIScoreSnapshot>(`/ai-scoring/latest?${scoped(instrument, timeframe)}`),
+  latestSignalDecision: (instrument: string, timeframe: string) => requestOptional<SignalDecisionSnapshot>(`/signal-decisions/latest?${scoped(instrument, timeframe)}`),
+  latestOperationalSignal: (instrument: string, timeframe: string) => requestOptional<OperationalSignal>(`/integration/signals/latest?${scoped(instrument, timeframe)}`),
   replays: () => request<ReplaySessionOverview[]>('/replays?limit=5'),
-  pipelineStages: () => request<PipelineStagesResponse>('/api/v1/pipeline/stages/latest?instrument=XAUUSD&timeframe=M15'),
-  rejections: () => request<RejectionsResponse>('/signal-decisions/rejections/recent?instrument=XAUUSD&timeframe=M15&limit=10'),
-  marketIntelligence: () => request<MarketIntelligence>('/api/v1/system/market-intelligence?instrument=XAUUSD&timeframe=M15'),
-  performance: () => request<PerformanceMetrics>('/api/v1/system/performance?instrument=XAUUSD&timeframe=M15'),
+  pipelineStages: (instrument: string, timeframe: string) => request<PipelineStagesResponse>(`/api/v1/pipeline/stages/latest?${scoped(instrument, timeframe)}`),
+  rejections: (instrument: string, timeframe: string) => request<RejectionsResponse>(`/signal-decisions/rejections/recent?${scoped(instrument, timeframe)}&limit=10`),
+  marketIntelligence: (instrument: string, timeframe: string) => request<MarketIntelligence>(`/api/v1/system/market-intelligence?${scoped(instrument, timeframe)}`),
+  performance: (instrument: string, timeframe: string) => request<PerformanceMetrics>(`/api/v1/system/performance?${scoped(instrument, timeframe)}`),
 }
 
 export const STREAM_URL = `${API_BASE_URL}/stream/events`

@@ -1,14 +1,40 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Request
 
 from backend.app.api.market_intelligence import build_market_intelligence
 from backend.app.api.safe import safe_call
+from backend.app.engines.economic_calendar_engine.analyzer import staged_diagnostics
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.repository import SqlAlchemyMarketDataRepository
 from backend.app.engines.market_data_engine.symbols import provider_symbol
 
 router = APIRouter(prefix="/api/v1/system", tags=["system-diagnostics"])
+
+
+def _default_selection(request: Request) -> tuple[str, str]:
+    """The one authoritative (instrument, timeframe) pair the pipeline actually runs — the first
+    entries of `settings.market_data_symbols`/`market_data_timeframes`. Every dashboard-facing
+    aggregation endpoint below defaults to this instead of a hardcoded "XAUUSD"/"M15" literal, so
+    a deployment that configures a different primary timeframe (e.g. M1) doesn't silently leave
+    every widget querying a pair the pipeline never actually produces data for."""
+    settings = request.app.state.settings
+    return settings.market_data_symbols[0].upper(), settings.market_data_timeframes[0]
+
+
+@router.get("/selection")
+async def selection(request: Request) -> dict[str, object]:
+    """The single source of truth for "which instrument/timeframe is the dashboard about" — every
+    frontend data source must derive its query params from this instead of hardcoding its own
+    default, which is what previously let different widgets silently disagree."""
+    settings = request.app.state.settings
+    instrument, timeframe = _default_selection(request)
+    return {
+        "instrument": instrument,
+        "timeframe": timeframe,
+        "configured_instruments": list(settings.market_data_symbols),
+        "configured_timeframes": list(settings.market_data_timeframes),
+    }
 
 
 @router.get("/diagnostics")
@@ -17,8 +43,8 @@ async def diagnostics(request: Request) -> dict[str, object]:
     settings = app.state.settings
     market = app.state.market_data_service
     integration = app.state.integration_service
-    symbol = settings.market_data_symbols[0]
-    timeframe = Timeframe(settings.market_data_timeframes[0])
+    symbol, timeframe_value = _default_selection(request)
+    timeframe = Timeframe(timeframe_value)
     now = datetime.now(UTC)
     schedule = market.sessions.status_at(now)
     candle = await market.repository.candle_at(symbol, timeframe, now)
@@ -73,7 +99,8 @@ async def diagnostics(request: Request) -> dict[str, object]:
             "rate_limit": provider_stats.quota.model_dump(mode="json") if provider_stats else None,
         },
         "market": {
-            "symbol": "XAU/USD",
+            "symbol": symbol,
+            "timeframe": timeframe.value,
             **schedule.model_dump(mode="json"),
             "latest_candle_at": candle.timestamp if candle else None,
             "latest_candle_age_seconds": max(0, (now - candle.timestamp).total_seconds()) if candle else None,
@@ -103,12 +130,14 @@ async def diagnostics(request: Request) -> dict[str, object]:
 
 
 @router.get("/market-intelligence")
-async def market_intelligence(request: Request, instrument: str = "XAUUSD", timeframe: str = "M15") -> dict[str, object]:
+async def market_intelligence(request: Request, instrument: str | None = None, timeframe: str | None = None) -> dict[str, object]:
     """Every live field for the market-intelligence panel. Never 500s: a failing source is
     reported per-field in `source_errors` and every other field is still returned."""
     app = request.app
     market = app.state.market_data_service
-    symbol = instrument.upper()
+    default_instrument, default_timeframe = _default_selection(request)
+    symbol = (instrument or default_instrument).upper()
+    timeframe = timeframe or default_timeframe
     tf = Timeframe(timeframe)
     now = datetime.now(UTC)
     errors: dict[str, str | None] = {}
@@ -126,6 +155,12 @@ async def market_intelligence(request: Request, instrument: str = "XAUUSD", time
     institutional_flow, errors["institutional_flow"] = await safe_call(lambda: app.state.institutional_flow_service.state(symbol, tf))
     market_regime, errors["market_regime"] = await safe_call(lambda: app.state.market_regime_service.state(symbol, tf))
     economic_context, errors["economic_calendar"] = await safe_call(lambda: app.state.economic_calendar_service.context(symbol, as_of=now, publish=False))
+    economic_stages: dict[str, object] | None = None
+    if economic_context is not None:
+        calendar = app.state.economic_calendar_service
+        economic_snapshot, _ = await safe_call(lambda: calendar.snapshot(now - timedelta(days=2), now + timedelta(days=7), as_of=now))
+        if economic_snapshot is not None:
+            economic_stages = staged_diagnostics(economic_snapshot, economic_context)
     ai_score, errors["ai_scoring"] = await safe_call(lambda: app.state.ai_scoring_service.repository.get_latest_snapshot(symbol, timeframe))
     # The most recently *made* decision, not the most recently *active* one — a decision whose
     # validity window has since lapsed is still the correct thing to show on a "current state"
@@ -170,36 +205,65 @@ async def market_intelligence(request: Request, instrument: str = "XAUUSD", time
         decision=decision,
         errors={key: value for key, value in errors.items() if value is not None},
         stage_attempts=stage_attempts,
+        economic_stages=economic_stages,
     )
 
 
 @router.get("/performance")
-async def performance(request: Request, instrument: str = "XAUUSD", timeframe: str = "M15") -> dict[str, object]:
+async def performance(request: Request, instrument: str | None = None, timeframe: str | None = None) -> dict[str, object]:
     """Pipeline/provider/database/analysis latency, last successful/failed provider call,
     queue length, and worker health — never 500s, unavailable metrics are reported as null."""
     app = request.app
     settings = app.state.settings
     market = app.state.market_data_service
     integration = app.state.integration_service
-    symbol = instrument.upper()
+    default_instrument, default_timeframe = _default_selection(request)
+    symbol = (instrument or default_instrument).upper()
+    timeframe = timeframe or default_timeframe
     tf = Timeframe(timeframe)
     provider_stats = market.manager.statistics.get(settings.market_data_provider)
     integration_metrics = integration.repository.metrics()
     stage = app.state.pipeline_stage_tracker.latest(symbol, timeframe)
+    now = datetime.now(UTC)
+    # `pipeline_latency_ms` (last COMPLETED cycle's duration) and `pipeline_in_flight_ms` (the
+    # CURRENT cycle's elapsed time so far, if one is running) are deliberately separate metrics —
+    # collapsing them into one field is what previously left latency reported as unavailable
+    # exactly when the pipeline was busiest: a cycle that is still running has no completed
+    # duration yet, but "elapsed so far" is exactly the number an operator wants at that moment.
     pipeline_latency_ms = None
-    if stage and stage.get("started_at") and stage.get("complete"):
-        pipeline_latency_ms = (stage["updated_at"] - stage["started_at"]).total_seconds() * 1000
+    pipeline_in_flight_ms = None
+    if stage and stage.get("started_at"):
+        if stage.get("complete"):
+            pipeline_latency_ms = (stage["updated_at"] - stage["started_at"]).total_seconds() * 1000
+        else:
+            pipeline_in_flight_ms = (now - stage["started_at"]).total_seconds() * 1000
+    # If queued work exists but no cycle has even started yet (worker stalled, or the tracker has
+    # no record for this exact instrument/timeframe), the oldest pending outbox item's age is the
+    # only true measure of "how long has this been waiting" — never leave it null while backlog > 0.
+    queue_oldest_pending_age_seconds = None
+    if integration_metrics.get("outbox_backlog"):
+        oldest_pending, _ = await safe_call(lambda: integration.repository.pending(now, 1))
+        if oldest_pending:
+            queue_oldest_pending_age_seconds = max(0.0, (now - oldest_pending[0].available_at).total_seconds())
     # Database, cache, and provider are independent sources of truth that can legitimately
     # disagree (e.g. provider rate-limited but the database still serves the last good candle) —
     # reported separately rather than collapsed into one "market data" status.
-    database_candle, _ = await safe_call(lambda: market.repository.candle_at(symbol, tf, datetime.now(UTC)))
+    database_candle, _ = await safe_call(lambda: market.repository.candle_at(symbol, tf, now))
     return {
         "instrument": symbol,
         "timeframe": timeframe,
         "pipeline_latency_ms": pipeline_latency_ms,
+        "pipeline_in_flight_ms": pipeline_in_flight_ms,
+        "queue_oldest_pending_age_seconds": queue_oldest_pending_age_seconds,
         "provider": {
             "name": settings.market_data_provider,
             "last_latency_ms": getattr(provider_stats, "last_latency_ms", None) if provider_stats else None,
+            # `last_latency_ms` is the true single-HTTP-call bottleneck; `last_total_latency_ms`
+            # is the full wall-clock time including retry backoff/rate-gate waits, and
+            # `last_retry_count` says how many of those retries happened — together they explain
+            # a large total instead of it reading as an unexplained slow API response.
+            "last_total_latency_ms": provider_stats.last_total_latency_ms if provider_stats else None,
+            "last_retry_count": provider_stats.last_retry_count if provider_stats else None,
             "last_provider_success": provider_stats.last_success_at if provider_stats else None,
             "last_provider_failure": provider_stats.last_failure_at if provider_stats else None,
             "last_success_at": provider_stats.last_success_at if provider_stats else None,

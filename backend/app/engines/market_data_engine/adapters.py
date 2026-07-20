@@ -48,7 +48,17 @@ class HttpMarketDataProvider(MarketDataProvider):
         self.base_url = base_url.rstrip("/")
         self.account_id = account_id
         self._client = httpx.AsyncClient(timeout=timeout_seconds)
+        # `last_latency_ms` is the true bottleneck — the raw duration of the single HTTP call that
+        # actually finished last. `last_total_latency_ms` is the full wall-clock time `_get()`
+        # spent including every 429 retry's backoff sleep and rate-gate queueing wait. Reporting
+        # only a wrapping timer around the whole retrying call (the old behavior, still visible as
+        # `ProviderManager._execute()`'s own outer timer) makes a provider that took 400ms to
+        # actually respond look like it took 7+ seconds once two backoff sleeps are folded in —
+        # indistinguishable from a genuinely slow API without this split.
         self.last_latency_ms = 0.0
+        self.last_total_latency_ms = 0.0
+        self.last_retry_count = 0
+        self.last_rate_gate_wait_ms = 0.0
         self._quota = ProviderQuota()
         self._min_interval_seconds = 60.0 / requests_per_minute if requests_per_minute else 0.0
         self._max_rate_limit_retries = max_rate_limit_retries
@@ -76,9 +86,12 @@ class HttpMarketDataProvider(MarketDataProvider):
             self._next_allowed_at = now + self._min_interval_seconds
 
     async def _get(self, path: str, *, params: dict[str, Any], headers: dict[str, str] | None = None) -> Any:
+        total_started = perf_counter()
         rate_limited: ProviderRateLimitedError | None = None
         for attempt in range(self._max_rate_limit_retries + 1):
+            gate_started = perf_counter()
             await self._await_rate_gate()
+            self.last_rate_gate_wait_ms = (perf_counter() - gate_started) * 1000
             started = perf_counter()
             try:
                 response = await self._client.get(f"{self.base_url}{path}", params=params, headers=headers)
@@ -97,6 +110,8 @@ class HttpMarketDataProvider(MarketDataProvider):
                 raise ProviderResponseError(f"{self.provider_name.value} request failed") from exc
             finally:
                 self.last_latency_ms = (perf_counter() - started) * 1000
+                self.last_retry_count = attempt
+                self.last_total_latency_ms = (perf_counter() - total_started) * 1000
         raise rate_limited or ProviderResponseError(f"{self.provider_name.value} request failed")  # pragma: no cover - loop always returns/raises above
 
     def _update_quota(self, headers: httpx.Headers) -> None:

@@ -7,20 +7,27 @@ import { PerformancePanel } from '../components/PerformancePanel'
 import { PipelineStageTracker } from '../components/PipelineStageTracker'
 import { RejectionReasonPanel } from '../components/RejectionReasonPanel'
 import { SignalTable } from '../components/SignalTable'
+import { useActiveSelection } from '../hooks/useActiveSelection'
 import { useDashboard } from '../hooks/useDashboard'
 import { useEventStream } from '../hooks/useEventStream'
 import { useLiveDashboard } from '../hooks/useLiveDashboard'
 
 export function Dashboard() {
-  const { signals, engines, market, aiScore, operationalSignal, replays, diagnostics, loading, error, refresh } = useDashboard()
+  const { selection } = useActiveSelection()
+  const { signals, engines, market, aiScore, operationalSignal, replays, diagnostics, loading, error, refresh } = useDashboard(selection.instrument, selection.timeframe)
   const { status: streamStatus, events } = useEventStream()
-  const { stages, rejections, marketIntelligence, performance, lastUpdated } = useLiveDashboard()
+  const { stages, rejections, marketIntelligence, performance, lastUpdated } = useLiveDashboard(selection.instrument, selection.timeframe)
   const latest = signals[0]
   const latestReplay = replays[0]
   const ready = engines.filter((engine) => engine.state === 'ready').length
   const marketValue = market?.market_status.replaceAll('_', ' ') ?? 'UNKNOWN'
+  // Sourced from `marketIntelligence` (5s poll), not `market` (30s poll) — both used to carry
+  // their own independently-fetched "latest candle" timestamp, so the header and the market
+  // intelligence panel below could legitimately show two different candles for up to ~25s at a
+  // time even when otherwise healthy. There is only one authoritative candle-timestamp source now.
+  const latestCandleAt = marketIntelligence?.latest_candle_timestamp ?? null
   const marketDetail = market?.is_open
-    ? `${market.session?.replaceAll('_', ' ') ?? 'active'} session · latest candle ${market.latest_candle_at ? new Date(market.latest_candle_at).toLocaleString() : 'unavailable'}`
+    ? `${market.session?.replaceAll('_', ' ') ?? 'active'} session · latest candle ${latestCandleAt ? new Date(latestCandleAt).toLocaleString() : 'unavailable'}`
     : `${market?.closure_reason?.replaceAll('_', ' ') ?? 'status unavailable'}${market?.next_expected_open_at ? ` · expected open ${new Date(market.next_expected_open_at).toLocaleString()}` : ''}`
   const latestDecision = diagnostics?.pipeline.latest_decision
   const pipelineHealthy = diagnostics?.operational_state.startsWith('HEALTHY') ?? false

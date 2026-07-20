@@ -8,6 +8,7 @@ from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.engines.market_data_engine.events import NewCandle
 from backend.app.events import InMemoryEventBus
 from backend.app.integration import CanonicalEventEnvelope, FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationMode, OperationalSignal, canonical_hash
+from backend.app.integration.stage_tracker import PipelineStageTracker
 
 
 class FakeMarketData:
@@ -147,6 +148,62 @@ async def test_only_eligible_live_decision_publishes_traceable_scenario() -> Non
     assert signal.provider_provenance == ("golden",)
     trace = await repository.trace(signal.trace_id)
     assert trace and trace[0].output_references[-1] == str(signal.operational_signal_id)
+
+
+class FailingHistoryMarketData(FakeMarketData):
+    async def history(self, *_: object, **__: object) -> list[Candle]:
+        raise RuntimeError("provider rate limited")
+
+
+class FailingSaveRepository(InMemoryIntegrationRepository):
+    async def save_snapshot(self, value: object) -> object:
+        raise RuntimeError("database write failed")
+
+
+@pytest.mark.asyncio
+async def test_market_data_failure_finalizes_the_stage_tracker_cycle_instead_of_freezing_it() -> None:
+    """Regression test: `market_data.history()` used to be called before the try/except that
+    invokes `tracker.fail_in_flight()`, so a provider failure (e.g. a rate-limit circuit-breaker
+    trip) left the cycle permanently stuck at candle_received=success/smc_analysis=waiting
+    forever (rendered "running" indefinitely, per `_render()`) instead of reaching a terminal
+    failed state — exactly the dashboard symptom of a stage frozen on "running" while later,
+    unrelated candles kept completing and publishing their own events."""
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    tracker = PipelineStageTracker()
+    coordinator = service(bus, repository)
+    coordinator.stage_tracker = tracker
+    coordinator.market_data = FailingHistoryMarketData(candle())
+    envelope = CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW)
+    with pytest.raises(RuntimeError):
+        await coordinator.process(envelope)
+    cycle = tracker.latest("XAUUSD", "M15")
+    assert cycle is not None
+    assert cycle["complete"] is True
+    stages = {item["key"]: item["status"] for item in cycle["stages"]}
+    assert stages["candle_received"] == "success"
+    assert stages["smc_analysis"] == "failed"
+    assert stages["liquidity_analysis"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_persistence_failure_finalizes_the_stage_tracker_cycle() -> None:
+    """Same defect class as above, at the other unguarded call site: `repository.save_snapshot()`
+    used to sit after the try/except block, so a persistence failure left ai_scoring/
+    confidence_calculation/scenario_decision stuck "waiting" (rendered "running") forever even
+    though every upstream analysis stage had genuinely completed."""
+    bus = InMemoryEventBus()
+    tracker = PipelineStageTracker()
+    coordinator = service(bus, FailingSaveRepository())
+    coordinator.stage_tracker = tracker
+    envelope = CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW)
+    with pytest.raises(RuntimeError):
+        await coordinator.process(envelope)
+    cycle = tracker.latest("XAUUSD", "M15")
+    assert cycle is not None
+    assert cycle["complete"] is True
+    stages = {item["key"]: item["status"] for item in cycle["stages"]}
+    assert stages["market_regime"] == "success"
+    assert stages["ai_scoring"] == "failed"
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,14 @@ export function MarketIntelligencePanel({ data }: { data: MarketIntelligence | n
     return <div className="empty-state"><h3>Loading market intelligence…</h3></div>
   }
   const candle = data.current_candle
+  // A bare "—" for confidence/decision gives no way to tell "the pipeline hasn't reached this
+  // stage yet" apart from "it ran and genuinely produced nothing" — surface the diagnostics
+  // table's own per-source reason (its latest attempt's error, or its status) inline instead.
+  const reasonFor = (source: string): string => {
+    const diagnostic = data.diagnostics.find((item) => item.source === source)
+    if (!diagnostic) return 'not yet attempted'
+    return diagnostic.error ?? diagnostic.status.replaceAll('_', ' ')
+  }
   return (
     <div>
       <div className="intel-grid">
@@ -51,9 +59,12 @@ export function MarketIntelligencePanel({ data }: { data: MarketIntelligence | n
         <Field label="Institutional flow" value={data.institutional_flow.available ? 'available' : 'unavailable'} />
         <Field label="Volume profile" value={data.volume_profile.available ? 'available' : 'unavailable'} />
         <Field label="Economic status" value={data.economic_status.degraded ? 'degraded' : na(data.economic_status.risk_window_phase)} />
-        <Field label="Confidence %" value={data.confidence_percent === null ? '—' : `${data.confidence_percent.toFixed(1)}%`} />
-        <Field label="Scenario readiness %" value={data.scenario_readiness_percent === null ? '—' : `${data.scenario_readiness_percent.toFixed(1)}%`} />
-        <Field label="Decision status" value={data.decision_status ? `${data.decision_status.replaceAll('_', ' ')}${data.decision_active ? '' : ' (expired)'}` : '—'} />
+        <Field label="Economic provider" value={data.economic_status.stages ? data.economic_status.stages.provider_health.status : '—'} />
+        <Field label="Relevant events" value={data.economic_status.stages ? data.economic_status.stages.relevant_events.status.replaceAll('_', ' ') : '—'} />
+        <Field label="Trading context" value={data.economic_status.stages ? data.economic_status.stages.trading_context.status : '—'} />
+        <Field label="Confidence %" value={data.confidence_percent === null ? `unavailable — ${reasonFor('ai_scoring')}` : `${data.confidence_percent.toFixed(1)}%`} />
+        <Field label="Scenario readiness %" value={data.scenario_readiness_percent === null ? `unavailable — ${reasonFor('signal_decision')}` : `${data.scenario_readiness_percent.toFixed(1)}%`} />
+        <Field label="Decision status" value={data.decision_status ? `${data.decision_status.replaceAll('_', ' ')}${data.decision_active ? '' : ' (expired)'}` : `unavailable — ${reasonFor('signal_decision')}`} />
         <Field label="Latest candle" value={time(data.latest_candle_timestamp)} />
         <Field label="Response generated" value={time(data.generated_at)} />
       </div>

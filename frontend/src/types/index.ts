@@ -1,17 +1,13 @@
-export type Direction = 'long' | 'short' | 'neutral'
 export type EngineState = 'ready' | 'degraded' | 'offline'
 
-export interface Signal {
-  symbol: string
+/** The single authoritative (instrument, timeframe) pair the pipeline actually runs — every
+ * dashboard data source must be queried with this pair, never a hardcoded literal, so widgets
+ * can't silently disagree about which candle series they're each showing. */
+export interface ActiveSelection {
+  instrument: string
   timeframe: string
-  direction: Direction
-  entry_zone: [number, number]
-  stop_loss: number
-  take_profit: number
-  confidence: number
-  reasoning: string[]
-  risk_notes: string[]
-  timestamp: string
+  configured_instruments: string[]
+  configured_timeframes: string[]
 }
 
 export interface EngineStatus {
@@ -160,6 +156,9 @@ export interface ActivityEvent {
   occurred_at: string
   correlation_id: string
   payload: Record<string, unknown>
+  /** >1 when the backend merged a burst of same-type, same-cycle events into one entry (e.g. N
+   * liquidity pools swept in one analysis pass) instead of emitting N near-duplicate log lines. */
+  count: number
 }
 
 export type DiagnosticStatus = 'passed' | 'failed' | 'not_evaluated' | 'informational'
@@ -230,7 +229,22 @@ export interface MarketIntelligence {
   volume_profile: { available: boolean; quality: Record<string, unknown> | null }
   institutional_flow: { available: boolean; state: Record<string, unknown> | null; quality: Record<string, unknown> | null }
   market_regime: { available: boolean; dominant_regime: string | null; trend_regime: string | null; directional_bias: string | null; trend_strength: number | null; volatility_score: number | null; confidence: number | null }
-  economic_status: { available: boolean; degraded: boolean; risk_window_phase: string | null; risk_score: number | null; next_relevant_event: string | null }
+  economic_status: {
+    available: boolean
+    degraded: boolean
+    risk_window_phase: string | null
+    risk_score: number | null
+    next_relevant_event: string | null
+    /** Provider health -> downloaded events -> mapped events -> relevant events -> trading
+     * context, each independently reported — null only if the calendar sync itself failed. */
+    stages: {
+      provider_health: { status: 'healthy' | 'unavailable'; reachable_providers: string[] }
+      downloaded_events: { status: 'ok' | 'empty'; count: number }
+      mapped_events: { status: 'ok' | 'degraded'; mapped_count: number; unmapped_count: number }
+      relevant_events: { status: 'available' | 'none_relevant'; active_count: number; has_previous_event: boolean; has_next_event: boolean }
+      trading_context: { status: 'ready' | 'unavailable'; risk_window_phase: string; risk_score: number; reason: string | null }
+    } | null
+  }
   confidence_percent: number | null
   ai_directional_label: string | null
   ai_composite_score: number | null
@@ -248,8 +262,25 @@ export interface PerformanceMetrics {
   instrument: string
   timeframe: string
   pipeline_latency_ms: number | null
-  provider: { name: string; last_latency_ms: number | null; last_success_at: string | null; last_failure_at: string | null; last_error: string | null; healthy: boolean }
-  database: { mode: string; events: number | null; outbox_backlog: number | null; processed: number | null }
+  /** Elapsed time of the currently-running cycle, if one is in flight (not yet complete). */
+  pipeline_in_flight_ms: number | null
+  /** Age of the oldest queued-but-unprocessed outbox item; populated whenever `queue_length > 0`
+   * even if `pipeline_latency_ms`/`pipeline_in_flight_ms` are both null. */
+  queue_oldest_pending_age_seconds: number | null
+  provider: {
+    name: string
+    last_latency_ms: number | null
+    last_success_at: string | null
+    last_failure_at: string | null
+    last_error: string | null
+    healthy: boolean
+    consecutive_failures: number | null
+    provider_backoff_until: string | null
+    provider_rate_limit_remaining: number | null
+    provider_rate_limit: number | null
+  }
+  database: { mode: string; events: number | null; outbox_backlog: number | null; processed: number | null; last_database_update: string | null; latest_market_candle: string | null }
+  cache: { last_cache_update: string | null; hit_ratio: number; writes: number }
   analysis: { ai_scoring: Record<string, unknown>; signal_decision: Record<string, unknown> }
   queue_length: number | null
   workers: { market_data_worker: Record<string, unknown>; integration_worker: Record<string, unknown> }

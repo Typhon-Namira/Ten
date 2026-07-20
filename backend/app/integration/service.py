@@ -135,9 +135,19 @@ class FullSystemIntegrationService:
         if tracker is not None:
             tracker.begin(symbol, timeframe.value, boundary, correlation_id=str(correlation))
             tracker.mark(symbol, timeframe.value, boundary, ("candle_received", "candle_normalized", "stored_in_database"), "success")
-        candles = await self.market_data.history(symbol, timeframe, end=boundary, limit=self.config.limits.maximum_candles)
         outputs: list[tuple[str, object]] = []
+        # Everything from here through the final `tracker.complete(...)` below is one failure
+        # domain: ANY exception in this span — including `market_data.history()` and
+        # `repository.save_snapshot()`, which used to sit outside this block — must finalize the
+        # cycle via `fail_in_flight()`. Root cause this closes: a provider failure (e.g. a 429/
+        # rate-limit circuit-breaker trip) or a snapshot-persistence error raised from one of
+        # those two unguarded calls used to propagate straight out of `_run()` without ever
+        # touching the tracker, permanently freezing that candle's cycle at "running" on whichever
+        # stage was next — while later, unrelated candles kept completing normally and publishing
+        # their own events, which is exactly what made the frozen cycle look contradictory next to
+        # a live log that had already moved on.
         try:
+            candles = await self.market_data.history(symbol, timeframe, end=boundary, limit=self.config.limits.maximum_candles)
             if candles:
                 smc_snapshot = await self.smc.analyze_candles(candles, correlation_id=correlation)
                 outputs.append(("smc", smc_snapshot))
@@ -162,42 +172,39 @@ class FullSystemIntegrationService:
             elif tracker is not None:
                 tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis", "liquidity_analysis", "volume_profile", "institutional_flow", "market_regime"), "skipped")
             outputs.append(("economic_calendar", await self.economic_calendar.context(symbol, as_of=boundary)))
+            evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]
+            for name, value in outputs:
+                identifier = next((getattr(value, key) for key in ("snapshot_id", "id", "context_id") if getattr(value, key, None) is not None), semantic_uuid(name, envelope.event_id))
+                timestamp = next((getattr(value, key) for key in ("analysis_timestamp", "as_of", "created_at") if getattr(value, key, None) is not None), boundary)
+                evidence.append(EvidenceReference(engine=name, evidence_id=str(identifier), engine_version=str(getattr(value, "engine_version", "1.0.0")), effective_at=timestamp))
+            missing = tuple(name for name in self.config.policy.required_evidence if name not in {item.engine for item in evidence})
+            evidence_payload = [item.model_dump(mode="json") for item in evidence]
+            snapshot_hash = canonical_hash({"event": envelope.event_id, "policy": self.config.policy.version, "evidence": evidence_payload, "missing": missing})
+            snapshot = IntegrationSnapshot(snapshot_id=semantic_uuid("snapshot", snapshot_hash), semantic_hash=snapshot_hash, mode=envelope.mode, instrument=symbol, timeframe=timeframe.value, analytical_boundary=boundary, market_event_id=envelope.event_id, evidence=tuple(evidence), missing_required=missing, data_quality_status=envelope.data_quality_status, status=SnapshotStatus.READY if not missing else SnapshotStatus.INSUFFICIENT_DATA, created_at=self.clock())
+            await self.repository.save_snapshot(snapshot)
+            if missing:
+                if tracker is not None:
+                    tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation", "scenario_decision"), "skipped")
+                    tracker.complete(symbol, timeframe.value, boundary)
+            else:
+                score_mode = ScoreMode.LIVE if envelope.mode == IntegrationMode.LIVE else ScoreMode.REPLAY
+                decision_mode = DecisionMode.LIVE if envelope.mode == IntegrationMode.LIVE else DecisionMode.REPLAY
+                score = await self.ai_scoring.calculate(ScoreRequest(instrument=symbol, timeframe=timeframe.value, as_of=boundary, mode=score_mode))
+                if tracker is not None:
+                    tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation"), "success")
+                decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=decision_mode))
+                if tracker is not None:
+                    tracker.mark(symbol, timeframe.value, boundary, ("scenario_decision",), "success")
+                    tracker.complete(symbol, timeframe.value, boundary)
         except Exception as exc:
             if tracker is not None:
                 tracker.fail_in_flight(symbol, timeframe.value, boundary, exc=exc)
             raise
-        evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]
-        for name, value in outputs:
-            identifier = next((getattr(value, key) for key in ("snapshot_id", "id", "context_id") if getattr(value, key, None) is not None), semantic_uuid(name, envelope.event_id))
-            timestamp = next((getattr(value, key) for key in ("analysis_timestamp", "as_of", "created_at") if getattr(value, key, None) is not None), boundary)
-            evidence.append(EvidenceReference(engine=name, evidence_id=str(identifier), engine_version=str(getattr(value, "engine_version", "1.0.0")), effective_at=timestamp))
-        missing = tuple(name for name in self.config.policy.required_evidence if name not in {item.engine for item in evidence})
-        evidence_payload = [item.model_dump(mode="json") for item in evidence]
-        snapshot_hash = canonical_hash({"event": envelope.event_id, "policy": self.config.policy.version, "evidence": evidence_payload, "missing": missing})
-        snapshot = IntegrationSnapshot(snapshot_id=semantic_uuid("snapshot", snapshot_hash), semantic_hash=snapshot_hash, mode=envelope.mode, instrument=symbol, timeframe=timeframe.value, analytical_boundary=boundary, market_event_id=envelope.event_id, evidence=tuple(evidence), missing_required=missing, data_quality_status=envelope.data_quality_status, status=SnapshotStatus.READY if not missing else SnapshotStatus.INSUFFICIENT_DATA, created_at=self.clock())
-        await self.repository.save_snapshot(snapshot)
         if missing:
             logger.warning("snapshot.incomplete", extra={"snapshot_id": str(snapshot.snapshot_id), "symbol": symbol, "timeframe": timeframe.value, "missing": missing})
-            if tracker is not None:
-                tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation", "scenario_decision"), "skipped")
-                tracker.complete(symbol, timeframe.value, boundary)
             await self.repository.mark_processed(envelope.event_id)
             await self._trace(envelope, TraceStatus.BLOCKED, "snapshot_barrier", (envelope.event_id,), (str(snapshot.snapshot_id),), started)
             return None
-        score_mode = ScoreMode.LIVE if envelope.mode == IntegrationMode.LIVE else ScoreMode.REPLAY
-        decision_mode = DecisionMode.LIVE if envelope.mode == IntegrationMode.LIVE else DecisionMode.REPLAY
-        try:
-            score = await self.ai_scoring.calculate(ScoreRequest(instrument=symbol, timeframe=timeframe.value, as_of=boundary, mode=score_mode))
-            if tracker is not None:
-                tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation"), "success")
-            decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=decision_mode))
-            if tracker is not None:
-                tracker.mark(symbol, timeframe.value, boundary, ("scenario_decision",), "success")
-                tracker.complete(symbol, timeframe.value, boundary)
-        except Exception as exc:
-            if tracker is not None:
-                tracker.fail_in_flight(symbol, timeframe.value, boundary, exc=exc)
-            raise
         logger.info("signal_decision.completed", extra={"snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "state": decision.state.value, "mode": envelope.mode.value})
         blocker_codes = tuple(item.reason_code for item in decision.blockers)
         warning_codes = tuple(item.reason_code for item in decision.warnings)
