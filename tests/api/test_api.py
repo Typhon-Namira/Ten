@@ -153,6 +153,15 @@ async def test_performance_reports_queue_backlog_age_when_nothing_has_started_pr
     assert body["queue_oldest_pending_age_seconds"] >= 0
 
 
+def test_chart_overlays_endpoint_returns_candles_and_engine_overlays() -> None:
+    with TestClient(create_app()) as client:
+        response = client.get("/api/v1/chart/overlays")
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) >= {"instrument", "timeframe", "candles", "structure_events", "zones", "dealing_range", "liquidity_pools", "liquidity_sweeps", "sessions", "volume_profile", "source_errors"}
+    assert isinstance(body["candles"], list)
+
+
 def test_signal_endpoints_start_empty() -> None:
     with TestClient(create_app()) as client:
         assert client.get("/signals").json() == []

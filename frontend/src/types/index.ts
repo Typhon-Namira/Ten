@@ -246,6 +246,7 @@ export interface MarketIntelligence {
     } | null
   }
   confidence_percent: number | null
+  risk_percent: number | null
   ai_directional_label: string | null
   ai_composite_score: number | null
   ai_missing_sources: string[]
@@ -285,6 +286,98 @@ export interface PerformanceMetrics {
   queue_length: number | null
   workers: { market_data_worker: Record<string, unknown>; integration_worker: Record<string, unknown> }
   event_bus: Record<string, unknown>
+}
+
+export interface ChartCandle {
+  time: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+export interface ChartStructureEvent {
+  id: string
+  kind: string
+  direction: string
+  time: number
+  price: number
+  confidence: number
+}
+
+export interface ChartZone {
+  id: string
+  kind: string
+  direction: string
+  upper: number
+  lower: number
+  start_time: number
+  lifecycle_state: string
+  mitigation_percentage: number
+}
+
+export interface ChartDealingRange {
+  range_high: number
+  range_low: number
+  equilibrium: number
+  premium_boundary: number
+  discount_boundary: number
+  golden_zone_low: number
+  golden_zone_high: number
+  start_time: number
+  end_time: number
+  direction: string
+}
+
+export interface ChartLiquidityPool {
+  id: string
+  side: string
+  upper: number
+  lower: number
+  start_time: number
+  lifecycle_state: string
+  strength: number
+  target_rank: number | null
+}
+
+export interface ChartLiquiditySweep {
+  id: string
+  kind: string
+  time: number
+  price: number
+  side: string
+}
+
+export interface ChartSession {
+  session: string
+  high: number
+  low: number
+  opened_at: number
+  completed: boolean
+}
+
+export interface ChartVolumeProfile {
+  poc: number | null
+  vah: number | null
+  val: number | null
+  start_time: number
+  end_time: number
+}
+
+export interface ChartOverlays {
+  instrument: string
+  timeframe: string
+  generated_at: string
+  candles: ChartCandle[]
+  structure_events: ChartStructureEvent[]
+  zones: ChartZone[]
+  dealing_range: ChartDealingRange | null
+  liquidity_pools: ChartLiquidityPool[]
+  liquidity_sweeps: ChartLiquiditySweep[]
+  sessions: ChartSession[]
+  volume_profile: ChartVolumeProfile | null
+  source_errors: Record<string, string>
 }
 
 export interface ReplaySessionOverview {

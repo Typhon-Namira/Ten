@@ -24,7 +24,11 @@ CATEGORY_LABELS: dict[str, str] = {
     "news_filter": "News filter",
     "economic_filter": "Economic filter",
     "institutional_confirmation": "Insufficient institutional confirmation",
-    "session_mismatch": "Session mismatch",
+    # This check can PASS (an active, liquid session) or FAIL (a thin-liquidity session) — the
+    # label must read sensibly either way. "Session mismatch" only made sense for the failing
+    # case, so a passing "New York session is an active trading window" result under a "Session
+    # mismatch" heading looked self-contradictory even though the diagnostic was correct.
+    "session_mismatch": "Session liquidity",
     "volume_confirmation": "Volume confirmation failed",
     "confidence_score": "Confidence score",
 }

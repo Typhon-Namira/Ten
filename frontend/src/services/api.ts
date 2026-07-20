@@ -1,4 +1,4 @@
-import type { ActiveSelection, AIScoreSnapshot, EngineStatus, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { ActiveSelection, AIScoreSnapshot, ChartOverlays, EngineStatus, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
 
@@ -41,6 +41,8 @@ export const tenApi = {
   rejections: (instrument: string, timeframe: string) => request<RejectionsResponse>(`/signal-decisions/rejections/recent?${scoped(instrument, timeframe)}&limit=10`),
   marketIntelligence: (instrument: string, timeframe: string) => request<MarketIntelligence>(`/api/v1/system/market-intelligence?${scoped(instrument, timeframe)}`),
   performance: (instrument: string, timeframe: string) => request<PerformanceMetrics>(`/api/v1/system/performance?${scoped(instrument, timeframe)}`),
+  aiScoreHistory: (instrument: string, timeframe: string, limit = 40) => request<AIScoreSnapshot[]>(`/ai-scoring/history?${scoped(instrument, timeframe)}&limit=${limit}`),
+  chartOverlays: (instrument: string, timeframe: string, limit = 300) => request<ChartOverlays>(`/api/v1/chart/overlays?${scoped(instrument, timeframe)}&limit=${limit}`),
 }
 
 export const STREAM_URL = `${API_BASE_URL}/stream/events`

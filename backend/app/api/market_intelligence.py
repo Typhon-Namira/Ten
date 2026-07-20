@@ -236,6 +236,7 @@ def build_market_intelligence(
             "stages": economic_stages,
         },
         "confidence_percent": getattr(ai_score, "confidence_score", None),
+        "risk_percent": getattr(ai_score, "market_risk_score", None),
         "ai_directional_label": getattr(ai_score, "directional_label", None) and ai_score.directional_label.value,
         "ai_composite_score": getattr(ai_score, "composite_score", None),
         "ai_missing_sources": list(getattr(ai_score, "missing_sources", ()) or ()),
