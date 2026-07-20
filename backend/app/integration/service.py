@@ -21,6 +21,20 @@ from .stage_tracker import PipelineStageTracker
 logger = logging.getLogger(__name__)
 
 
+def _stage_status(result: object) -> str:
+    """Success unless the engine's own returned status reports degraded input/quality.
+
+    Engines never raise for a degraded-but-completed analysis (only for genuine failures, e.g.
+    persistence errors) — the distinction lives in the returned snapshot's `status` field. Each
+    engine defines its own local status enum, so this matches on the serialized value rather than
+    a specific enum type, which keeps this helper decoupled from any one engine's model classes.
+    """
+    value = getattr(getattr(result, "status", None), "value", None)
+    if isinstance(value, str) and "degrad" in value.lower():
+        return "degraded"
+    return "success"
+
+
 class FullSystemIntegrationService:
     """Coordinates existing engines at a final-candle boundary; contains no analytics."""
 
@@ -125,21 +139,26 @@ class FullSystemIntegrationService:
         correlation = envelope.correlation_id
         try:
             if candles:
-                outputs.append(("smc", await self.smc.analyze_candles(candles, correlation_id=correlation)))
+                smc_snapshot = await self.smc.analyze_candles(candles, correlation_id=correlation)
+                outputs.append(("smc", smc_snapshot))
                 if tracker is not None:
-                    tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis",), "success")
-                outputs.append(("liquidity", await self.liquidity.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
+                    tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis",), _stage_status(smc_snapshot))
+                liquidity_snapshot = await self.liquidity.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)
+                outputs.append(("liquidity", liquidity_snapshot))
                 if tracker is not None:
-                    tracker.mark(symbol, timeframe.value, boundary, ("liquidity_analysis",), "success")
-                outputs.append(("volume_profile", await self.volume_profile.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
+                    tracker.mark(symbol, timeframe.value, boundary, ("liquidity_analysis",), _stage_status(liquidity_snapshot))
+                volume_profile_snapshot = await self.volume_profile.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)
+                outputs.append(("volume_profile", volume_profile_snapshot))
                 if tracker is not None:
-                    tracker.mark(symbol, timeframe.value, boundary, ("volume_profile",), "success")
-                outputs.append(("institutional_flow", await self.institutional_flow.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
+                    tracker.mark(symbol, timeframe.value, boundary, ("volume_profile",), _stage_status(volume_profile_snapshot))
+                institutional_flow_snapshot = await self.institutional_flow.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)
+                outputs.append(("institutional_flow", institutional_flow_snapshot))
                 if tracker is not None:
-                    tracker.mark(symbol, timeframe.value, boundary, ("institutional_flow",), "success")
-                outputs.append(("market_regime", await self.market_regime.analyze_snapshot(symbol, timeframe, timestamp=boundary)))
+                    tracker.mark(symbol, timeframe.value, boundary, ("institutional_flow",), _stage_status(institutional_flow_snapshot))
+                market_regime_snapshot = await self.market_regime.analyze_snapshot(symbol, timeframe, timestamp=boundary)
+                outputs.append(("market_regime", market_regime_snapshot))
                 if tracker is not None:
-                    tracker.mark(symbol, timeframe.value, boundary, ("market_regime",), "success")
+                    tracker.mark(symbol, timeframe.value, boundary, ("market_regime",), _stage_status(market_regime_snapshot))
             elif tracker is not None:
                 tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis", "liquidity_analysis", "volume_profile", "institutional_flow", "market_regime"), "skipped")
             outputs.append(("economic_calendar", await self.economic_calendar.context(symbol, as_of=boundary)))

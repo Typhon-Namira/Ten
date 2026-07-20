@@ -1,10 +1,11 @@
-import { CheckCircle2, CircleDashed, Loader2, MinusCircle, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, CircleDashed, Loader2, MinusCircle, XCircle } from 'lucide-react'
 import type { PipelineStagesResponse, StageStatus } from '../types'
 
 const ICONS: Record<StageStatus, typeof CheckCircle2> = {
   waiting: CircleDashed,
   running: Loader2,
   success: CheckCircle2,
+  degraded: AlertTriangle,
   failed: XCircle,
   skipped: MinusCircle,
 }

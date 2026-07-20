@@ -2,6 +2,13 @@
 
 Pure presentation layer: every field is read from already-computed, already-persisted engine
 snapshots. It calls no engine analysis methods and cannot change any engine's output.
+
+Retrieval policy (see docs/MARKET_INTELLIGENCE_TRACE.md-equivalent reasoning inline): each source
+is read independently via that engine's own "latest snapshot ever persisted" accessor — never a
+validity-windowed or exact-boundary-matched query — because engines legitimately complete a few
+seconds apart and a stale-but-present snapshot is far more useful to an operator than a false
+"unavailable". Every field's own timestamp and freshness state travels with it in `diagnostics`,
+so staleness is always explicit rather than silently hidden or silently trusted.
 """
 
 from __future__ import annotations
@@ -12,6 +19,12 @@ from typing import Any
 FVG_ZONE_TYPES = {"bullish_fvg", "bearish_fvg", "bullish_inversion_fvg", "bearish_inversion_fvg"}
 OB_ZONE_TYPES = {"bullish_order_block", "bearish_order_block", "bullish_breaker", "bearish_breaker", "bullish_mitigation_block", "bearish_mitigation_block"}
 INACTIVE_LIFECYCLE = {"invalidated", "archived", "expired", "superseded"}
+
+# Freshness policy is purely an observability label — it never gates or filters retrieval (a
+# snapshot older than STALE_SECONDS is still returned, just reported as "stale" rather than
+# silently hidden or silently presented as current).
+FRESH_SECONDS = 20 * 60
+AGING_SECONDS = 60 * 60
 
 
 def _dump(value: Any) -> Any:
@@ -30,6 +43,43 @@ def _most_recent(items: tuple, timestamp_attr: str, *, where: Any = None) -> Any
     if not pool:
         return None
     return max(pool, key=lambda item: getattr(item, timestamp_attr))
+
+
+def _freshness(age_seconds: float | None) -> str:
+    if age_seconds is None:
+        return "unknown"
+    if age_seconds <= FRESH_SECONDS:
+        return "fresh"
+    if age_seconds <= AGING_SECONDS:
+        return "aging"
+    return "stale"
+
+
+def _snapshot_timestamp(snapshot: Any, timestamp_attrs: tuple[str, ...]) -> datetime | None:
+    for attr in timestamp_attrs:
+        value = getattr(snapshot, attr, None)
+        if value is not None:
+            return value
+    return None
+
+
+def source_diagnostic(
+    name: str, instrument: str, timeframe: str, snapshot: Any, error: str | None, now: datetime, timestamp_attrs: tuple[str, ...] = ("analysis_timestamp", "as_of", "created_at")
+) -> dict[str, Any]:
+    """Per-source retrieval diagnostics: exactly what was queried, what came back, and how old it is."""
+    timestamp = _snapshot_timestamp(snapshot, timestamp_attrs) if snapshot is not None else None
+    age_seconds = (now - timestamp).total_seconds() if timestamp is not None else None
+    return {
+        "source": name,
+        "instrument": instrument,
+        "timeframe": timeframe,
+        "status": "error" if error else ("ok" if snapshot is not None else "unavailable"),
+        "snapshot_found": snapshot is not None,
+        "snapshot_timestamp": timestamp,
+        "age_seconds": age_seconds,
+        "freshness": _freshness(age_seconds),
+        "error": error,
+    }
 
 
 def _smc_summary(snapshot: Any) -> dict[str, Any]:
@@ -74,6 +124,7 @@ def build_market_intelligence(
     now: datetime,
     session,
     candle: Any,
+    spread_supported: bool | None,
     smc: Any,
     liquidity: Any,
     volume_profile: Any,
@@ -85,14 +136,30 @@ def build_market_intelligence(
     errors: dict[str, str | None],
 ) -> dict[str, Any]:
     smc_summary = _smc_summary(smc)
+    # Real spread requires provider bid/ask capability (see docs/MARKET_DATA_ENGINE.md); providers
+    # without it leave Candle.spread at its Pydantic default of 0.0, which is indistinguishable
+    # from a genuine zero spread unless the provider's capability is checked explicitly here.
+    spread = candle.spread if candle is not None and spread_supported else None
+    diagnostics = [
+        source_diagnostic("market_data", instrument, timeframe, candle, errors.get("candle"), now, ("timestamp",)),
+        source_diagnostic("smc", instrument, timeframe, smc, errors.get("smc"), now),
+        source_diagnostic("liquidity", instrument, timeframe, liquidity, errors.get("liquidity"), now),
+        source_diagnostic("volume_profile", instrument, timeframe, volume_profile, errors.get("volume_profile"), now),
+        source_diagnostic("institutional_flow", instrument, timeframe, institutional_flow, errors.get("institutional_flow"), now),
+        source_diagnostic("market_regime", instrument, timeframe, market_regime, errors.get("market_regime"), now),
+        source_diagnostic("economic_calendar", instrument, timeframe, economic_context, errors.get("economic_calendar"), now, ("analysis_timestamp",)),
+        source_diagnostic("ai_scoring", instrument, timeframe, ai_score, errors.get("ai_scoring"), now, ("as_of",)),
+        source_diagnostic("signal_decision", instrument, timeframe, decision, errors.get("signal_decision"), now, ("as_of",)),
+    ]
     return {
         "instrument": instrument,
         "timeframe": timeframe,
-        "as_of": now,
+        "generated_at": now,
+        "latest_candle_timestamp": candle.timestamp if candle else None,
         "current_session": session.active_session.value if session and session.active_session else "closed",
         "market_open": session.market_open if session else None,
-        "current_candle": {"timestamp": candle.timestamp, "open": candle.open, "high": candle.high, "low": candle.low, "close": candle.close, "volume": candle.volume, "spread": candle.spread} if candle else None,
-        "spread": candle.spread if candle else None,
+        "current_candle": {"timestamp": candle.timestamp, "open": candle.open, "high": candle.high, "low": candle.low, "close": candle.close, "volume": candle.volume, "spread": spread} if candle else None,
+        "spread": spread,
         "smc": smc_summary,
         "current_bias": smc_summary.get("current_bias"),
         "htf_bias": smc_summary.get("htf_bias"),
@@ -129,6 +196,7 @@ def build_market_intelligence(
         "scenario_readiness_percent": getattr(decision, "eligibility_score", None),
         "decision_status": getattr(decision, "state", None) and decision.state.value,
         "decision_direction": getattr(decision, "direction", None) and decision.direction.value,
-        "last_update_time": now,
+        "decision_active": bool(decision is not None and getattr(decision, "valid_until", now) > now),
+        "diagnostics": diagnostics,
         "source_errors": errors,
     }

@@ -114,6 +114,12 @@ async def market_intelligence(request: Request, instrument: str = "XAUUSD", time
     errors: dict[str, str | None] = {}
 
     candle, errors["candle"] = await safe_call(lambda: market.latest(symbol, tf))
+    spread_supported: bool | None = None
+    if candle is not None:
+        try:
+            spread_supported = market.manager.registry.get(candle.provider).capabilities.spread
+        except Exception:
+            spread_supported = None
     smc, errors["smc"] = await safe_call(lambda: app.state.smc_service.state(symbol, tf))
     liquidity, errors["liquidity"] = await safe_call(lambda: app.state.liquidity_service.state(symbol, tf))
     volume_profile, errors["volume_profile"] = await safe_call(lambda: app.state.volume_profile_service.state(symbol, tf))
@@ -121,7 +127,12 @@ async def market_intelligence(request: Request, instrument: str = "XAUUSD", time
     market_regime, errors["market_regime"] = await safe_call(lambda: app.state.market_regime_service.state(symbol, tf))
     economic_context, errors["economic_calendar"] = await safe_call(lambda: app.state.economic_calendar_service.context(symbol, as_of=now, publish=False))
     ai_score, errors["ai_scoring"] = await safe_call(lambda: app.state.ai_scoring_service.repository.get_latest_snapshot(symbol, timeframe))
-    decision, errors["signal_decision"] = await safe_call(lambda: app.state.signal_decision_service.repository.get_active_decision(symbol, timeframe, now))
+    # The most recently *made* decision, not the most recently *active* one — a decision whose
+    # validity window has since lapsed is still the correct thing to show on a "current state"
+    # panel (labeled via `decision_active`), matching how every other source here reports its
+    # latest-ever snapshot rather than requiring it to still be within some window.
+    decisions, errors["signal_decision"] = await safe_call(lambda: app.state.signal_decision_service.repository.find_recent_decisions(symbol, timeframe, now, 1))
+    decision = decisions[0] if decisions else None
 
     try:
         session_status = market.sessions.status_at(now)
@@ -134,6 +145,7 @@ async def market_intelligence(request: Request, instrument: str = "XAUUSD", time
         now=now,
         session=session_status,
         candle=candle,
+        spread_supported=spread_supported,
         smc=smc,
         liquidity=liquidity,
         volume_profile=volume_profile,

@@ -130,7 +130,7 @@ export interface OperationalSignal {
 export type ReplayStatus = 'created' | 'validating' | 'ready' | 'running' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'recovering'
 export type ReplayMode = 'maximum_speed' | 'accelerated' | 'real_time' | 'step'
 
-export type StageStatus = 'waiting' | 'running' | 'success' | 'failed' | 'skipped'
+export type StageStatus = 'waiting' | 'running' | 'success' | 'degraded' | 'failed' | 'skipped'
 
 export interface PipelineStage {
   key: string
@@ -195,10 +195,26 @@ export interface RejectionsResponse {
   rejections: RejectedDecision[]
 }
 
+export type SourceFreshness = 'fresh' | 'aging' | 'stale' | 'unknown'
+export type SourceDiagnosticStatus = 'ok' | 'unavailable' | 'error'
+
+export interface SourceDiagnostic {
+  source: string
+  instrument: string
+  timeframe: string
+  status: SourceDiagnosticStatus
+  snapshot_found: boolean
+  snapshot_timestamp: string | null
+  age_seconds: number | null
+  freshness: SourceFreshness
+  error: string | null
+}
+
 export interface MarketIntelligence {
   instrument: string
   timeframe: string
-  as_of: string
+  generated_at: string
+  latest_candle_timestamp: string | null
   current_session: string
   market_open: boolean | null
   current_candle: { timestamp: string; open: number; high: number; low: number; close: number; volume: number; spread: number | null } | null
@@ -223,7 +239,8 @@ export interface MarketIntelligence {
   scenario_readiness_percent: number | null
   decision_status: string | null
   decision_direction: string | null
-  last_update_time: string
+  decision_active: boolean
+  diagnostics: SourceDiagnostic[]
   source_errors: Record<string, string>
 }
 
