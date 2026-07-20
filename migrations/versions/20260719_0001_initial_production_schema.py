@@ -1,8 +1,8 @@
-"""initial production schema
+﻿"""initial production schema
 
 Revision ID: 20260719_0001
-Revises:
-Create Date: 2026-07-19 23:54:04.032141
+Revises: 
+Create Date: 2026-07-20 14:38:24.558957
 """
 
 from collections.abc import Sequence
@@ -207,4 +207,1037 @@ def upgrade() -> None:
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('evidence_id', sa.UUID(), nullable=False),
     sa.Column('source_engine', sa.String(length=32), nullable=False),
-    sa.Column('evidence_type', sa.String(length=64), nullable=
+    sa.Column('evidence_type', sa.String(length=64), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('availability_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('direction', sa.String(length=32), nullable=False),
+    sa.Column('confidence', sa.Float(), nullable=False),
+    sa.Column('quality', sa.Float(), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_institutional_flow_evidence_availability_timestamp'), 'institutional_flow_evidence', ['availability_timestamp'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_evidence_created_at'), 'institutional_flow_evidence', ['created_at'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_evidence_evidence_id'), 'institutional_flow_evidence', ['evidence_id'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_evidence_evidence_type'), 'institutional_flow_evidence', ['evidence_type'], unique=False)
+    op.create_index('ix_institutional_flow_evidence_series_time', 'institutional_flow_evidence', ['symbol', 'timeframe', 'availability_timestamp'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_evidence_source_engine'), 'institutional_flow_evidence', ['source_engine'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_evidence_symbol'), 'institutional_flow_evidence', ['symbol'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_evidence_timeframe'), 'institutional_flow_evidence', ['timeframe'], unique=False)
+    op.create_table('institutional_flow_snapshots',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('analysis_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('processing_mode', sa.String(length=32), nullable=False),
+    sa.Column('status', sa.String(length=32), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_institutional_flow_snapshots_analysis_timestamp'), 'institutional_flow_snapshots', ['analysis_timestamp'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_snapshots_created_at'), 'institutional_flow_snapshots', ['created_at'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_snapshots_symbol'), 'institutional_flow_snapshots', ['symbol'], unique=False)
+    op.create_index(op.f('ix_institutional_flow_snapshots_timeframe'), 'institutional_flow_snapshots', ['timeframe'], unique=False)
+    op.create_index('ux_institutional_flow_snapshot_boundary', 'institutional_flow_snapshots', ['symbol', 'timeframe', 'analysis_timestamp', 'configuration_version', 'processing_mode'], unique=True)
+    op.create_table('integration_data_quality_issues',
+    sa.Column('issue_id', sa.UUID(), nullable=False),
+    sa.Column('event_id', sa.String(length=64), nullable=False),
+    sa.Column('provider', sa.String(length=64), nullable=False),
+    sa.Column('status', sa.String(length=24), nullable=False),
+    sa.Column('observed_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.PrimaryKeyConstraint('issue_id')
+    )
+    op.create_index(op.f('ix_integration_data_quality_issues_event_id'), 'integration_data_quality_issues', ['event_id'], unique=False)
+    op.create_index(op.f('ix_integration_data_quality_issues_observed_at'), 'integration_data_quality_issues', ['observed_at'], unique=False)
+    op.create_index(op.f('ix_integration_data_quality_issues_provider'), 'integration_data_quality_issues', ['provider'], unique=False)
+    op.create_index(op.f('ix_integration_data_quality_issues_status'), 'integration_data_quality_issues', ['status'], unique=False)
+    op.create_table('integration_event_trace',
+    sa.Column('trace_record_id', sa.UUID(), nullable=False),
+    sa.Column('trace_id', sa.UUID(), nullable=False),
+    sa.Column('event_id', sa.String(length=64), nullable=False),
+    sa.Column('status', sa.String(length=24), nullable=False),
+    sa.Column('started_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('completed_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.PrimaryKeyConstraint('trace_record_id')
+    )
+    op.create_index(op.f('ix_integration_event_trace_event_id'), 'integration_event_trace', ['event_id'], unique=False)
+    op.create_index(op.f('ix_integration_event_trace_started_at'), 'integration_event_trace', ['started_at'], unique=False)
+    op.create_index(op.f('ix_integration_event_trace_status'), 'integration_event_trace', ['status'], unique=False)
+    op.create_index(op.f('ix_integration_event_trace_trace_id'), 'integration_event_trace', ['trace_id'], unique=False)
+    op.create_table('integration_events',
+    sa.Column('event_id', sa.String(length=64), nullable=False),
+    sa.Column('event_type', sa.String(length=96), nullable=False),
+    sa.Column('trace_id', sa.UUID(), nullable=False),
+    sa.Column('correlation_id', sa.UUID(), nullable=False),
+    sa.Column('mode', sa.String(length=16), nullable=False),
+    sa.Column('instrument', sa.String(length=32), nullable=True),
+    sa.Column('timeframe', sa.String(length=16), nullable=True),
+    sa.Column('occurred_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('available_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('payload_hash', sa.String(length=64), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.PrimaryKeyConstraint('event_id')
+    )
+    op.create_index(op.f('ix_integration_events_available_at'), 'integration_events', ['available_at'], unique=False)
+    op.create_index(op.f('ix_integration_events_correlation_id'), 'integration_events', ['correlation_id'], unique=False)
+    op.create_index(op.f('ix_integration_events_event_type'), 'integration_events', ['event_type'], unique=False)
+    op.create_index(op.f('ix_integration_events_instrument'), 'integration_events', ['instrument'], unique=False)
+    op.create_index(op.f('ix_integration_events_mode'), 'integration_events', ['mode'], unique=False)
+    op.create_index(op.f('ix_integration_events_occurred_at'), 'integration_events', ['occurred_at'], unique=False)
+    op.create_index(op.f('ix_integration_events_timeframe'), 'integration_events', ['timeframe'], unique=False)
+    op.create_index(op.f('ix_integration_events_trace_id'), 'integration_events', ['trace_id'], unique=False)
+    op.create_table('integration_snapshots',
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('semantic_hash', sa.String(length=64), nullable=False),
+    sa.Column('trace_id', sa.UUID(), nullable=False),
+    sa.Column('mode', sa.String(length=16), nullable=False),
+    sa.Column('instrument', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('analytical_boundary', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('status', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.PrimaryKeyConstraint('snapshot_id')
+    )
+    op.create_index(op.f('ix_integration_snapshots_analytical_boundary'), 'integration_snapshots', ['analytical_boundary'], unique=False)
+    op.create_index(op.f('ix_integration_snapshots_instrument'), 'integration_snapshots', ['instrument'], unique=False)
+    op.create_index(op.f('ix_integration_snapshots_mode'), 'integration_snapshots', ['mode'], unique=False)
+    op.create_index(op.f('ix_integration_snapshots_semantic_hash'), 'integration_snapshots', ['semantic_hash'], unique=True)
+    op.create_index(op.f('ix_integration_snapshots_status'), 'integration_snapshots', ['status'], unique=False)
+    op.create_index(op.f('ix_integration_snapshots_timeframe'), 'integration_snapshots', ['timeframe'], unique=False)
+    op.create_index(op.f('ix_integration_snapshots_trace_id'), 'integration_snapshots', ['trace_id'], unique=False)
+    op.create_table('liquidity_checkpoints',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('last_processed_candle', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('state_hash', sa.String(length=64), nullable=False),
+    sa.Column('state_payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_liquidity_checkpoints_last_processed_candle'), 'liquidity_checkpoints', ['last_processed_candle'], unique=False)
+    op.create_index(op.f('ix_liquidity_checkpoints_snapshot_id'), 'liquidity_checkpoints', ['snapshot_id'], unique=False)
+    op.create_index(op.f('ix_liquidity_checkpoints_symbol'), 'liquidity_checkpoints', ['symbol'], unique=False)
+    op.create_index(op.f('ix_liquidity_checkpoints_timeframe'), 'liquidity_checkpoints', ['timeframe'], unique=False)
+    op.create_index('ux_liquidity_checkpoint_series', 'liquidity_checkpoints', ['symbol', 'timeframe', 'configuration_version'], unique=True)
+    op.create_table('liquidity_objects',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('logical_id', sa.UUID(), nullable=False),
+    sa.Column('object_type', sa.String(length=32), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('availability_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('lifecycle_state', sa.String(length=32), nullable=False),
+    sa.Column('confidence_score', sa.Float(), nullable=False),
+    sa.Column('quality_score', sa.Float(), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_liquidity_objects_availability_timestamp'), 'liquidity_objects', ['availability_timestamp'], unique=False)
+    op.create_index(op.f('ix_liquidity_objects_created_at'), 'liquidity_objects', ['created_at'], unique=False)
+    op.create_index(op.f('ix_liquidity_objects_lifecycle_state'), 'liquidity_objects', ['lifecycle_state'], unique=False)
+    op.create_index(op.f('ix_liquidity_objects_logical_id'), 'liquidity_objects', ['logical_id'], unique=False)
+    op.create_index(op.f('ix_liquidity_objects_object_type'), 'liquidity_objects', ['object_type'], unique=False)
+    op.create_index('ix_liquidity_objects_series_time', 'liquidity_objects', ['symbol', 'timeframe', 'availability_timestamp'], unique=False)
+    op.create_index(op.f('ix_liquidity_objects_symbol'), 'liquidity_objects', ['symbol'], unique=False)
+    op.create_index(op.f('ix_liquidity_objects_timeframe'), 'liquidity_objects', ['timeframe'], unique=False)
+    op.create_index('ix_liquidity_objects_type_state', 'liquidity_objects', ['object_type', 'lifecycle_state'], unique=False)
+    op.create_table('liquidity_snapshots',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('analysis_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('processing_mode', sa.String(length=32), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_liquidity_snapshots_analysis_timestamp'), 'liquidity_snapshots', ['analysis_timestamp'], unique=False)
+    op.create_index(op.f('ix_liquidity_snapshots_created_at'), 'liquidity_snapshots', ['created_at'], unique=False)
+    op.create_index(op.f('ix_liquidity_snapshots_symbol'), 'liquidity_snapshots', ['symbol'], unique=False)
+    op.create_index(op.f('ix_liquidity_snapshots_timeframe'), 'liquidity_snapshots', ['timeframe'], unique=False)
+    op.create_index('ux_liquidity_snapshot_boundary', 'liquidity_snapshots', ['symbol', 'timeframe', 'analysis_timestamp', 'configuration_version', 'processing_mode'], unique=True)
+    op.create_table('market_cache_metadata',
+    sa.Column('key', sa.String(length=512), nullable=False),
+    sa.Column('layer', sa.String(length=32), nullable=False),
+    sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('candle_count', sa.Integer(), nullable=False),
+    sa.Column('last_accessed_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('key')
+    )
+    op.create_index(op.f('ix_market_cache_metadata_expires_at'), 'market_cache_metadata', ['expires_at'], unique=False)
+    op.create_table('market_data',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('open', sa.Float(), nullable=False),
+    sa.Column('high', sa.Float(), nullable=False),
+    sa.Column('low', sa.Float(), nullable=False),
+    sa.Column('close', sa.Float(), nullable=False),
+    sa.Column('volume', sa.Float(), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_market_data_symbol'), 'market_data', ['symbol'], unique=False)
+    op.create_index('ux_market_data_series', 'market_data', ['symbol', 'timeframe', 'timestamp'], unique=True)
+    op.create_table('market_gap_history',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('start_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('missing_count', sa.Integer(), nullable=False),
+    sa.Column('classification', sa.String(length=32), nullable=False),
+    sa.Column('repaired', sa.Boolean(), nullable=False),
+    sa.Column('provider', sa.String(length=64), nullable=True),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_market_gap_history_start_at'), 'market_gap_history', ['start_at'], unique=False)
+    op.create_index(op.f('ix_market_gap_history_symbol'), 'market_gap_history', ['symbol'], unique=False)
+    op.create_table('market_latency_history',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('provider', sa.String(length=64), nullable=False),
+    sa.Column('latency_ms', sa.Float(), nullable=False),
+    sa.Column('captured_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_market_latency_history_captured_at'), 'market_latency_history', ['captured_at'], unique=False)
+    op.create_index(op.f('ix_market_latency_history_provider'), 'market_latency_history', ['provider'], unique=False)
+    op.create_table('market_quality_history',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('score', sa.Float(), nullable=False),
+    sa.Column('level', sa.String(length=32), nullable=False),
+    sa.Column('anomalies', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_market_quality_history_symbol'), 'market_quality_history', ['symbol'], unique=False)
+    op.create_index(op.f('ix_market_quality_history_timestamp'), 'market_quality_history', ['timestamp'], unique=False)
+    op.create_table('market_regime_checkpoints',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('engine_name', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('schema_version', sa.String(length=32), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('algorithm_version', sa.String(length=32), nullable=False),
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('analysis_boundary', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('payload_hash', sa.String(length=64), nullable=False),
+    sa.Column('state_payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_market_regime_checkpoints_analysis_boundary'), 'market_regime_checkpoints', ['analysis_boundary'], unique=False)
+    op.create_index(op.f('ix_market_regime_checkpoints_snapshot_id'), 'market_regime_checkpoints', ['snapshot_id'], unique=False)
+    op.create_index(op.f('ix_market_regime_checkpoints_symbol'), 'market_regime_checkpoints', ['symbol'], unique=False)
+    op.create_index(op.f('ix_market_regime_checkpoints_timeframe'), 'market_regime_checkpoints', ['timeframe'], unique=False)
+    op.create_index('ux_market_regime_checkpoint_series', 'market_regime_checkpoints', ['symbol', 'timeframe', 'configuration_version'], unique=True)
+    op.create_table('market_regime_evidence',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('evidence_id', sa.UUID(), nullable=False),
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('source_engine', sa.String(length=32), nullable=False),
+    sa.Column('family', sa.String(length=32), nullable=False),
+    sa.Column('available_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('accepted', sa.Boolean(), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_market_regime_evidence_available_at'), 'market_regime_evidence', ['available_at'], unique=False)
+    op.create_index(op.f('ix_market_regime_evidence_created_at'), 'market_regime_evidence', ['created_at'], unique=False)
+    op.create_index(op.f('ix_market_regime_evidence_evidence_id'), 'market_regime_evidence', ['evidence_id'], unique=False)
+    op.create_index(op.f('ix_market_regime_evidence_family'), 'market_regime_evidence', ['family'], unique=False)
+    op.create_index('ix_market_regime_evidence_series_time', 'market_regime_evidence', ['symbol', 'timeframe', 'available_at'], unique=False)
+    op.create_index(op.f('ix_market_regime_evidence_snapshot_id'), 'market_regime_evidence', ['snapshot_id'], unique=False)
+    op.create_index(op.f('ix_market_regime_evidence_source_engine'), 'market_regime_evidence', ['source_engine'], unique=False)
+    op.create_index(op.f('ix_market_regime_evidence_symbol'), 'market_regime_evidence', ['symbol'], unique=False)
+    op.create_index(op.f('ix_market_regime_evidence_timeframe'), 'market_regime_evidence', ['timeframe'], unique=False)
+    op.create_table('market_regime_snapshots',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('analysis_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('dominant_regime', sa.String(length=64), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_market_regime_snapshots_analysis_timestamp'), 'market_regime_snapshots', ['analysis_timestamp'], unique=False)
+    op.create_index(op.f('ix_market_regime_snapshots_created_at'), 'market_regime_snapshots', ['created_at'], unique=False)
+    op.create_index(op.f('ix_market_regime_snapshots_dominant_regime'), 'market_regime_snapshots', ['dominant_regime'], unique=False)
+    op.create_index(op.f('ix_market_regime_snapshots_symbol'), 'market_regime_snapshots', ['symbol'], unique=False)
+    op.create_index(op.f('ix_market_regime_snapshots_timeframe'), 'market_regime_snapshots', ['timeframe'], unique=False)
+    op.create_index('ux_market_regime_snapshot_boundary', 'market_regime_snapshots', ['symbol', 'timeframe', 'analysis_timestamp', 'configuration_version'], unique=True)
+    op.create_table('market_regime_transitions',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('from_regime', sa.String(length=64), nullable=False),
+    sa.Column('to_regime', sa.String(length=64), nullable=False),
+    sa.Column('state', sa.String(length=32), nullable=False),
+    sa.Column('started_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('confirmed_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('ix_market_regime_transition_series_time', 'market_regime_transitions', ['symbol', 'timeframe', 'started_at'], unique=False)
+    op.create_index(op.f('ix_market_regime_transitions_from_regime'), 'market_regime_transitions', ['from_regime'], unique=False)
+    op.create_index(op.f('ix_market_regime_transitions_started_at'), 'market_regime_transitions', ['started_at'], unique=False)
+    op.create_index(op.f('ix_market_regime_transitions_state'), 'market_regime_transitions', ['state'], unique=False)
+    op.create_index(op.f('ix_market_regime_transitions_symbol'), 'market_regime_transitions', ['symbol'], unique=False)
+    op.create_index(op.f('ix_market_regime_transitions_timeframe'), 'market_regime_transitions', ['timeframe'], unique=False)
+    op.create_index(op.f('ix_market_regime_transitions_to_regime'), 'market_regime_transitions', ['to_regime'], unique=False)
+    op.create_table('market_synchronization_history',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('status', sa.String(length=32), nullable=False),
+    sa.Column('started_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('rows_written', sa.Integer(), nullable=False),
+    sa.Column('detail', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_market_synchronization_history_status'), 'market_synchronization_history', ['status'], unique=False)
+    op.create_index(op.f('ix_market_synchronization_history_symbol'), 'market_synchronization_history', ['symbol'], unique=False)
+    op.create_table('provider_metrics',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('provider', sa.String(length=64), nullable=False),
+    sa.Column('healthy', sa.Boolean(), nullable=False),
+    sa.Column('confidence', sa.Float(), nullable=False),
+    sa.Column('uptime_ratio', sa.Float(), nullable=False),
+    sa.Column('quota_remaining', sa.Integer(), nullable=True),
+    sa.Column('captured_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_provider_metrics_captured_at'), 'provider_metrics', ['captured_at'], unique=False)
+    op.create_index(op.f('ix_provider_metrics_provider'), 'provider_metrics', ['provider'], unique=False)
+    op.create_table('realtime_candles',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('received_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('ix_realtime_candle_series', 'realtime_candles', ['symbol', 'timeframe', 'timestamp'], unique=False)
+    op.create_index(op.f('ix_realtime_candles_received_at'), 'realtime_candles', ['received_at'], unique=False)
+    op.create_index(op.f('ix_realtime_candles_symbol'), 'realtime_candles', ['symbol'], unique=False)
+    op.create_index(op.f('ix_realtime_candles_timestamp'), 'realtime_candles', ['timestamp'], unique=False)
+    op.create_table('replay_sessions',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('request_fingerprint', sa.String(length=64), nullable=False),
+    sa.Column('status', sa.String(length=24), nullable=False),
+    sa.Column('mode', sa.String(length=24), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('virtual_cursor_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('dataset_id', sa.String(length=128), nullable=False),
+    sa.Column('dataset_version', sa.String(length=64), nullable=False),
+    sa.Column('processed_events', sa.Integer(), nullable=False),
+    sa.Column('generated_events', sa.Integer(), nullable=False),
+    sa.Column('progress_percent', sa.Float(), nullable=True),
+    sa.Column('semantic_output_hash', sa.String(length=64), nullable=False),
+    sa.Column('worker_id', sa.String(length=128), nullable=True),
+    sa.Column('lease_expires_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('heartbeat_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('row_version', sa.Integer(), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('ix_replay_session_dataset', 'replay_sessions', ['dataset_id', 'dataset_version'], unique=False)
+    op.create_index('ix_replay_session_request_fingerprint', 'replay_sessions', ['request_fingerprint'], unique=False)
+    op.create_index('ix_replay_session_status_created', 'replay_sessions', ['status', 'created_at'], unique=False)
+    op.create_index('ix_replay_session_worker_lease', 'replay_sessions', ['worker_id', 'lease_expires_at'], unique=False)
+    op.create_index(op.f('ix_replay_sessions_created_at'), 'replay_sessions', ['created_at'], unique=False)
+    op.create_index(op.f('ix_replay_sessions_dataset_id'), 'replay_sessions', ['dataset_id'], unique=False)
+    op.create_index(op.f('ix_replay_sessions_lease_expires_at'), 'replay_sessions', ['lease_expires_at'], unique=False)
+    op.create_index(op.f('ix_replay_sessions_mode'), 'replay_sessions', ['mode'], unique=False)
+    op.create_index(op.f('ix_replay_sessions_status'), 'replay_sessions', ['status'], unique=False)
+    op.create_index(op.f('ix_replay_sessions_virtual_cursor_at'), 'replay_sessions', ['virtual_cursor_at'], unique=False)
+    op.create_index(op.f('ix_replay_sessions_worker_id'), 'replay_sessions', ['worker_id'], unique=False)
+    op.create_table('signals',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('direction', sa.String(length=16), nullable=False),
+    sa.Column('entry_low', sa.Float(), nullable=False),
+    sa.Column('entry_high', sa.Float(), nullable=False),
+    sa.Column('stop_loss', sa.Float(), nullable=False),
+    sa.Column('take_profit', sa.Float(), nullable=False),
+    sa.Column('confidence', sa.Float(), nullable=False),
+    sa.Column('reasoning', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_signals_created_at'), 'signals', ['created_at'], unique=False)
+    op.create_index(op.f('ix_signals_symbol'), 'signals', ['symbol'], unique=False)
+    op.create_index('ix_signals_symbol_timeframe_created', 'signals', ['symbol', 'timeframe', 'created_at'], unique=False)
+    op.create_table('smc_analysis_snapshots',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('analysis_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('market_data_boundary', sa.String(length=512), nullable=False),
+    sa.Column('status', sa.String(length=32), nullable=False),
+    sa.Column('processing_mode', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_smc_analysis_snapshots_analysis_timestamp'), 'smc_analysis_snapshots', ['analysis_timestamp'], unique=False)
+    op.create_index(op.f('ix_smc_analysis_snapshots_created_at'), 'smc_analysis_snapshots', ['created_at'], unique=False)
+    op.create_index(op.f('ix_smc_analysis_snapshots_processing_mode'), 'smc_analysis_snapshots', ['processing_mode'], unique=False)
+    op.create_index(op.f('ix_smc_analysis_snapshots_status'), 'smc_analysis_snapshots', ['status'], unique=False)
+    op.create_index(op.f('ix_smc_analysis_snapshots_symbol'), 'smc_analysis_snapshots', ['symbol'], unique=False)
+    op.create_index(op.f('ix_smc_analysis_snapshots_timeframe'), 'smc_analysis_snapshots', ['timeframe'], unique=False)
+    op.create_index('ix_smc_snapshot_series_time', 'smc_analysis_snapshots', ['symbol', 'timeframe', 'analysis_timestamp'], unique=False)
+    op.create_index('ux_smc_snapshot_boundary', 'smc_analysis_snapshots', ['symbol', 'timeframe', 'analysis_timestamp', 'configuration_version', 'processing_mode'], unique=True)
+    op.create_table('smc_checkpoints',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('last_processed_candle', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('state_payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_smc_checkpoints_last_processed_candle'), 'smc_checkpoints', ['last_processed_candle'], unique=False)
+    op.create_index(op.f('ix_smc_checkpoints_snapshot_id'), 'smc_checkpoints', ['snapshot_id'], unique=False)
+    op.create_index(op.f('ix_smc_checkpoints_symbol'), 'smc_checkpoints', ['symbol'], unique=False)
+    op.create_index(op.f('ix_smc_checkpoints_timeframe'), 'smc_checkpoints', ['timeframe'], unique=False)
+    op.create_index('ux_smc_checkpoint_series', 'smc_checkpoints', ['symbol', 'timeframe', 'configuration_version'], unique=True)
+    op.create_table('smc_objects',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('object_type', sa.String(length=32), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('analytical_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('availability_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('lifecycle_state', sa.String(length=32), nullable=False),
+    sa.Column('confidence_score', sa.Float(), nullable=False),
+    sa.Column('quality_score', sa.Float(), nullable=False),
+    sa.Column('algorithm_version', sa.String(length=32), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_smc_objects_analytical_timestamp'), 'smc_objects', ['analytical_timestamp'], unique=False)
+    op.create_index(op.f('ix_smc_objects_availability_timestamp'), 'smc_objects', ['availability_timestamp'], unique=False)
+    op.create_index(op.f('ix_smc_objects_created_at'), 'smc_objects', ['created_at'], unique=False)
+    op.create_index(op.f('ix_smc_objects_object_type'), 'smc_objects', ['object_type'], unique=False)
+    op.create_index('ix_smc_objects_series_time', 'smc_objects', ['symbol', 'timeframe', 'analytical_timestamp'], unique=False)
+    op.create_index(op.f('ix_smc_objects_symbol'), 'smc_objects', ['symbol'], unique=False)
+    op.create_index(op.f('ix_smc_objects_timeframe'), 'smc_objects', ['timeframe'], unique=False)
+    op.create_index('ix_smc_objects_type_state', 'smc_objects', ['object_type', 'lifecycle_state'], unique=False)
+    op.create_table('volume_profile_checkpoints',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('last_processed_candle', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('state_hash', sa.String(length=64), nullable=False),
+    sa.Column('state_payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_volume_profile_checkpoints_last_processed_candle'), 'volume_profile_checkpoints', ['last_processed_candle'], unique=False)
+    op.create_index(op.f('ix_volume_profile_checkpoints_snapshot_id'), 'volume_profile_checkpoints', ['snapshot_id'], unique=False)
+    op.create_index(op.f('ix_volume_profile_checkpoints_symbol'), 'volume_profile_checkpoints', ['symbol'], unique=False)
+    op.create_index(op.f('ix_volume_profile_checkpoints_timeframe'), 'volume_profile_checkpoints', ['timeframe'], unique=False)
+    op.create_index('ux_volume_profile_checkpoint_series', 'volume_profile_checkpoints', ['symbol', 'timeframe', 'configuration_version'], unique=True)
+    op.create_table('volume_profile_objects',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('logical_id', sa.UUID(), nullable=False),
+    sa.Column('object_type', sa.String(length=32), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('availability_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('lifecycle_state', sa.String(length=32), nullable=False),
+    sa.Column('confidence_score', sa.Float(), nullable=False),
+    sa.Column('quality_score', sa.Float(), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_volume_profile_objects_availability_timestamp'), 'volume_profile_objects', ['availability_timestamp'], unique=False)
+    op.create_index(op.f('ix_volume_profile_objects_created_at'), 'volume_profile_objects', ['created_at'], unique=False)
+    op.create_index(op.f('ix_volume_profile_objects_lifecycle_state'), 'volume_profile_objects', ['lifecycle_state'], unique=False)
+    op.create_index(op.f('ix_volume_profile_objects_logical_id'), 'volume_profile_objects', ['logical_id'], unique=False)
+    op.create_index(op.f('ix_volume_profile_objects_object_type'), 'volume_profile_objects', ['object_type'], unique=False)
+    op.create_index('ix_volume_profile_objects_series_time', 'volume_profile_objects', ['symbol', 'timeframe', 'availability_timestamp'], unique=False)
+    op.create_index(op.f('ix_volume_profile_objects_symbol'), 'volume_profile_objects', ['symbol'], unique=False)
+    op.create_index(op.f('ix_volume_profile_objects_timeframe'), 'volume_profile_objects', ['timeframe'], unique=False)
+    op.create_index('ix_volume_profile_objects_type_state', 'volume_profile_objects', ['object_type', 'lifecycle_state'], unique=False)
+    op.create_table('volume_profile_snapshots',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('symbol', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('analysis_timestamp', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('processing_mode', sa.String(length=32), nullable=False),
+    sa.Column('configuration_version', sa.String(length=32), nullable=False),
+    sa.Column('engine_version', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_volume_profile_snapshots_analysis_timestamp'), 'volume_profile_snapshots', ['analysis_timestamp'], unique=False)
+    op.create_index(op.f('ix_volume_profile_snapshots_created_at'), 'volume_profile_snapshots', ['created_at'], unique=False)
+    op.create_index(op.f('ix_volume_profile_snapshots_symbol'), 'volume_profile_snapshots', ['symbol'], unique=False)
+    op.create_index(op.f('ix_volume_profile_snapshots_timeframe'), 'volume_profile_snapshots', ['timeframe'], unique=False)
+    op.create_index('ux_volume_profile_snapshot_boundary', 'volume_profile_snapshots', ['symbol', 'timeframe', 'analysis_timestamp', 'configuration_version', 'processing_mode'], unique=True)
+    op.create_table('ai_score_components',
+    sa.Column('id', sa.String(length=64), nullable=False),
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('source_engine', sa.String(length=32), nullable=False),
+    sa.Column('source_group', sa.String(length=32), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['snapshot_id'], ['ai_score_snapshots.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_ai_score_components_snapshot_id'), 'ai_score_components', ['snapshot_id'], unique=False)
+    op.create_index(op.f('ix_ai_score_components_source_engine'), 'ai_score_components', ['source_engine'], unique=False)
+    op.create_index(op.f('ix_ai_score_components_source_group'), 'ai_score_components', ['source_group'], unique=False)
+    op.create_table('ai_score_conflicts',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('severity', sa.String(length=16), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['snapshot_id'], ['ai_score_snapshots.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_ai_score_conflicts_severity'), 'ai_score_conflicts', ['severity'], unique=False)
+    op.create_index(op.f('ix_ai_score_conflicts_snapshot_id'), 'ai_score_conflicts', ['snapshot_id'], unique=False)
+    op.create_table('integration_outbox',
+    sa.Column('outbox_id', sa.UUID(), nullable=False),
+    sa.Column('event_id', sa.String(length=64), nullable=False),
+    sa.Column('available_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('attempts', sa.Integer(), nullable=False),
+    sa.Column('published_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('last_error_code', sa.String(length=96), nullable=True),
+    sa.ForeignKeyConstraint(['event_id'], ['integration_events.event_id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('outbox_id')
+    )
+    op.create_index(op.f('ix_integration_outbox_available_at'), 'integration_outbox', ['available_at'], unique=False)
+    op.create_index(op.f('ix_integration_outbox_event_id'), 'integration_outbox', ['event_id'], unique=True)
+    op.create_index(op.f('ix_integration_outbox_published_at'), 'integration_outbox', ['published_at'], unique=False)
+    op.create_table('integration_processed_events',
+    sa.Column('event_id', sa.String(length=64), nullable=False),
+    sa.Column('processed_at', sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(['event_id'], ['integration_events.event_id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('event_id')
+    )
+    op.create_index(op.f('ix_integration_processed_events_processed_at'), 'integration_processed_events', ['processed_at'], unique=False)
+    op.create_table('replay_checkpoints',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('replay_id', sa.UUID(), nullable=False),
+    sa.Column('sequence', sa.Integer(), nullable=False),
+    sa.Column('cursor_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('state_hash', sa.String(length=64), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['replay_id'], ['replay_sessions.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('ix_replay_checkpoint_latest', 'replay_checkpoints', ['replay_id', 'sequence'], unique=False)
+    op.create_index(op.f('ix_replay_checkpoints_created_at'), 'replay_checkpoints', ['created_at'], unique=False)
+    op.create_index(op.f('ix_replay_checkpoints_cursor_at'), 'replay_checkpoints', ['cursor_at'], unique=False)
+    op.create_index(op.f('ix_replay_checkpoints_replay_id'), 'replay_checkpoints', ['replay_id'], unique=False)
+    op.create_index('ux_replay_checkpoint_sequence', 'replay_checkpoints', ['replay_id', 'sequence'], unique=True)
+    op.create_table('replay_event_trace',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('replay_id', sa.UUID(), nullable=False),
+    sa.Column('sequence', sa.Integer(), nullable=False),
+    sa.Column('virtual_time', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('event_id', sa.UUID(), nullable=False),
+    sa.Column('event_type', sa.String(length=96), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['replay_id'], ['replay_sessions.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_replay_event_trace_event_id'), 'replay_event_trace', ['event_id'], unique=False)
+    op.create_index(op.f('ix_replay_event_trace_event_type'), 'replay_event_trace', ['event_type'], unique=False)
+    op.create_index(op.f('ix_replay_event_trace_replay_id'), 'replay_event_trace', ['replay_id'], unique=False)
+    op.create_index(op.f('ix_replay_event_trace_virtual_time'), 'replay_event_trace', ['virtual_time'], unique=False)
+    op.create_index('ux_replay_trace_sequence', 'replay_event_trace', ['replay_id', 'sequence'], unique=True)
+    op.create_table('replay_outputs',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('replay_id', sa.UUID(), nullable=False),
+    sa.Column('output_type', sa.String(length=64), nullable=False),
+    sa.Column('source_engine', sa.String(length=64), nullable=False),
+    sa.Column('as_of', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('fingerprint', sa.String(length=64), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['replay_id'], ['replay_sessions.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('ix_replay_output_lookup', 'replay_outputs', ['replay_id', 'output_type', 'as_of'], unique=False)
+    op.create_index(op.f('ix_replay_outputs_as_of'), 'replay_outputs', ['as_of'], unique=False)
+    op.create_index(op.f('ix_replay_outputs_output_type'), 'replay_outputs', ['output_type'], unique=False)
+    op.create_index(op.f('ix_replay_outputs_replay_id'), 'replay_outputs', ['replay_id'], unique=False)
+    op.create_index(op.f('ix_replay_outputs_source_engine'), 'replay_outputs', ['source_engine'], unique=False)
+    op.create_index('ux_replay_output_fingerprint', 'replay_outputs', ['replay_id', 'fingerprint'], unique=True)
+    op.create_table('replay_transitions',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('replay_id', sa.UUID(), nullable=False),
+    sa.Column('occurred_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('from_status', sa.String(length=24), nullable=False),
+    sa.Column('to_status', sa.String(length=24), nullable=False),
+    sa.Column('reason_code', sa.String(length=96), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['replay_id'], ['replay_sessions.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('ix_replay_transition_history', 'replay_transitions', ['replay_id', 'occurred_at'], unique=False)
+    op.create_index(op.f('ix_replay_transitions_occurred_at'), 'replay_transitions', ['occurred_at'], unique=False)
+    op.create_index(op.f('ix_replay_transitions_replay_id'), 'replay_transitions', ['replay_id'], unique=False)
+    op.create_index(op.f('ix_replay_transitions_to_status'), 'replay_transitions', ['to_status'], unique=False)
+    op.create_table('signal_decisions',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('decision_key', sa.String(length=256), nullable=False),
+    sa.Column('input_fingerprint', sa.String(length=64), nullable=False),
+    sa.Column('instrument', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('direction', sa.String(length=16), nullable=False),
+    sa.Column('state', sa.String(length=32), nullable=False),
+    sa.Column('status', sa.String(length=16), nullable=False),
+    sa.Column('mode', sa.String(length=16), nullable=False),
+    sa.Column('as_of', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('decided_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('valid_from', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('valid_until', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('ai_score_snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('decision_policy_version', sa.String(length=32), nullable=False),
+    sa.Column('eligibility_score', sa.Float(), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['ai_score_snapshot_id'], ['ai_score_snapshots.id'], ondelete='RESTRICT'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index('ix_signal_decision_active', 'signal_decisions', ['instrument', 'timeframe', 'valid_until'], unique=False)
+    op.create_index('ix_signal_decision_history', 'signal_decisions', ['instrument', 'timeframe', 'as_of'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_ai_score_snapshot_id'), 'signal_decisions', ['ai_score_snapshot_id'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_as_of'), 'signal_decisions', ['as_of'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_decision_key'), 'signal_decisions', ['decision_key'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_decision_policy_version'), 'signal_decisions', ['decision_policy_version'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_direction'), 'signal_decisions', ['direction'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_instrument'), 'signal_decisions', ['instrument'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_mode'), 'signal_decisions', ['mode'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_state'), 'signal_decisions', ['state'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_status'), 'signal_decisions', ['status'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_timeframe'), 'signal_decisions', ['timeframe'], unique=False)
+    op.create_index(op.f('ix_signal_decisions_valid_until'), 'signal_decisions', ['valid_until'], unique=False)
+    op.create_index('ux_signal_decision_fingerprint_mode', 'signal_decisions', ['input_fingerprint', 'mode'], unique=True)
+    op.create_table('operational_signals',
+    sa.Column('operational_signal_id', sa.UUID(), nullable=False),
+    sa.Column('semantic_hash', sa.String(length=64), nullable=False),
+    sa.Column('decision_id', sa.UUID(), nullable=False),
+    sa.Column('ai_score_id', sa.UUID(), nullable=False),
+    sa.Column('snapshot_id', sa.UUID(), nullable=False),
+    sa.Column('trace_id', sa.UUID(), nullable=False),
+    sa.Column('mode', sa.String(length=16), nullable=False),
+    sa.Column('instrument', sa.String(length=32), nullable=False),
+    sa.Column('timeframe', sa.String(length=16), nullable=False),
+    sa.Column('effective_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['ai_score_id'], ['ai_score_snapshots.id'], ondelete='RESTRICT'),
+    sa.ForeignKeyConstraint(['decision_id'], ['signal_decisions.id'], ondelete='RESTRICT'),
+    sa.ForeignKeyConstraint(['snapshot_id'], ['integration_snapshots.snapshot_id'], ondelete='RESTRICT'),
+    sa.PrimaryKeyConstraint('operational_signal_id')
+    )
+    op.create_index(op.f('ix_operational_signals_ai_score_id'), 'operational_signals', ['ai_score_id'], unique=False)
+    op.create_index(op.f('ix_operational_signals_decision_id'), 'operational_signals', ['decision_id'], unique=False)
+    op.create_index(op.f('ix_operational_signals_effective_at'), 'operational_signals', ['effective_at'], unique=False)
+    op.create_index(op.f('ix_operational_signals_expires_at'), 'operational_signals', ['expires_at'], unique=False)
+    op.create_index(op.f('ix_operational_signals_instrument'), 'operational_signals', ['instrument'], unique=False)
+    op.create_index(op.f('ix_operational_signals_mode'), 'operational_signals', ['mode'], unique=False)
+    op.create_index(op.f('ix_operational_signals_semantic_hash'), 'operational_signals', ['semantic_hash'], unique=True)
+    op.create_index(op.f('ix_operational_signals_snapshot_id'), 'operational_signals', ['snapshot_id'], unique=False)
+    op.create_index(op.f('ix_operational_signals_timeframe'), 'operational_signals', ['timeframe'], unique=False)
+    op.create_index(op.f('ix_operational_signals_trace_id'), 'operational_signals', ['trace_id'], unique=False)
+    op.create_table('signal_decision_reasons',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('decision_id', sa.UUID(), nullable=False),
+    sa.Column('reason_type', sa.String(length=24), nullable=False),
+    sa.Column('reason_code', sa.String(length=96), nullable=False),
+    sa.Column('severity', sa.String(length=24), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['decision_id'], ['signal_decisions.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_signal_decision_reasons_decision_id'), 'signal_decision_reasons', ['decision_id'], unique=False)
+    op.create_index(op.f('ix_signal_decision_reasons_reason_code'), 'signal_decision_reasons', ['reason_code'], unique=False)
+    op.create_index(op.f('ix_signal_decision_reasons_reason_type'), 'signal_decision_reasons', ['reason_type'], unique=False)
+    op.create_index(op.f('ix_signal_decision_reasons_severity'), 'signal_decision_reasons', ['severity'], unique=False)
+    op.create_table('signal_decision_rules',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('decision_id', sa.UUID(), nullable=False),
+    sa.Column('rule_id', sa.String(length=96), nullable=False),
+    sa.Column('category', sa.String(length=32), nullable=False),
+    sa.Column('outcome', sa.String(length=24), nullable=False),
+    sa.Column('severity', sa.String(length=24), nullable=False),
+    sa.Column('payload', postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+    sa.ForeignKeyConstraint(['decision_id'], ['signal_decisions.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_signal_decision_rules_category'), 'signal_decision_rules', ['category'], unique=False)
+    op.create_index(op.f('ix_signal_decision_rules_decision_id'), 'signal_decision_rules', ['decision_id'], unique=False)
+    op.create_index(op.f('ix_signal_decision_rules_outcome'), 'signal_decision_rules', ['outcome'], unique=False)
+    op.create_index(op.f('ix_signal_decision_rules_rule_id'), 'signal_decision_rules', ['rule_id'], unique=False)
+    op.create_index(op.f('ix_signal_decision_rules_severity'), 'signal_decision_rules', ['severity'], unique=False)
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_index(op.f('ix_signal_decision_rules_severity'), table_name='signal_decision_rules')
+    op.drop_index(op.f('ix_signal_decision_rules_rule_id'), table_name='signal_decision_rules')
+    op.drop_index(op.f('ix_signal_decision_rules_outcome'), table_name='signal_decision_rules')
+    op.drop_index(op.f('ix_signal_decision_rules_decision_id'), table_name='signal_decision_rules')
+    op.drop_index(op.f('ix_signal_decision_rules_category'), table_name='signal_decision_rules')
+    op.drop_table('signal_decision_rules')
+    op.drop_index(op.f('ix_signal_decision_reasons_severity'), table_name='signal_decision_reasons')
+    op.drop_index(op.f('ix_signal_decision_reasons_reason_type'), table_name='signal_decision_reasons')
+    op.drop_index(op.f('ix_signal_decision_reasons_reason_code'), table_name='signal_decision_reasons')
+    op.drop_index(op.f('ix_signal_decision_reasons_decision_id'), table_name='signal_decision_reasons')
+    op.drop_table('signal_decision_reasons')
+    op.drop_index(op.f('ix_operational_signals_trace_id'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_timeframe'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_snapshot_id'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_semantic_hash'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_mode'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_instrument'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_expires_at'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_effective_at'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_decision_id'), table_name='operational_signals')
+    op.drop_index(op.f('ix_operational_signals_ai_score_id'), table_name='operational_signals')
+    op.drop_table('operational_signals')
+    op.drop_index('ux_signal_decision_fingerprint_mode', table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_valid_until'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_timeframe'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_status'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_state'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_mode'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_instrument'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_direction'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_decision_policy_version'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_decision_key'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_as_of'), table_name='signal_decisions')
+    op.drop_index(op.f('ix_signal_decisions_ai_score_snapshot_id'), table_name='signal_decisions')
+    op.drop_index('ix_signal_decision_history', table_name='signal_decisions')
+    op.drop_index('ix_signal_decision_active', table_name='signal_decisions')
+    op.drop_table('signal_decisions')
+    op.drop_index(op.f('ix_replay_transitions_to_status'), table_name='replay_transitions')
+    op.drop_index(op.f('ix_replay_transitions_replay_id'), table_name='replay_transitions')
+    op.drop_index(op.f('ix_replay_transitions_occurred_at'), table_name='replay_transitions')
+    op.drop_index('ix_replay_transition_history', table_name='replay_transitions')
+    op.drop_table('replay_transitions')
+    op.drop_index('ux_replay_output_fingerprint', table_name='replay_outputs')
+    op.drop_index(op.f('ix_replay_outputs_source_engine'), table_name='replay_outputs')
+    op.drop_index(op.f('ix_replay_outputs_replay_id'), table_name='replay_outputs')
+    op.drop_index(op.f('ix_replay_outputs_output_type'), table_name='replay_outputs')
+    op.drop_index(op.f('ix_replay_outputs_as_of'), table_name='replay_outputs')
+    op.drop_index('ix_replay_output_lookup', table_name='replay_outputs')
+    op.drop_table('replay_outputs')
+    op.drop_index('ux_replay_trace_sequence', table_name='replay_event_trace')
+    op.drop_index(op.f('ix_replay_event_trace_virtual_time'), table_name='replay_event_trace')
+    op.drop_index(op.f('ix_replay_event_trace_replay_id'), table_name='replay_event_trace')
+    op.drop_index(op.f('ix_replay_event_trace_event_type'), table_name='replay_event_trace')
+    op.drop_index(op.f('ix_replay_event_trace_event_id'), table_name='replay_event_trace')
+    op.drop_table('replay_event_trace')
+    op.drop_index('ux_replay_checkpoint_sequence', table_name='replay_checkpoints')
+    op.drop_index(op.f('ix_replay_checkpoints_replay_id'), table_name='replay_checkpoints')
+    op.drop_index(op.f('ix_replay_checkpoints_cursor_at'), table_name='replay_checkpoints')
+    op.drop_index(op.f('ix_replay_checkpoints_created_at'), table_name='replay_checkpoints')
+    op.drop_index('ix_replay_checkpoint_latest', table_name='replay_checkpoints')
+    op.drop_table('replay_checkpoints')
+    op.drop_index(op.f('ix_integration_processed_events_processed_at'), table_name='integration_processed_events')
+    op.drop_table('integration_processed_events')
+    op.drop_index(op.f('ix_integration_outbox_published_at'), table_name='integration_outbox')
+    op.drop_index(op.f('ix_integration_outbox_event_id'), table_name='integration_outbox')
+    op.drop_index(op.f('ix_integration_outbox_available_at'), table_name='integration_outbox')
+    op.drop_table('integration_outbox')
+    op.drop_index(op.f('ix_ai_score_conflicts_snapshot_id'), table_name='ai_score_conflicts')
+    op.drop_index(op.f('ix_ai_score_conflicts_severity'), table_name='ai_score_conflicts')
+    op.drop_table('ai_score_conflicts')
+    op.drop_index(op.f('ix_ai_score_components_source_group'), table_name='ai_score_components')
+    op.drop_index(op.f('ix_ai_score_components_source_engine'), table_name='ai_score_components')
+    op.drop_index(op.f('ix_ai_score_components_snapshot_id'), table_name='ai_score_components')
+    op.drop_table('ai_score_components')
+    op.drop_index('ux_volume_profile_snapshot_boundary', table_name='volume_profile_snapshots')
+    op.drop_index(op.f('ix_volume_profile_snapshots_timeframe'), table_name='volume_profile_snapshots')
+    op.drop_index(op.f('ix_volume_profile_snapshots_symbol'), table_name='volume_profile_snapshots')
+    op.drop_index(op.f('ix_volume_profile_snapshots_created_at'), table_name='volume_profile_snapshots')
+    op.drop_index(op.f('ix_volume_profile_snapshots_analysis_timestamp'), table_name='volume_profile_snapshots')
+    op.drop_table('volume_profile_snapshots')
+    op.drop_index('ix_volume_profile_objects_type_state', table_name='volume_profile_objects')
+    op.drop_index(op.f('ix_volume_profile_objects_timeframe'), table_name='volume_profile_objects')
+    op.drop_index(op.f('ix_volume_profile_objects_symbol'), table_name='volume_profile_objects')
+    op.drop_index('ix_volume_profile_objects_series_time', table_name='volume_profile_objects')
+    op.drop_index(op.f('ix_volume_profile_objects_object_type'), table_name='volume_profile_objects')
+    op.drop_index(op.f('ix_volume_profile_objects_logical_id'), table_name='volume_profile_objects')
+    op.drop_index(op.f('ix_volume_profile_objects_lifecycle_state'), table_name='volume_profile_objects')
+    op.drop_index(op.f('ix_volume_profile_objects_created_at'), table_name='volume_profile_objects')
+    op.drop_index(op.f('ix_volume_profile_objects_availability_timestamp'), table_name='volume_profile_objects')
+    op.drop_table('volume_profile_objects')
+    op.drop_index('ux_volume_profile_checkpoint_series', table_name='volume_profile_checkpoints')
+    op.drop_index(op.f('ix_volume_profile_checkpoints_timeframe'), table_name='volume_profile_checkpoints')
+    op.drop_index(op.f('ix_volume_profile_checkpoints_symbol'), table_name='volume_profile_checkpoints')
+    op.drop_index(op.f('ix_volume_profile_checkpoints_snapshot_id'), table_name='volume_profile_checkpoints')
+    op.drop_index(op.f('ix_volume_profile_checkpoints_last_processed_candle'), table_name='volume_profile_checkpoints')
+    op.drop_table('volume_profile_checkpoints')
+    op.drop_index('ix_smc_objects_type_state', table_name='smc_objects')
+    op.drop_index(op.f('ix_smc_objects_timeframe'), table_name='smc_objects')
+    op.drop_index(op.f('ix_smc_objects_symbol'), table_name='smc_objects')
+    op.drop_index('ix_smc_objects_series_time', table_name='smc_objects')
+    op.drop_index(op.f('ix_smc_objects_object_type'), table_name='smc_objects')
+    op.drop_index(op.f('ix_smc_objects_created_at'), table_name='smc_objects')
+    op.drop_index(op.f('ix_smc_objects_availability_timestamp'), table_name='smc_objects')
+    op.drop_index(op.f('ix_smc_objects_analytical_timestamp'), table_name='smc_objects')
+    op.drop_table('smc_objects')
+    op.drop_index('ux_smc_checkpoint_series', table_name='smc_checkpoints')
+    op.drop_index(op.f('ix_smc_checkpoints_timeframe'), table_name='smc_checkpoints')
+    op.drop_index(op.f('ix_smc_checkpoints_symbol'), table_name='smc_checkpoints')
+    op.drop_index(op.f('ix_smc_checkpoints_snapshot_id'), table_name='smc_checkpoints')
+    op.drop_index(op.f('ix_smc_checkpoints_last_processed_candle'), table_name='smc_checkpoints')
+    op.drop_table('smc_checkpoints')
+    op.drop_index('ux_smc_snapshot_boundary', table_name='smc_analysis_snapshots')
+    op.drop_index('ix_smc_snapshot_series_time', table_name='smc_analysis_snapshots')
+    op.drop_index(op.f('ix_smc_analysis_snapshots_timeframe'), table_name='smc_analysis_snapshots')
+    op.drop_index(op.f('ix_smc_analysis_snapshots_symbol'), table_name='smc_analysis_snapshots')
+    op.drop_index(op.f('ix_smc_analysis_snapshots_status'), table_name='smc_analysis_snapshots')
+    op.drop_index(op.f('ix_smc_analysis_snapshots_processing_mode'), table_name='smc_analysis_snapshots')
+    op.drop_index(op.f('ix_smc_analysis_snapshots_created_at'), table_name='smc_analysis_snapshots')
+    op.drop_index(op.f('ix_smc_analysis_snapshots_analysis_timestamp'), table_name='smc_analysis_snapshots')
+    op.drop_table('smc_analysis_snapshots')
+    op.drop_index('ix_signals_symbol_timeframe_created', table_name='signals')
+    op.drop_index(op.f('ix_signals_symbol'), table_name='signals')
+    op.drop_index(op.f('ix_signals_created_at'), table_name='signals')
+    op.drop_table('signals')
+    op.drop_index(op.f('ix_replay_sessions_worker_id'), table_name='replay_sessions')
+    op.drop_index(op.f('ix_replay_sessions_virtual_cursor_at'), table_name='replay_sessions')
+    op.drop_index(op.f('ix_replay_sessions_status'), table_name='replay_sessions')
+    op.drop_index(op.f('ix_replay_sessions_mode'), table_name='replay_sessions')
+    op.drop_index(op.f('ix_replay_sessions_lease_expires_at'), table_name='replay_sessions')
+    op.drop_index(op.f('ix_replay_sessions_dataset_id'), table_name='replay_sessions')
+    op.drop_index(op.f('ix_replay_sessions_created_at'), table_name='replay_sessions')
+    op.drop_index('ix_replay_session_worker_lease', table_name='replay_sessions')
+    op.drop_index('ix_replay_session_status_created', table_name='replay_sessions')
+    op.drop_index('ix_replay_session_request_fingerprint', table_name='replay_sessions')
+    op.drop_index('ix_replay_session_dataset', table_name='replay_sessions')
+    op.drop_table('replay_sessions')
+    op.drop_index(op.f('ix_realtime_candles_timestamp'), table_name='realtime_candles')
+    op.drop_index(op.f('ix_realtime_candles_symbol'), table_name='realtime_candles')
+    op.drop_index(op.f('ix_realtime_candles_received_at'), table_name='realtime_candles')
+    op.drop_index('ix_realtime_candle_series', table_name='realtime_candles')
+    op.drop_table('realtime_candles')
+    op.drop_index(op.f('ix_provider_metrics_provider'), table_name='provider_metrics')
+    op.drop_index(op.f('ix_provider_metrics_captured_at'), table_name='provider_metrics')
+    op.drop_table('provider_metrics')
+    op.drop_index(op.f('ix_market_synchronization_history_symbol'), table_name='market_synchronization_history')
+    op.drop_index(op.f('ix_market_synchronization_history_status'), table_name='market_synchronization_history')
+    op.drop_table('market_synchronization_history')
+    op.drop_index(op.f('ix_market_regime_transitions_to_regime'), table_name='market_regime_transitions')
+    op.drop_index(op.f('ix_market_regime_transitions_timeframe'), table_name='market_regime_transitions')
+    op.drop_index(op.f('ix_market_regime_transitions_symbol'), table_name='market_regime_transitions')
+    op.drop_index(op.f('ix_market_regime_transitions_state'), table_name='market_regime_transitions')
+    op.drop_index(op.f('ix_market_regime_transitions_started_at'), table_name='market_regime_transitions')
+    op.drop_index(op.f('ix_market_regime_transitions_from_regime'), table_name='market_regime_transitions')
+    op.drop_index('ix_market_regime_transition_series_time', table_name='market_regime_transitions')
+    op.drop_table('market_regime_transitions')
+    op.drop_index('ux_market_regime_snapshot_boundary', table_name='market_regime_snapshots')
+    op.drop_index(op.f('ix_market_regime_snapshots_timeframe'), table_name='market_regime_snapshots')
+    op.drop_index(op.f('ix_market_regime_snapshots_symbol'), table_name='market_regime_snapshots')
+    op.drop_index(op.f('ix_market_regime_snapshots_dominant_regime'), table_name='market_regime_snapshots')
+    op.drop_index(op.f('ix_market_regime_snapshots_created_at'), table_name='market_regime_snapshots')
+    op.drop_index(op.f('ix_market_regime_snapshots_analysis_timestamp'), table_name='market_regime_snapshots')
+    op.drop_table('market_regime_snapshots')
+    op.drop_index(op.f('ix_market_regime_evidence_timeframe'), table_name='market_regime_evidence')
+    op.drop_index(op.f('ix_market_regime_evidence_symbol'), table_name='market_regime_evidence')
+    op.drop_index(op.f('ix_market_regime_evidence_source_engine'), table_name='market_regime_evidence')
+    op.drop_index(op.f('ix_market_regime_evidence_snapshot_id'), table_name='market_regime_evidence')
+    op.drop_index('ix_market_regime_evidence_series_time', table_name='market_regime_evidence')
+    op.drop_index(op.f('ix_market_regime_evidence_family'), table_name='market_regime_evidence')
+    op.drop_index(op.f('ix_market_regime_evidence_evidence_id'), table_name='market_regime_evidence')
+    op.drop_index(op.f('ix_market_regime_evidence_created_at'), table_name='market_regime_evidence')
+    op.drop_index(op.f('ix_market_regime_evidence_available_at'), table_name='market_regime_evidence')
+    op.drop_table('market_regime_evidence')
+    op.drop_index('ux_market_regime_checkpoint_series', table_name='market_regime_checkpoints')
+    op.drop_index(op.f('ix_market_regime_checkpoints_timeframe'), table_name='market_regime_checkpoints')
+    op.drop_index(op.f('ix_market_regime_checkpoints_symbol'), table_name='market_regime_checkpoints')
+    op.drop_index(op.f('ix_market_regime_checkpoints_snapshot_id'), table_name='market_regime_checkpoints')
+    op.drop_index(op.f('ix_market_regime_checkpoints_analysis_boundary'), table_name='market_regime_checkpoints')
+    op.drop_table('market_regime_checkpoints')
+    op.drop_index(op.f('ix_market_quality_history_timestamp'), table_name='market_quality_history')
+    op.drop_index(op.f('ix_market_quality_history_symbol'), table_name='market_quality_history')
+    op.drop_table('market_quality_history')
+    op.drop_index(op.f('ix_market_latency_history_provider'), table_name='market_latency_history')
+    op.drop_index(op.f('ix_market_latency_history_captured_at'), table_name='market_latency_history')
+    op.drop_table('market_latency_history')
+    op.drop_index(op.f('ix_market_gap_history_symbol'), table_name='market_gap_history')
+    op.drop_index(op.f('ix_market_gap_history_start_at'), table_name='market_gap_history')
+    op.drop_table('market_gap_history')
+    op.drop_index('ux_market_data_series', table_name='market_data')
+    op.drop_index(op.f('ix_market_data_symbol'), table_name='market_data')
+    op.drop_table('market_data')
+    op.drop_index(op.f('ix_market_cache_metadata_expires_at'), table_name='market_cache_metadata')
+    op.drop_table('market_cache_metadata')
+    op.drop_index('ux_liquidity_snapshot_boundary', table_name='liquidity_snapshots')
+    op.drop_index(op.f('ix_liquidity_snapshots_timeframe'), table_name='liquidity_snapshots')
+    op.drop_index(op.f('ix_liquidity_snapshots_symbol'), table_name='liquidity_snapshots')
+    op.drop_index(op.f('ix_liquidity_snapshots_created_at'), table_name='liquidity_snapshots')
+    op.drop_index(op.f('ix_liquidity_snapshots_analysis_timestamp'), table_name='liquidity_snapshots')
+    op.drop_table('liquidity_snapshots')
+    op.drop_index('ix_liquidity_objects_type_state', table_name='liquidity_objects')
+    op.drop_index(op.f('ix_liquidity_objects_timeframe'), table_name='liquidity_objects')
+    op.drop_index(op.f('ix_liquidity_objects_symbol'), table_name='liquidity_objects')
+    op.drop_index('ix_liquidity_objects_series_time', table_name='liquidity_objects')
+    op.drop_index(op.f('ix_liquidity_objects_object_type'), table_name='liquidity_objects')
+    op.drop_index(op.f('ix_liquidity_objects_logical_id'), table_name='liquidity_objects')
+    op.drop_index(op.f('ix_liquidity_objects_lifecycle_state'), table_name='liquidity_objects')
+    op.drop_index(op.f('ix_liquidity_objects_created_at'), table_name='liquidity_objects')
+    op.drop_index(op.f('ix_liquidity_objects_availability_timestamp'), table_name='liquidity_objects')
+    op.drop_table('liquidity_objects')
+    op.drop_index('ux_liquidity_checkpoint_series', table_name='liquidity_checkpoints')
+    op.drop_index(op.f('ix_liquidity_checkpoints_timeframe'), table_name='liquidity_checkpoints')
+    op.drop_index(op.f('ix_liquidity_checkpoints_symbol'), table_name='liquidity_checkpoints')
+    op.drop_index(op.f('ix_liquidity_checkpoints_snapshot_id'), table_name='liquidity_checkpoints')
+    op.drop_index(op.f('ix_liquidity_checkpoints_last_processed_candle'), table_name='liquidity_checkpoints')
+    op.drop_table('liquidity_checkpoints')
+    op.drop_index(op.f('ix_integration_snapshots_trace_id'), table_name='integration_snapshots')
+    op.drop_index(op.f('ix_integration_snapshots_timeframe'), table_name='integration_snapshots')
+    op.drop_index(op.f('ix_integration_snapshots_status'), table_name='integration_snapshots')
+    op.drop_index(op.f('ix_integration_snapshots_semantic_hash'), table_name='integration_snapshots')
+    op.drop_index(op.f('ix_integration_snapshots_mode'), table_name='integration_snapshots')
+    op.drop_index(op.f('ix_integration_snapshots_instrument'), table_name='integration_snapshots')
+    op.drop_index(op.f('ix_integration_snapshots_analytical_boundary'), table_name='integration_snapshots')
+    op.drop_table('integration_snapshots')
+    op.drop_index(op.f('ix_integration_events_trace_id'), table_name='integration_events')
+    op.drop_index(op.f('ix_integration_events_timeframe'), table_name='integration_events')
+    op.drop_index(op.f('ix_integration_events_occurred_at'), table_name='integration_events')
+    op.drop_index(op.f('ix_integration_events_mode'), table_name='integration_events')
+    op.drop_index(op.f('ix_integration_events_instrument'), table_name='integration_events')
+    op.drop_index(op.f('ix_integration_events_event_type'), table_name='integration_events')
+    op.drop_index(op.f('ix_integration_events_correlation_id'), table_name='integration_events')
+    op.drop_index(op.f('ix_integration_events_available_at'), table_name='integration_events')
+    op.drop_table('integration_events')
+    op.drop_index(op.f('ix_integration_event_trace_trace_id'), table_name='integration_event_trace')
+    op.drop_index(op.f('ix_integration_event_trace_status'), table_name='integration_event_trace')
+    op.drop_index(op.f('ix_integration_event_trace_started_at'), table_name='integration_event_trace')
+    op.drop_index(op.f('ix_integration_event_trace_event_id'), table_name='integration_event_trace')
+    op.drop_table('integration_event_trace')
+    op.drop_index(op.f('ix_integration_data_quality_issues_status'), table_name='integration_data_quality_issues')
+    op.drop_index(op.f('ix_integration_data_quality_issues_provider'), table_name='integration_data_quality_issues')
+    op.drop_index(op.f('ix_integration_data_quality_issues_observed_at'), table_name='integration_data_quality_issues')
+    op.drop_index(op.f('ix_integration_data_quality_issues_event_id'), table_name='integration_data_quality_issues')
+    op.drop_table('integration_data_quality_issues')
+    op.drop_index('ux_institutional_flow_snapshot_boundary', table_name='institutional_flow_snapshots')
+    op.drop_index(op.f('ix_institutional_flow_snapshots_timeframe'), table_name='institutional_flow_snapshots')
+    op.drop_index(op.f('ix_institutional_flow_snapshots_symbol'), table_name='institutional_flow_snapshots')
+    op.drop_index(op.f('ix_institutional_flow_snapshots_created_at'), table_name='institutional_flow_snapshots')
+    op.drop_index(op.f('ix_institutional_flow_snapshots_analysis_timestamp'), table_name='institutional_flow_snapshots')
+    op.drop_table('institutional_flow_snapshots')
+    op.drop_index(op.f('ix_institutional_flow_evidence_timeframe'), table_name='institutional_flow_evidence')
+    op.drop_index(op.f('ix_institutional_flow_evidence_symbol'), table_name='institutional_flow_evidence')
+    op.drop_index(op.f('ix_institutional_flow_evidence_source_engine'), table_name='institutional_flow_evidence')
+    op.drop_index('ix_institutional_flow_evidence_series_time', table_name='institutional_flow_evidence')
+    op.drop_index(op.f('ix_institutional_flow_evidence_evidence_type'), table_name='institutional_flow_evidence')
+    op.drop_index(op.f('ix_institutional_flow_evidence_evidence_id'), table_name='institutional_flow_evidence')
+    op.drop_index(op.f('ix_institutional_flow_evidence_created_at'), table_name='institutional_flow_evidence')
+    op.drop_index(op.f('ix_institutional_flow_evidence_availability_timestamp'), table_name='institutional_flow_evidence')
+    op.drop_table('institutional_flow_evidence')
+    op.drop_index('ux_institutional_flow_checkpoint_series', table_name='institutional_flow_checkpoints')
+    op.drop_index(op.f('ix_institutional_flow_checkpoints_timeframe'), table_name='institutional_flow_checkpoints')
+    op.drop_index(op.f('ix_institutional_flow_checkpoints_symbol'), table_name='institutional_flow_checkpoints')
+    op.drop_index(op.f('ix_institutional_flow_checkpoints_snapshot_id'), table_name='institutional_flow_checkpoints')
+    op.drop_index(op.f('ix_institutional_flow_checkpoints_last_processed_candle'), table_name='institutional_flow_checkpoints')
+    op.drop_table('institutional_flow_checkpoints')
+    op.drop_index('ux_historical_candle_series', table_name='historical_candles')
+    op.drop_index(op.f('ix_historical_candles_timestamp'), table_name='historical_candles')
+    op.drop_index(op.f('ix_historical_candles_timeframe'), table_name='historical_candles')
+    op.drop_index(op.f('ix_historical_candles_symbol'), table_name='historical_candles')
+    op.drop_index(op.f('ix_historical_candles_provider'), table_name='historical_candles')
+    op.drop_table('historical_candles')
+    op.drop_index(op.f('ix_engine_logs_engine'), table_name='engine_logs')
+    op.drop_index(op.f('ix_engine_logs_created_at'), table_name='engine_logs')
+    op.drop_table('engine_logs')
+    op.drop_index(op.f('ix_economic_calendar_sync_state_updated_at'), table_name='economic_calendar_sync_state')
+    op.drop_table('economic_calendar_sync_state')
+    op.drop_index(op.f('ix_economic_calendar_snapshots_historical_boundary'), table_name='economic_calendar_snapshots')
+    op.drop_index(op.f('ix_economic_calendar_snapshots_created_at'), table_name='economic_calendar_snapshots')
+    op.drop_index(op.f('ix_economic_calendar_snapshots_analysis_timestamp'), table_name='economic_calendar_snapshots')
+    op.drop_table('economic_calendar_snapshots')
+    op.drop_index(op.f('ix_economic_calendar_provider_observations_provider_name'), table_name='economic_calendar_provider_observations')
+    op.drop_index(op.f('ix_economic_calendar_provider_observations_provider_event_id'), table_name='economic_calendar_provider_observations')
+    op.drop_index(op.f('ix_economic_calendar_provider_observations_payload_hash'), table_name='economic_calendar_provider_observations')
+    op.drop_index(op.f('ix_economic_calendar_provider_observations_ingested_at'), table_name='economic_calendar_provider_observations')
+    op.drop_index(op.f('ix_economic_calendar_provider_observations_available_at'), table_name='economic_calendar_provider_observations')
+    op.drop_table('economic_calendar_provider_observations')
+    op.drop_index(op.f('ix_economic_calendar_instrument_contexts_symbol'), table_name='economic_calendar_instrument_contexts')
+    op.drop_index(op.f('ix_economic_calendar_instrument_contexts_historical_boundary'), table_name='economic_calendar_instrument_contexts')
+    op.drop_table('economic_calendar_instrument_contexts')
+    op.drop_index(op.f('ix_economic_calendar_events_status'), table_name='economic_calendar_events')
+    op.drop_index(op.f('ix_economic_calendar_events_scheduled_at'), table_name='economic_calendar_events')
+    op.drop_index(op.f('ix_economic_calendar_events_importance'), table_name='economic_calendar_events')
+    op.drop_index(op.f('ix_economic_calendar_events_country_code'), table_name='economic_calendar_events')
+    op.drop_index(op.f('ix_economic_calendar_events_category'), table_name='economic_calendar_events')
+    op.drop_index(op.f('ix_economic_calendar_events_canonical_name'), table_name='economic_calendar_events')
+    op.drop_index(op.f('ix_economic_calendar_events_available_at'), table_name='economic_calendar_events')
+    op.drop_table('economic_calendar_events')
+    op.drop_index('ux_economic_calendar_revision_number', table_name='economic_calendar_event_revisions')
+    op.drop_index(op.f('ix_economic_calendar_event_revisions_revision_type'), table_name='economic_calendar_event_revisions')
+    op.drop_index(op.f('ix_economic_calendar_event_revisions_payload_hash'), table_name='economic_calendar_event_revisions')
+    op.drop_index(op.f('ix_economic_calendar_event_revisions_event_id'), table_name='economic_calendar_event_revisions')
+    op.drop_index(op.f('ix_economic_calendar_event_revisions_available_at'), table_name='economic_calendar_event_revisions')
+    op.drop_table('economic_calendar_event_revisions')
+    op.drop_index('ux_economic_calendar_checkpoint_engine', table_name='economic_calendar_checkpoints')
+    op.drop_index(op.f('ix_economic_calendar_checkpoints_created_at'), table_name='economic_calendar_checkpoints')
+    op.drop_table('economic_calendar_checkpoints')
+    op.drop_index(op.f('ix_analysis_results_symbol'), table_name='analysis_results')
+    op.drop_index(op.f('ix_analysis_results_engine'), table_name='analysis_results')
+    op.drop_index(op.f('ix_analysis_results_created_at'), table_name='analysis_results')
+    op.drop_table('analysis_results')
+    op.drop_index('ux_ai_score_fingerprint_mode', table_name='ai_score_snapshots')
+    op.drop_index(op.f('ix_ai_score_snapshots_timeframe'), table_name='ai_score_snapshots')
+    op.drop_index(op.f('ix_ai_score_snapshots_status'), table_name='ai_score_snapshots')
+    op.drop_index(op.f('ix_ai_score_snapshots_policy_version'), table_name='ai_score_snapshots')
+    op.drop_index(op.f('ix_ai_score_snapshots_mode'), table_name='ai_score_snapshots')
+    op.drop_index(op.f('ix_ai_score_snapshots_instrument'), table_name='ai_score_snapshots')
+    op.drop_index(op.f('ix_ai_score_snapshots_as_of'), table_name='ai_score_snapshots')
+    op.drop_index('ix_ai_score_series_time', table_name='ai_score_snapshots')
+    op.drop_table('ai_score_snapshots')
+    # ### end Alembic commands ###
+
