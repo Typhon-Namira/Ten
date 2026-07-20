@@ -28,22 +28,28 @@ export function PipelineStageTracker({ data }: { data: PipelineStagesResponse | 
   if (!data.available || !data.stages) {
     return <div className="empty-state"><h3>No candle processed yet</h3><p>{data.reason ?? 'The pipeline has not run for this instrument/timeframe yet.'}</p></div>
   }
-  const completedCount = data.stages.filter((s) => TERMINAL.includes(s.status)).length
-  const progressPercent = Math.round((completedCount / data.stages.length) * 100)
+  // Bound to a local const: TypeScript narrows `data.stages` to non-undefined from the guard
+  // above, but that narrowing doesn't survive into the `.map()` callback closure below since it's
+  // a property access on `data`, not a variable — a local `const` keeps the narrowed type inside
+  // nested closures, which is what the guard was actually for.
+  const stages = data.stages
+  const candleTimestamp = data.candle_timestamp
+  const completedCount = stages.filter((s) => TERMINAL.includes(s.status)).length
+  const progressPercent = Math.round((completedCount / stages.length) * 100)
   return (
     <div>
       <div className="stage-meta">
-        <span>Candle {new Date(data.candle_timestamp!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+        <span>Candle {candleTimestamp ? new Date(candleTimestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}</span>
         <span>{data.complete ? 'Cycle complete' : `${progressPercent}% through this cycle`}</span>
       </div>
       <div className="stage-flow">
-        {data.stages.map((stage, index) => (
+        {stages.map((stage, index) => (
           <div className="stage-flow__node-wrap" key={stage.key}>
             <div className={`stage-flow__node stage-flow__node--${stage.status}`} title={stage.label}>
               <StatusIcon status={stage.status} />
             </div>
             <span className="stage-flow__label">{stage.label}</span>
-            {index < data.stages.length - 1 && <div className={`stage-flow__connector ${TERMINAL.includes(stage.status) ? 'stage-flow__connector--filled' : ''}`} />}
+            {index < stages.length - 1 && <div className={`stage-flow__connector ${TERMINAL.includes(stage.status) ? 'stage-flow__connector--filled' : ''}`} />}
           </div>
         ))}
       </div>
