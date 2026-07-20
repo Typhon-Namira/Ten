@@ -13,6 +13,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend ./backend
 COPY configs ./configs
+COPY alembic.ini ./alembic.ini
+COPY migrations ./migrations
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 EXPOSE 8000
 CMD ["sh", "-c", "exec uvicorn backend.app.main:app --host 0.0.0.0 --port \"${PORT:-8000}\""]

@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -47,7 +48,7 @@ from backend.app.engines.replay_engine import (
     dataset_manifest_hash,
     production_replay_registry,
 )
-from backend.app.core.database.base import Base
+from backend.app.core.database import prepare_database_schema
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
 from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, IntegrationWorker, SqlAlchemyIntegrationRepository
@@ -130,10 +131,13 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         app.state.market_data_database_session = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
+        managed_runtime = settings.environment.lower() == "production" or bool(
+            os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")
+        )
         try:
             database_engine = create_async_engine(settings.database_url, pool_pre_ping=True, connect_args={"timeout": 3})
             async with database_engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
+                await prepare_database_schema(connection, managed_runtime=managed_runtime)
             session_factory = async_sessionmaker(database_engine, expire_on_commit=False)
             database_session = session_factory()
             repository = SqlAlchemySMCRepository(database_session)
@@ -154,6 +158,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         except Exception as exc:
             if database_engine is not None:
                 await database_engine.dispose()
+            if managed_runtime:
+                raise
             logger.warning("SMC database unavailable; using bounded in-memory persistence", extra={"engine": "smc", "error_type": type(exc).__name__})
         market_repository: MarketDataRepository = InMemoryMarketDataRepository()
         if app.state.market_data_database_session is not None:

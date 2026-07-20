@@ -1,0 +1,119 @@
+from asyncio import run
+from io import StringIO
+import os
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock
+
+from alembic import command
+from alembic.config import Config
+import pytest
+from sqlalchemy import inspect, text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from backend.app.core.database import Base, SCHEMA_HEAD_REVISION, prepare_database_schema
+import backend.app.storage.models  # noqa: F401 -- registers the production metadata
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def alembic_config(*, output_buffer: StringIO | None = None) -> Config:
+    config = Config(str(ROOT / "alembic.ini"), output_buffer=output_buffer)
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    return config
+
+
+def test_initial_migration_renders_every_model_as_postgresql_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEN_DATABASE_URL", "postgresql+asyncpg://ten:ten@localhost:5432/ten")
+    output = StringIO()
+
+    command.upgrade(alembic_config(output_buffer=output), "head", sql=True)
+
+    ddl = output.getvalue()
+    assert SCHEMA_HEAD_REVISION in ddl
+    for table_name in Base.metadata.tables:
+        assert f"CREATE TABLE {table_name}" in ddl
+    assert "FOREIGN KEY" in ddl
+    assert "CREATE UNIQUE INDEX" in ddl
+    assert "JSONB" in ddl
+
+
+@pytest.mark.asyncio
+async def test_managed_runtime_requires_the_alembic_head() -> None:
+    connection = AsyncMock()
+    result = Mock()
+    result.scalar_one_or_none.return_value = "outdated"
+    connection.run_sync.return_value = True
+    connection.execute.return_value = result
+
+    with pytest.raises(RuntimeError, match="alembic upgrade head"):
+        await prepare_database_schema(connection, managed_runtime=True)
+
+    connection.run_sync.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_managed_runtime_rejects_an_unversioned_schema() -> None:
+    connection = AsyncMock()
+    connection.run_sync.return_value = False
+
+    with pytest.raises(RuntimeError, match="alembic upgrade head"):
+        await prepare_database_schema(connection, managed_runtime=True)
+
+    connection.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_managed_runtime_accepts_the_alembic_head() -> None:
+    connection = AsyncMock()
+    result = Mock()
+    result.scalar_one_or_none.return_value = SCHEMA_HEAD_REVISION
+    connection.run_sync.return_value = True
+    connection.execute.return_value = result
+
+    await prepare_database_schema(connection, managed_runtime=True)
+
+    connection.run_sync.assert_awaited_once()
+    connection.execute.assert_awaited_once()
+
+
+def test_clean_postgresql_database_can_migrate_to_head() -> None:
+    database_url = os.getenv("TEN_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEN_TEST_DATABASE_URL is required for the disposable PostgreSQL migration test")
+    if not database_url.startswith("postgresql+asyncpg://"):
+        pytest.fail("TEN_TEST_DATABASE_URL must use postgresql+asyncpg://")
+
+    async def table_names() -> set[str]:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.connect() as connection:
+                return set(await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names()))
+        finally:
+            await engine.dispose()
+
+    assert run(table_names()) == set(), "TEN_TEST_DATABASE_URL must reference a clean disposable database"
+    config = alembic_config()
+    previous_url = os.environ.get("TEN_DATABASE_URL")
+    os.environ["TEN_DATABASE_URL"] = database_url
+    try:
+        command.upgrade(config, "head")
+        migrated_tables = run(table_names())
+        assert set(Base.metadata.tables) <= migrated_tables
+        assert "alembic_version" in migrated_tables
+    finally:
+        command.downgrade(config, "base")
+
+        async def remove_version_table() -> None:
+            engine = create_async_engine(database_url)
+            try:
+                async with engine.begin() as connection:
+                    await connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            finally:
+                await engine.dispose()
+
+        run(remove_version_table())
+        if previous_url is None:
+            os.environ.pop("TEN_DATABASE_URL", None)
+        else:
+            os.environ["TEN_DATABASE_URL"] = previous_url

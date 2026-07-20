@@ -1,5 +1,19 @@
 # Railway deployment
 
+## Database migration
+
+TEN uses Alembic as the production schema authority. Configure this exact Railway
+Pre-deploy Command on the existing service:
+
+```bash
+python -m alembic upgrade head
+```
+
+The command reads `TEN_DATABASE_URL` directly and accepts Railway's
+`postgresql+asyncpg://` URL. The application verifies the Alembic head on managed
+runtimes and does not call `Base.metadata.create_all` there. Development runtimes
+retain automatic metadata creation for isolated local tests.
+
 TEN deploys as one Railway service and one public domain. Railway uses
 `docker/backend.Dockerfile`, whose Node build stage installs the frontend
 dependencies and runs the Vite production build. The resulting

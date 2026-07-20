@@ -87,16 +87,18 @@ The dashboard is served at `http://localhost:5173`, the API at `http://localhost
 
 ### Railway
 
-The repository includes [`railway.json`](railway.json) for a Railpack backend
-deployment. It starts the nested FastAPI application with Railway's assigned
-port and verifies `/health` before marking a deployment healthy.
+The repository includes [`railway.json`](railway.json) and a production Dockerfile
+for a single Railway service. The image builds the Vite dashboard, serves it from
+FastAPI on the same public domain, and verifies `/health` before Railway marks the
+deployment healthy.
 
 1. Create a Railway service from `Typhon-Namira/Ten`.
 2. Keep the service root directory at the repository root.
 3. AI Scoring Production 1.0 is deterministic and requires no LLM or provider API key.
 4. Add a Railway PostgreSQL service and set `TEN_DATABASE_URL` to its async
    SQLAlchemy URL when durable persistence is enabled.
-5. Generate a public domain under the service's Networking settings.
+5. Set the Railway Pre-deploy Command to `python -m alembic upgrade head`.
+6. Generate a public domain under the service's Networking settings.
 
 The backend start command is:
 
@@ -104,10 +106,9 @@ The backend start command is:
 uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-The React dashboard is a separate deployable frontend. Create another Railway
-service rooted at `/frontend`, set `VITE_API_URL` to the public backend URL,
-build with `npm run build`, and serve the generated `dist` directory as a
-static site.
+The React dashboard and API are served by this one process and one public domain.
+No separate frontend service or `VITE_API_URL` is required for same-origin API
+requests.
 
 ## Development workflow
 
@@ -117,7 +118,7 @@ ruff check backend tests
 cd frontend && npm run lint && npm run build
 ```
 
-The default API starts without a database connection and uses in-memory signal, feature-store, and event-bus adapters so architecture work remains testable offline. The SQLAlchemy models provide the production PostgreSQL schema boundary; durable adapters and migrations should be added when ingestion persistence is enabled.
+The default local API can start without a database connection and uses in-memory signal, feature-store, and event-bus adapters so architecture work remains testable offline. Production schema changes are managed by Alembic; Railway runs `python -m alembic upgrade head` before application startup, and the application refuses to use an unversioned or outdated production schema.
 
 ## Add an engine
 
