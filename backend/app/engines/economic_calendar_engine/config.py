@@ -32,6 +32,8 @@ class ProviderConfig(StrictModel):
     requests_per_minute: int = Field(default=30, ge=1, le=10000)
     circuit_failure_threshold: int = Field(default=5, ge=1, le=100)
     file_path: str | None = None
+    api_key_env: str | None = None
+    base_url: str | None = None
 
     @field_validator("timezone")
     @classmethod

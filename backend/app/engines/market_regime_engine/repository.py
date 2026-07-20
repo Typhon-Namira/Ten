@@ -139,22 +139,26 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
         self.session = session
 
     async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> None:
-        await self.session.execute(
-            insert(MarketRegimeSnapshotRecord)
-            .values(
-                id=snapshot.snapshot_id,
-                symbol=canonical_symbol(snapshot.symbol),
-                timeframe=snapshot.timeframe.value,
-                analysis_timestamp=snapshot.analysis_timestamp,
-                dominant_regime=snapshot.dominant_regime.value,
-                configuration_version=snapshot.configuration_version,
-                engine_version=snapshot.engine_version,
-                payload=snapshot.model_dump(mode="json"),
-                created_at=snapshot.created_at,
+        try:
+            await self.session.execute(
+                insert(MarketRegimeSnapshotRecord)
+                .values(
+                    id=snapshot.snapshot_id,
+                    symbol=canonical_symbol(snapshot.symbol),
+                    timeframe=snapshot.timeframe.value,
+                    analysis_timestamp=snapshot.analysis_timestamp,
+                    dominant_regime=snapshot.dominant_regime.value,
+                    configuration_version=snapshot.configuration_version,
+                    engine_version=snapshot.engine_version,
+                    payload=snapshot.model_dump(mode="json"),
+                    created_at=snapshot.created_at,
+                )
+                .on_conflict_do_nothing(index_elements=["id"])
             )
-            .on_conflict_do_nothing(index_elements=["id"])
-        )
-        await self.session.commit()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def get_latest_snapshot(self, symbol: str, timeframe: Timeframe) -> MarketRegimeSnapshot | None:
         query = (
@@ -198,8 +202,12 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
             for item in snapshot.evidence
         ]
         if rows:
-            await self.session.execute(insert(MarketRegimeEvidenceRecord).values(rows).on_conflict_do_nothing(index_elements=["id"]))
-            await self.session.commit()
+            try:
+                await self.session.execute(insert(MarketRegimeEvidenceRecord).values(rows).on_conflict_do_nothing(index_elements=["id"]))
+                await self.session.commit()
+            except Exception:
+                await self.session.rollback()
+                raise
 
     async def list_evidence(self, symbol: str, timeframe: Timeframe, offset: int = 0, limit: int = 100) -> tuple[MarketRegimeEvidence, ...]:
         query = (
@@ -212,22 +220,26 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
         return tuple(MarketRegimeEvidence.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
     async def save_transition(self, transition: RegimeTransition) -> None:
-        await self.session.execute(
-            insert(MarketRegimeTransitionRecord)
-            .values(
-                id=transition.transition_id,
-                symbol=canonical_symbol(transition.symbol),
-                timeframe=transition.timeframe.value,
-                from_regime=transition.from_regime.value,
-                to_regime=transition.to_regime.value,
-                state=transition.state.value,
-                started_at=transition.started_at,
-                confirmed_at=transition.confirmed_at,
-                payload=transition.model_dump(mode="json"),
+        try:
+            await self.session.execute(
+                insert(MarketRegimeTransitionRecord)
+                .values(
+                    id=transition.transition_id,
+                    symbol=canonical_symbol(transition.symbol),
+                    timeframe=transition.timeframe.value,
+                    from_regime=transition.from_regime.value,
+                    to_regime=transition.to_regime.value,
+                    state=transition.state.value,
+                    started_at=transition.started_at,
+                    confirmed_at=transition.confirmed_at,
+                    payload=transition.model_dump(mode="json"),
+                )
+                .on_conflict_do_nothing(index_elements=["id"])
             )
-            .on_conflict_do_nothing(index_elements=["id"])
-        )
-        await self.session.commit()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def get_transition(self, transition_id: object) -> RegimeTransition | None:
         record = await self.session.get(MarketRegimeTransitionRecord, transition_id)
@@ -260,25 +272,29 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
             state_payload=payload,
             created_at=snapshot.created_at,
         )
-        await self.session.execute(
-            statement.on_conflict_do_update(
-                index_elements=["symbol", "timeframe", "configuration_version"],
-                set_={
-                    name: getattr(statement.excluded, name)
-                    for name in (
-                        "engine_version",
-                        "schema_version",
-                        "algorithm_version",
-                        "snapshot_id",
-                        "analysis_boundary",
-                        "payload_hash",
-                        "state_payload",
-                        "created_at",
-                    )
-                },
+        try:
+            await self.session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["symbol", "timeframe", "configuration_version"],
+                    set_={
+                        name: getattr(statement.excluded, name)
+                        for name in (
+                            "engine_version",
+                            "schema_version",
+                            "algorithm_version",
+                            "snapshot_id",
+                            "analysis_boundary",
+                            "payload_hash",
+                            "state_payload",
+                            "created_at",
+                        )
+                    },
+                )
             )
-        )
-        await self.session.commit()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def load_checkpoint(self, symbol: str, timeframe: Timeframe) -> MarketRegimeSnapshot | None:
         query = (
@@ -316,6 +332,10 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
         )
         ids = tuple((await self.session.scalars(query)).all())
         if ids:
-            await self.session.execute(delete(MarketRegimeSnapshotRecord).where(MarketRegimeSnapshotRecord.id.in_(ids)))
-            await self.session.commit()
+            try:
+                await self.session.execute(delete(MarketRegimeSnapshotRecord).where(MarketRegimeSnapshotRecord.id.in_(ids)))
+                await self.session.commit()
+            except Exception:
+                await self.session.rollback()
+                raise
         return len(ids)

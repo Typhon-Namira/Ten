@@ -4,6 +4,18 @@ versions:
   schema_version: "1.0"
   normalization_version: "1.0.0"
 providers:
+  - name: finnhub
+    mode: live_provider
+    enabled: true
+    version: "1"
+    timezone: UTC
+    priority: 10
+    timeout_seconds: 10
+    retry_count: 2
+    requests_per_minute: 30
+    circuit_failure_threshold: 5
+    api_key_env: TEN_FINNHUB_API_KEY
+    base_url: https://finnhub.io/api/v1
   - name: disabled
     mode: disabled
     enabled: false
@@ -14,7 +26,7 @@ providers:
     retry_count: 2
     requests_per_minute: 30
     circuit_failure_threshold: 5
-provider_priority: [disabled]
+provider_priority: [finnhub, disabled]
 windows:
   low: {pre_minutes: 5, imminent_minutes: 2, post_minutes: 5, cooldown_minutes: 5}
   medium: {pre_minutes: 15, imminent_minutes: 5, post_minutes: 15, cooldown_minutes: 15}

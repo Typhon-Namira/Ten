@@ -95,8 +95,12 @@ class SqlAlchemyMarketDataRepository(MarketDataRepository):
             index_elements=["symbol", "timeframe", "timestamp"],
             set_={name: getattr(statement.excluded, name) for name in ("open", "high", "low", "close", "volume", "spread", "provider", "quality_score", "quality_level", "ingestion_timestamp")},
         )
-        await self.session.execute(statement)
-        await self.session.commit()
+        try:
+            await self.session.execute(statement)
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         return len(candles)
 
     async def append_realtime(self, candle: Candle) -> None:

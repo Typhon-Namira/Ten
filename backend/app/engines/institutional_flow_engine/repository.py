@@ -64,6 +64,13 @@ class SqlAlchemyInstitutionalFlowRepository(InstitutionalFlowRepository):
 
     async def save(self, snapshot: InstitutionalFlowAnalysisSnapshot) -> None:
         payload = snapshot.model_dump(mode="json")
+        try:
+            await self._save(snapshot, payload)
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    async def _save(self, snapshot: InstitutionalFlowAnalysisSnapshot, payload: dict) -> None:
         await self.session.execute(
             insert(InstitutionalFlowSnapshotRecord)
             .values(

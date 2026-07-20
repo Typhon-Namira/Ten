@@ -262,8 +262,12 @@ class SqlAlchemyReplayRepository(ReplayRepository):
 
     async def save_transition(self, transition: ReplayTransition) -> None:
         statement = insert(ReplayTransitionRecord).values(id=transition.transition_id, replay_id=transition.replay_id, occurred_at=transition.occurred_at, from_status=transition.from_status.value, to_status=transition.to_status.value, reason_code=transition.reason_code, payload=transition.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["id"])
-        await self.session.execute(statement)
-        await self.session.commit()
+        try:
+            await self.session.execute(statement)
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def list_transitions(self, replay_id: UUID, offset: int = 0, limit: int = 200) -> tuple[ReplayTransition, ...]:
         records = list((await self.session.scalars(select(ReplayTransitionRecord).where(ReplayTransitionRecord.replay_id == replay_id).order_by(ReplayTransitionRecord.occurred_at, ReplayTransitionRecord.id).offset(offset).limit(limit))).all())
@@ -299,8 +303,12 @@ class SqlAlchemyReplayRepository(ReplayRepository):
         if not records:
             return
         values = [{"replay_id": item.replay_id, "sequence": item.sequence, "virtual_time": item.virtual_time, "event_id": item.event_id, "event_type": item.event_type, "payload": item.model_dump(mode="json")} for item in records]
-        await self.session.execute(insert(ReplayTraceRecordModel).values(values).on_conflict_do_nothing(index_elements=["replay_id", "sequence"]))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(ReplayTraceRecordModel).values(values).on_conflict_do_nothing(index_elements=["replay_id", "sequence"]))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def list_trace(self, replay_id: UUID, offset: int = 0, limit: int = 200) -> tuple[ReplayTraceRecord, ...]:
         records = list((await self.session.scalars(select(ReplayTraceRecordModel).where(ReplayTraceRecordModel.replay_id == replay_id).order_by(ReplayTraceRecordModel.sequence).offset(offset).limit(limit))).all())
@@ -310,8 +318,12 @@ class SqlAlchemyReplayRepository(ReplayRepository):
         if not outputs:
             return
         values = [{"id": item.output_id, "replay_id": item.replay_id, "output_type": item.output_type, "source_engine": item.source_engine, "as_of": item.as_of, "fingerprint": item.fingerprint, "payload": item.model_dump(mode="json")} for item in outputs]
-        await self.session.execute(insert(ReplayOutputRecord).values(values).on_conflict_do_nothing(index_elements=["id"]))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(ReplayOutputRecord).values(values).on_conflict_do_nothing(index_elements=["id"]))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def list_outputs(self, replay_id: UUID, output_type: str | None = None, offset: int = 0, limit: int = 200) -> tuple[ReplayOutputReference, ...]:
         statement = select(ReplayOutputRecord).where(ReplayOutputRecord.replay_id == replay_id)
@@ -346,8 +358,12 @@ class SqlAlchemyReplayRepository(ReplayRepository):
     async def cleanup(self, before: datetime, limit: int) -> int:
         ids = list((await self.session.scalars(select(ReplaySessionRecord.id).where(ReplaySessionRecord.status.in_([ReplayStatus.COMPLETED.value, ReplayStatus.CANCELLED.value, ReplayStatus.FAILED.value]), ReplaySessionRecord.created_at < before).order_by(ReplaySessionRecord.created_at).limit(limit))).all())
         if ids:
-            await self.session.execute(delete(ReplaySessionRecord).where(ReplaySessionRecord.id.in_(ids)))
-            await self.session.commit()
+            try:
+                await self.session.execute(delete(ReplaySessionRecord).where(ReplaySessionRecord.id.in_(ids)))
+                await self.session.commit()
+            except Exception:
+                await self.session.rollback()
+                raise
         return len(ids)
 
     @staticmethod

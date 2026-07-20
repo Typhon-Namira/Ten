@@ -259,6 +259,10 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository):
         ).all()
         if not identifiers:
             return 0
-        await self.session.execute(delete(SignalDecisionRecord).where(SignalDecisionRecord.id.in_(identifiers)))
-        await self.session.commit()
+        try:
+            await self.session.execute(delete(SignalDecisionRecord).where(SignalDecisionRecord.id.in_(identifiers)))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         return len(identifiers)

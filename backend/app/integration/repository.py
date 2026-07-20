@@ -158,25 +158,41 @@ class SqlAlchemyIntegrationRepository:
         return tuple(OutboxItem(outbox_id=outbox.outbox_id, envelope=CanonicalEventEnvelope.model_validate(event.payload), available_at=outbox.available_at, attempts=outbox.attempts, published_at=outbox.published_at, last_error_code=outbox.last_error_code) for outbox, event in rows)
 
     async def complete(self, outbox_id: UUID, now: datetime) -> None:
-        await self.session.execute(update(IntegrationOutboxRecord).where(IntegrationOutboxRecord.outbox_id == outbox_id).values(published_at=now))
-        await self.session.commit()
+        try:
+            await self.session.execute(update(IntegrationOutboxRecord).where(IntegrationOutboxRecord.outbox_id == outbox_id).values(published_at=now))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         self._metrics["outbox_backlog"] = max(0, self._metrics["outbox_backlog"] - 1)
 
     async def fail(self, outbox_id: UUID, code: str) -> None:
-        await self.session.execute(update(IntegrationOutboxRecord).where(IntegrationOutboxRecord.outbox_id == outbox_id).values(attempts=IntegrationOutboxRecord.attempts + 1, last_error_code=code))
-        await self.session.commit()
+        try:
+            await self.session.execute(update(IntegrationOutboxRecord).where(IntegrationOutboxRecord.outbox_id == outbox_id).values(attempts=IntegrationOutboxRecord.attempts + 1, last_error_code=code))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def processed(self, event_id: str) -> bool:
         return await self.session.get(IntegrationProcessedEventRecord, event_id) is not None
 
     async def mark_processed(self, event_id: str) -> None:
-        await self.session.execute(insert(IntegrationProcessedEventRecord).values(event_id=event_id, processed_at=datetime.now(UTC)).on_conflict_do_nothing(index_elements=["event_id"]))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(IntegrationProcessedEventRecord).values(event_id=event_id, processed_at=datetime.now(UTC)).on_conflict_do_nothing(index_elements=["event_id"]))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         self._metrics["processed"] += 1
 
     async def save_snapshot(self, value: IntegrationSnapshot) -> IntegrationSnapshot:
-        await self.session.execute(insert(IntegrationSnapshotRecord).values(snapshot_id=value.snapshot_id, semantic_hash=value.semantic_hash, trace_id=semantic_uuid("trace", value.market_event_id), mode=value.mode.value, instrument=value.instrument, timeframe=value.timeframe, analytical_boundary=value.analytical_boundary, status=value.status.value, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["semantic_hash"]))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(IntegrationSnapshotRecord).values(snapshot_id=value.snapshot_id, semantic_hash=value.semantic_hash, trace_id=semantic_uuid("trace", value.market_event_id), mode=value.mode.value, instrument=value.instrument, timeframe=value.timeframe, analytical_boundary=value.analytical_boundary, status=value.status.value, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["semantic_hash"]))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         self._metrics["snapshots"] += 1
         return value
 
@@ -190,8 +206,12 @@ class SqlAlchemyIntegrationRepository:
         return IntegrationSnapshot.model_validate(record.payload) if record else None
 
     async def save_signal(self, value: OperationalSignal) -> OperationalSignal:
-        await self.session.execute(insert(OperationalSignalRecord).values(operational_signal_id=value.operational_signal_id, semantic_hash=value.semantic_hash, decision_id=value.decision_id, ai_score_id=value.ai_score_id, snapshot_id=value.snapshot_id, trace_id=value.trace_id, mode=value.mode.value, instrument=value.instrument, timeframe=value.timeframe, effective_at=value.effective_at, expires_at=value.expires_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["semantic_hash"]))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(OperationalSignalRecord).values(operational_signal_id=value.operational_signal_id, semantic_hash=value.semantic_hash, decision_id=value.decision_id, ai_score_id=value.ai_score_id, snapshot_id=value.snapshot_id, trace_id=value.trace_id, mode=value.mode.value, instrument=value.instrument, timeframe=value.timeframe, effective_at=value.effective_at, expires_at=value.expires_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["semantic_hash"]))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         self._metrics["signals"] += 1
         query = select(OperationalSignalRecord).where(OperationalSignalRecord.semantic_hash == value.semantic_hash)
         record = (await self.session.scalars(query)).first()
@@ -215,12 +235,20 @@ class SqlAlchemyIntegrationRepository:
         return tuple(IntegrationTraceRecord.model_validate(item.payload) for item in records)
 
     async def save_trace(self, value: IntegrationTraceRecord) -> None:
-        await self.session.execute(insert(IntegrationEventTraceRecord).values(trace_record_id=value.trace_record_id, trace_id=value.trace_id, event_id=value.event_id, status=value.status.value, started_at=value.started_at, completed_at=value.completed_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["trace_record_id"]))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(IntegrationEventTraceRecord).values(trace_record_id=value.trace_record_id, trace_id=value.trace_id, event_id=value.event_id, status=value.status.value, started_at=value.started_at, completed_at=value.completed_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["trace_record_id"]))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def save_issue(self, value: DataQualityIssue) -> None:
-        await self.session.execute(insert(IntegrationDataQualityIssueRecord).values(issue_id=value.issue_id, event_id=value.event_id, provider=value.provider, status=value.status.value, observed_at=value.observed_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["issue_id"]))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(IntegrationDataQualityIssueRecord).values(issue_id=value.issue_id, event_id=value.event_id, provider=value.provider, status=value.status.value, observed_at=value.observed_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["issue_id"]))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         self._metrics["quality_issues"] += 1
 
     def metrics(self) -> dict[str, int]:

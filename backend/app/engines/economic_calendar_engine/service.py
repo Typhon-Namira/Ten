@@ -151,6 +151,10 @@ class EconomicCalendarService:
             except asyncio.CancelledError:
                 pass
             self._scheduler = None
+        for provider in self.providers:
+            close = getattr(provider, "close", None)
+            if close is not None:
+                await close()
 
     async def _poll(self) -> None:
         while True:

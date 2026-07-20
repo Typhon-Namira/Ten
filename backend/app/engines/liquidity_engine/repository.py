@@ -61,6 +61,13 @@ class SqlAlchemyLiquidityRepository(LiquidityRepository):
 
     async def save(self, snapshot: LiquidityAnalysisSnapshot) -> None:
         payload = snapshot.model_dump(mode="json")
+        try:
+            await self._save(snapshot, payload)
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    async def _save(self, snapshot: LiquidityAnalysisSnapshot, payload: dict) -> None:
         await self.session.execute(
             insert(LiquiditySnapshotRecord)
             .values(

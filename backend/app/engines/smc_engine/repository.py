@@ -73,14 +73,18 @@ class SqlAlchemySMCRepository(SMCRepository):
 
     async def save(self, snapshot: SMCAnalysisSnapshot) -> None:
         values = {"id": snapshot.id, "symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "analysis_timestamp": snapshot.analysis_timestamp, "market_data_boundary": snapshot.market_data_boundary, "status": snapshot.status.value, "processing_mode": snapshot.processing_mode.value, "engine_version": snapshot.engine_version, "configuration_version": snapshot.configuration_version, "payload": snapshot.model_dump(mode="json"), "created_at": snapshot.created_at}
-        await self.session.execute(insert(SMCAnalysisSnapshotRecord).values(values).on_conflict_do_nothing(index_elements=["id"]))
-        objects = self._objects(snapshot)
-        if objects:
-            await self.session.execute(insert(SMCObjectRecord).values(objects).on_conflict_do_nothing(index_elements=["id"]))
-        checkpoint = {"symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "configuration_version": snapshot.configuration_version, "snapshot_id": snapshot.id, "last_processed_candle": snapshot.analysis_timestamp, "state_payload": snapshot.model_dump(mode="json"), "updated_at": snapshot.created_at}
-        statement = insert(SMCCheckpointRecord).values(checkpoint)
-        await self.session.execute(statement.on_conflict_do_update(index_elements=["symbol", "timeframe", "configuration_version"], set_={name: getattr(statement.excluded, name) for name in ("snapshot_id", "last_processed_candle", "state_payload", "updated_at")}))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(SMCAnalysisSnapshotRecord).values(values).on_conflict_do_nothing(index_elements=["id"]))
+            objects = self._objects(snapshot)
+            if objects:
+                await self.session.execute(insert(SMCObjectRecord).values(objects).on_conflict_do_nothing(index_elements=["id"]))
+            checkpoint = {"symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "configuration_version": snapshot.configuration_version, "snapshot_id": snapshot.id, "last_processed_candle": snapshot.analysis_timestamp, "state_payload": snapshot.model_dump(mode="json"), "updated_at": snapshot.created_at}
+            statement = insert(SMCCheckpointRecord).values(checkpoint)
+            await self.session.execute(statement.on_conflict_do_update(index_elements=["symbol", "timeframe", "configuration_version"], set_={name: getattr(statement.excluded, name) for name in ("snapshot_id", "last_processed_candle", "state_payload", "updated_at")}))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def latest(self, symbol: str, timeframe: Timeframe) -> SMCAnalysisSnapshot | None:
         return await self._query(symbol, timeframe, None)

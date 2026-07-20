@@ -61,6 +61,13 @@ class SqlAlchemyVolumeProfileRepository(VolumeProfileRepository):
 
     async def save(self, snapshot: VolumeProfileAnalysisSnapshot) -> None:
         payload = snapshot.model_dump(mode="json")
+        try:
+            await self._save(snapshot, payload)
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    async def _save(self, snapshot: VolumeProfileAnalysisSnapshot, payload: dict) -> None:
         await self.session.execute(
             insert(VolumeProfileSnapshotRecord)
             .values(

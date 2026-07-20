@@ -219,6 +219,10 @@ class SqlAlchemyAIScoringRepository(AIScoringRepository):
         ).all()
         if not identifiers:
             return 0
-        await self.session.execute(delete(AIScoreSnapshotRecord).where(AIScoreSnapshotRecord.id.in_(identifiers)))
-        await self.session.commit()
+        try:
+            await self.session.execute(delete(AIScoreSnapshotRecord).where(AIScoreSnapshotRecord.id.in_(identifiers)))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         return len(identifiers)

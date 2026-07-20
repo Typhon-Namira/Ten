@@ -3,15 +3,22 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import ProviderCapabilities, ProviderEventObservation, ProviderMode, ProviderStatus, payload_hash, stable_id
+
+
+def provider_api_key(environment_name: str) -> str:
+    return os.getenv(environment_name, "")
 
 
 class ProviderFetchRequest(BaseModel):
@@ -212,6 +219,105 @@ class DisabledProvider(EconomicCalendarProvider):
         )
 
 
+class HttpEconomicCalendarProvider(EconomicCalendarProvider):
+    """Base for HTTP-backed live providers; concrete subclasses parse the vendor payload."""
+
+    def __init__(self, name: str, *, api_key: str, base_url: str, timeout_seconds: float = 10, version: str = "1") -> None:
+        if not api_key:
+            raise ValueError(f"{name} economic calendar provider requires an API key")
+        self.name = name
+        self.version = version
+        self.timezone = "UTC"
+        self.mode = ProviderMode.LIVE_PROVIDER
+        self.capabilities = ProviderCapabilities(
+            historical_events=True, future_events=True, actual_values=True, forecast_values=True,
+            previous_values=True, statuses=True, importance=True, country=True, currency=True, unit=True,
+        )
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.AsyncClient(timeout=timeout_seconds)
+        self.last_latency_ms = 0.0
+        self._last_success: datetime | None = None
+        self._last_failure: datetime | None = None
+        self._last_error: str | None = None
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def health(self) -> ProviderStatus:
+        return ProviderStatus(
+            provider_name=self.name,
+            mode=self.mode,
+            enabled=True,
+            authenticated=bool(self.api_key),
+            reachable=self._last_error is None,
+            last_success=self._last_success,
+            last_failure=self._last_failure,
+            capabilities=self.capabilities,
+            message=self._last_error or "",
+        )
+
+
+class FinnhubEconomicCalendarProvider(HttpEconomicCalendarProvider):
+    """Live adapter for Finnhub's `/calendar/economic` endpoint."""
+
+    def __init__(self, *, api_key: str, base_url: str = "https://finnhub.io/api/v1", timeout_seconds: float = 10, version: str = "1") -> None:
+        super().__init__("finnhub", api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds, version=version)
+
+    async def fetch_events(self, request: ProviderFetchRequest) -> ProviderFetchResult:
+        now = datetime.now(UTC)
+        started = perf_counter()
+        try:
+            response = await self._client.get(
+                f"{self.base_url}/calendar/economic",
+                params={"from": request.start.date().isoformat(), "to": request.end.date().isoformat(), "token": self.api_key},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            self._last_failure = now
+            self._last_error = type(exc).__name__
+            return ProviderFetchResult(observations=(), warnings=(f"finnhub_request_failed:{type(exc).__name__}",))
+        finally:
+            self.last_latency_ms = (perf_counter() - started) * 1000
+        rows = payload.get("economicCalendar") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            self._last_failure = now
+            self._last_error = "unexpected_response_shape"
+            return ProviderFetchResult(observations=(), warnings=("finnhub_unexpected_response_shape",))
+        values: list[ProviderEventObservation] = []
+        failures = 0
+        for index, row in enumerate(rows):
+            try:
+                item = observation_from_mapping(self.name, self.version, self._map_row(row), now, index)
+                if request.start <= item.available_at <= request.end and len(values) < request.limit:
+                    values.append(item)
+            except (TypeError, ValueError, KeyError):
+                failures += 1
+        self._last_success = now
+        self._last_error = None
+        return ProviderFetchResult(observations=tuple(values), cursor=str(len(values)), success_count=len(values), failure_count=failures)
+
+    @staticmethod
+    def _map_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        event = str(row.get("event") or "").strip()
+        country = str(row.get("country") or "").strip().upper()
+        scheduled = str(row.get("time") or "").strip()
+        return {
+            "provider_event_id": stable_id("finnhub-event", country, event, scheduled, row.get("unit")),
+            "raw_name": event,
+            "raw_country": country or None,
+            "raw_importance": row.get("impact"),
+            "raw_status": "released" if row.get("actual") not in (None, "") else "scheduled",
+            "raw_scheduled_time": scheduled or None,
+            "raw_timezone": "UTC",
+            "raw_actual": row.get("actual"),
+            "raw_forecast": row.get("estimate"),
+            "raw_previous": row.get("prev"),
+            "raw_unit": row.get("unit"),
+        }
+
+
 def build_providers(
     configs: Sequence[Any],
     *,
@@ -228,6 +334,12 @@ def build_providers(
             result.append(FileImportProvider(config.name, Path(config.file_path), import_root=import_root, version=config.version))
         elif config.mode in {ProviderMode.STATIC_FIXTURE, ProviderMode.IN_MEMORY_TEST_PROVIDER} and config.enabled:
             result.append(InMemoryProvider(config.name, fixtures.get(config.name, ()), version=config.version, mode=config.mode))
+        elif config.mode == ProviderMode.LIVE_PROVIDER and config.enabled and config.name == "finnhub":
+            key = provider_api_key(config.api_key_env or "TEN_FINNHUB_API_KEY")
+            if key:
+                result.append(FinnhubEconomicCalendarProvider(api_key=key, base_url=config.base_url or "https://finnhub.io/api/v1", timeout_seconds=config.timeout_seconds, version=config.version))
+            else:
+                result.append(DisabledProvider(config.name, config.version))
         else:
             result.append(DisabledProvider(config.name, config.version))
     return tuple(result) or (DisabledProvider(),)

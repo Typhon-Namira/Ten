@@ -241,8 +241,12 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             )
             for item in values
         ]
-        await self.session.execute(insert(EconomicCalendarObservationRecord).values(rows).on_conflict_do_nothing(index_elements=["id"]))
-        await self.session.commit()
+        try:
+            await self.session.execute(insert(EconomicCalendarObservationRecord).values(rows).on_conflict_do_nothing(index_elements=["id"]))
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         return len(values)
 
     async def get_provider_observation(self, observation_id: UUID) -> ProviderEventObservation | None:
@@ -272,13 +276,17 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             configuration_version=event.configuration_version,
             payload=event.model_dump(mode="json"),
         )
-        await self.session.execute(
-            statement.on_conflict_do_update(
-                index_elements=["id"],
-                set_={name: getattr(statement.excluded, name) for name in ("scheduled_at", "available_at", "category", "importance", "status", "payload")},
+        try:
+            await self.session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={name: getattr(statement.excluded, name) for name in ("scheduled_at", "available_at", "category", "importance", "status", "payload")},
+                )
             )
-        )
-        await self.session.commit()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def get_event(self, event_id: UUID) -> EconomicEvent | None:
         record = await self.session.get(EconomicCalendarEventRecord, event_id)
@@ -325,20 +333,24 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         return state.model_copy(update={"available_at": latest.available_at, "revision_count": len(visible), "latest_revision_id": latest.revision_id})
 
     async def save_revision(self, revision: EconomicEventRevision) -> None:
-        await self.session.execute(
-            insert(EconomicCalendarRevisionRecord)
-            .values(
-                id=revision.revision_id,
-                event_id=revision.event_id,
-                revision_number=revision.revision_number,
-                revision_type=revision.revision_type.value,
-                available_at=revision.available_at,
-                payload_hash=revision.payload_hash,
-                payload=revision.model_dump(mode="json"),
+        try:
+            await self.session.execute(
+                insert(EconomicCalendarRevisionRecord)
+                .values(
+                    id=revision.revision_id,
+                    event_id=revision.event_id,
+                    revision_number=revision.revision_number,
+                    revision_type=revision.revision_type.value,
+                    available_at=revision.available_at,
+                    payload_hash=revision.payload_hash,
+                    payload=revision.model_dump(mode="json"),
+                )
+                .on_conflict_do_nothing(index_elements=["id"])
             )
-            .on_conflict_do_nothing(index_elements=["id"])
-        )
-        await self.session.commit()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def list_revisions(self, event_id: UUID, limit: int = 500) -> tuple[EconomicEventRevision, ...]:
         query = (
@@ -350,19 +362,23 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         return tuple(EconomicEventRevision.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
     async def save_snapshot(self, snapshot: EconomicCalendarSnapshot) -> None:
-        await self.session.execute(
-            insert(EconomicCalendarSnapshotRecord)
-            .values(
-                id=snapshot.snapshot_id,
-                analysis_timestamp=snapshot.analysis_timestamp,
-                historical_boundary=snapshot.historical_boundary,
-                configuration_version=snapshot.configuration_version,
-                payload=snapshot.model_dump(mode="json"),
-                created_at=snapshot.created_at,
+        try:
+            await self.session.execute(
+                insert(EconomicCalendarSnapshotRecord)
+                .values(
+                    id=snapshot.snapshot_id,
+                    analysis_timestamp=snapshot.analysis_timestamp,
+                    historical_boundary=snapshot.historical_boundary,
+                    configuration_version=snapshot.configuration_version,
+                    payload=snapshot.model_dump(mode="json"),
+                    created_at=snapshot.created_at,
+                )
+                .on_conflict_do_nothing(index_elements=["id"])
             )
-            .on_conflict_do_nothing(index_elements=["id"])
-        )
-        await self.session.commit()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def get_snapshot(self, snapshot_id: UUID) -> EconomicCalendarSnapshot | None:
         record = await self.session.get(EconomicCalendarSnapshotRecord, snapshot_id)
@@ -373,12 +389,16 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         return tuple(EconomicCalendarSnapshot.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
     async def save_instrument_context(self, context: InstrumentEventContext) -> None:
-        await self.session.execute(
-            insert(EconomicCalendarContextRecord)
-            .values(id=context.context_id, symbol=context.symbol, historical_boundary=context.historical_boundary, payload=context.model_dump(mode="json"))
-            .on_conflict_do_nothing(index_elements=["id"])
-        )
-        await self.session.commit()
+        try:
+            await self.session.execute(
+                insert(EconomicCalendarContextRecord)
+                .values(id=context.context_id, symbol=context.symbol, historical_boundary=context.historical_boundary, payload=context.model_dump(mode="json"))
+                .on_conflict_do_nothing(index_elements=["id"])
+            )
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def get_instrument_context(self, symbol: str, boundary: datetime | None = None) -> InstrumentEventContext | None:
         query = select(EconomicCalendarContextRecord).where(EconomicCalendarContextRecord.symbol == symbol.upper())
@@ -391,12 +411,16 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         statement = insert(EconomicCalendarSyncStateRecord).values(
             provider_name=provider, state=state, updated_at=datetime.fromisoformat(str(state["updated_at"]))
         )
-        await self.session.execute(
-            statement.on_conflict_do_update(
-                index_elements=["provider_name"], set_={"state": statement.excluded.state, "updated_at": statement.excluded.updated_at}
+        try:
+            await self.session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["provider_name"], set_={"state": statement.excluded.state, "updated_at": statement.excluded.updated_at}
+                )
             )
-        )
-        await self.session.commit()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def load_sync_state(self, provider: str) -> dict[str, Any] | None:
         record = await self.session.get(EconomicCalendarSyncStateRecord, provider)
@@ -416,16 +440,20 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             state_payload=checkpoint.state_payload,
             created_at=checkpoint.created_at,
         )
-        await self.session.execute(
-            statement.on_conflict_do_update(
-                index_elements=["engine_name", "configuration_version"],
-                set_={
-                    name: getattr(statement.excluded, name)
-                    for name in ("engine_version", "schema_version", "normalization_version", "payload_hash", "state_payload", "created_at")
-                },
+        try:
+            await self.session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["engine_name", "configuration_version"],
+                    set_={
+                        name: getattr(statement.excluded, name)
+                        for name in ("engine_version", "schema_version", "normalization_version", "payload_hash", "state_payload", "created_at")
+                    },
+                )
             )
-        )
-        await self.session.commit()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def load_checkpoint(self) -> EconomicCalendarCheckpoint | None:
         record = (
@@ -461,7 +489,15 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         ):
             ids = tuple((await self.session.scalars(select(model.id).order_by(order.desc()).offset(keep))).all())
             if ids:
-                await self.session.execute(delete(model).where(model.id.in_(ids)))
+                try:
+                    await self.session.execute(delete(model).where(model.id.in_(ids)))
+                except Exception:
+                    await self.session.rollback()
+                    raise
             removed[name] = len(ids)
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         return removed
