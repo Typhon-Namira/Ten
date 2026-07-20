@@ -119,18 +119,15 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         smc_config = configs.load_model("smc", SMCConfig)
         app.state.smc_database_engine = None
-        app.state.smc_database_session = None
-        app.state.liquidity_database_session = None
-        app.state.volume_profile_database_session = None
-        app.state.institutional_flow_database_session = None
-        app.state.market_regime_database_session = None
-        app.state.economic_calendar_database_session = None
-        app.state.ai_scoring_database_session = None
-        app.state.signal_decision_database_session = None
-        app.state.replay_database_session = None
-        app.state.replay_source_database_session = None
-        app.state.integration_database_session = None
-        app.state.market_data_database_session = None
+        # A single shared `async_sessionmaker` — never a pre-created `Session` — is stored once
+        # and handed to every repository. Each repository opens and closes its own `AsyncSession`
+        # per call (see `backend/app/storage/scoped_session.py`); no session is ever held for the
+        # process lifetime or shared across concurrent callers. This directly fixes production
+        # `InvalidRequestError` failures ("session is provisioning a new connection; concurrent
+        # operations are not permitted" / "session is in 'prepared' state") that occurred whenever
+        # a background pipeline write and a concurrent dashboard read landed on the same engine's
+        # single long-lived session at once.
+        app.state.database_session_factory = None
         repository: SMCRepository = InMemorySMCRepository()
         database_engine = None
         managed_runtime = settings.environment.lower() == "production" or bool(
@@ -141,21 +138,9 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             async with database_engine.begin() as connection:
                 await prepare_database_schema(connection, managed_runtime=managed_runtime)
             session_factory = async_sessionmaker(database_engine, expire_on_commit=False)
-            database_session = session_factory()
-            repository = SqlAlchemySMCRepository(database_session)
             app.state.smc_database_engine = database_engine
-            app.state.smc_database_session = database_session
-            app.state.liquidity_database_session = session_factory()
-            app.state.volume_profile_database_session = session_factory()
-            app.state.institutional_flow_database_session = session_factory()
-            app.state.market_regime_database_session = session_factory()
-            app.state.economic_calendar_database_session = session_factory()
-            app.state.ai_scoring_database_session = session_factory()
-            app.state.signal_decision_database_session = session_factory()
-            app.state.replay_database_session = session_factory()
-            app.state.replay_source_database_session = session_factory()
-            app.state.integration_database_session = session_factory()
-            app.state.market_data_database_session = session_factory()
+            app.state.database_session_factory = session_factory
+            repository = SqlAlchemySMCRepository(session_factory)
             logger.info("SMC durable persistence activated", extra={"engine": "smc", "adapter": "sqlalchemy"})
         except Exception as exc:
             if database_engine is not None:
@@ -164,8 +149,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 raise
             logger.warning("SMC database unavailable; using bounded in-memory persistence", extra={"engine": "smc", "error_type": type(exc).__name__})
         market_repository: MarketDataRepository = InMemoryMarketDataRepository()
-        if app.state.market_data_database_session is not None:
-            market_repository = SqlAlchemyMarketDataRepository(app.state.market_data_database_session)
+        if app.state.database_session_factory is not None:
+            market_repository = SqlAlchemyMarketDataRepository(app.state.database_session_factory)
         app.state.market_data_service = build_market_data_service(market_config)
         app.state.market_data_service.repository = market_repository
         app.state.market_data_service.event_bus = app.state.pipeline_manager.event_bus
@@ -177,7 +162,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 "timeframes": settings.market_data_timeframes,
                 "market_worker_enabled": settings.market_data_worker_enabled,
                 "integration_worker_enabled": settings.integration_worker_enabled,
-                "database_configured": app.state.market_data_database_session is not None,
+                "database_configured": app.state.database_session_factory is not None,
             },
         )
         app.state.smc_service = SMCService(
@@ -191,40 +176,40 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         liquidity_config = configs.load_model("liquidity", LiquidityConfig)
         liquidity_repository: LiquidityRepository = InMemoryLiquidityRepository()
         liquidity_mode = "memory"
-        if app.state.liquidity_database_session is not None:
-            liquidity_repository = SqlAlchemyLiquidityRepository(app.state.liquidity_database_session)
+        if app.state.database_session_factory is not None:
+            liquidity_repository = SqlAlchemyLiquidityRepository(app.state.database_session_factory)
             liquidity_mode = "sqlalchemy"
         app.state.liquidity_service = LiquidityService(app.state.market_data_service, app.state.smc_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, liquidity_config, liquidity_repository, liquidity_mode)
         await app.state.liquidity_service.restore()
         volume_profile_config = configs.load_model("volume_profile", VolumeProfileConfig)
         volume_profile_repository: VolumeProfileRepository = InMemoryVolumeProfileRepository()
         volume_profile_mode = "memory"
-        if app.state.volume_profile_database_session is not None:
-            volume_profile_repository = SqlAlchemyVolumeProfileRepository(app.state.volume_profile_database_session)
+        if app.state.database_session_factory is not None:
+            volume_profile_repository = SqlAlchemyVolumeProfileRepository(app.state.database_session_factory)
             volume_profile_mode = "sqlalchemy"
         app.state.volume_profile_service = VolumeProfileService(app.state.market_data_service, app.state.smc_service, app.state.liquidity_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, volume_profile_config, volume_profile_repository, volume_profile_mode)
         await app.state.volume_profile_service.restore()
         flow_config = configs.load_model("flow", InstitutionalFlowConfig)
         flow_repository: InstitutionalFlowRepository = InMemoryInstitutionalFlowRepository()
         flow_mode = "memory"
-        if app.state.institutional_flow_database_session is not None:
-            flow_repository = SqlAlchemyInstitutionalFlowRepository(app.state.institutional_flow_database_session)
+        if app.state.database_session_factory is not None:
+            flow_repository = SqlAlchemyInstitutionalFlowRepository(app.state.database_session_factory)
             flow_mode = "sqlalchemy"
         app.state.institutional_flow_service = InstitutionalFlowService(app.state.market_data_service, app.state.smc_service, app.state.liquidity_service, app.state.volume_profile_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, flow_config, flow_repository, flow_mode)
         await app.state.institutional_flow_service.restore()
         regime_config = configs.load_model("market_regime", MarketRegimeConfig)
         regime_repository: MarketRegimeRepository = InMemoryMarketRegimeRepository()
         regime_mode = "memory"
-        if app.state.market_regime_database_session is not None:
-            regime_repository = SqlAlchemyMarketRegimeRepository(app.state.market_regime_database_session)
+        if app.state.database_session_factory is not None:
+            regime_repository = SqlAlchemyMarketRegimeRepository(app.state.database_session_factory)
             regime_mode = "sqlalchemy"
         app.state.market_regime_service = MarketRegimeService(app.state.market_data_service, app.state.smc_service, app.state.liquidity_service, app.state.volume_profile_service, app.state.institutional_flow_service, app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, regime_config, regime_repository, regime_mode)
         await app.state.market_regime_service.restore()
         calendar_config = configs.load_model("economic_calendar", EconomicCalendarConfig)
         calendar_repository: EconomicCalendarRepository = InMemoryEconomicCalendarRepository()
         calendar_mode = "memory"
-        if app.state.economic_calendar_database_session is not None:
-            calendar_repository = SqlAlchemyEconomicCalendarRepository(app.state.economic_calendar_database_session)
+        if app.state.database_session_factory is not None:
+            calendar_repository = SqlAlchemyEconomicCalendarRepository(app.state.database_session_factory)
             calendar_mode = "postgresql"
         calendar_providers = build_providers(calendar_config.providers)
         app.state.economic_calendar_service = EconomicCalendarService(app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, calendar_config, calendar_repository, calendar_providers, calendar_mode)
@@ -232,8 +217,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         ai_config = configs.load_model("ai_scoring", AIScoringConfig)
         ai_repository: AIScoringRepository = InMemoryAIScoringRepository()
         ai_mode = "memory"
-        if app.state.ai_scoring_database_session is not None:
-            ai_repository = SqlAlchemyAIScoringRepository(app.state.ai_scoring_database_session)
+        if app.state.database_session_factory is not None:
+            ai_repository = SqlAlchemyAIScoringRepository(app.state.database_session_factory)
             ai_mode = "postgresql"
         app.state.ai_scoring_service = AIScoringService(
             ai_repository,
@@ -253,8 +238,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         decision_config = configs.load_model("signal_decision", SignalDecisionConfig)
         decision_repository: SignalDecisionRepository = InMemorySignalDecisionRepository()
         decision_mode = "memory"
-        if app.state.signal_decision_database_session is not None:
-            decision_repository = SqlAlchemySignalDecisionRepository(app.state.signal_decision_database_session)
+        if app.state.database_session_factory is not None:
+            decision_repository = SqlAlchemySignalDecisionRepository(app.state.database_session_factory)
             decision_mode = "postgresql"
         app.state.signal_decision_service = SignalDecisionService(
             decision_repository,
@@ -276,8 +261,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         integration_repository: IntegrationRepository = InMemoryIntegrationRepository()
         integration_mode = "memory"
-        if app.state.integration_database_session is not None:
-            integration_repository = SqlAlchemyIntegrationRepository(app.state.integration_database_session)
+        if app.state.database_session_factory is not None:
+            integration_repository = SqlAlchemyIntegrationRepository(app.state.database_session_factory)
             integration_mode = "postgresql"
         app.state.integration_repository = integration_repository
         app.state.pipeline_activity_log = PipelineActivityLog(app.state.pipeline_manager.event_bus)
@@ -309,12 +294,12 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         replay_repository: ReplayRepository = InMemoryReplayRepository()
         replay_mode = "memory"
         replay_sources = HistoricalSourceRegistry((InMemoryHistoricalSource("historical_candles", ()),))
-        if app.state.replay_database_session is not None and app.state.replay_source_database_session is not None:
-            replay_repository = SqlAlchemyReplayRepository(app.state.replay_database_session)
+        if app.state.database_session_factory is not None:
+            replay_repository = SqlAlchemyReplayRepository(app.state.database_session_factory)
             replay_sources = HistoricalSourceRegistry(
                 (
-                    SqlAlchemyHistoricalCandleSource(app.state.replay_source_database_session),
-                    SqlAlchemyEconomicRevisionSource(app.state.replay_source_database_session),
+                    SqlAlchemyHistoricalCandleSource(app.state.database_session_factory),
+                    SqlAlchemyEconomicRevisionSource(app.state.database_session_factory),
                 )
             )
             replay_mode = "postgresql"
@@ -369,30 +354,9 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             await app.state.economic_calendar_service.stop()
             await app.state.market_data_service.close()
             await app.state.pipeline_manager.event_bus.drain()
-            if app.state.economic_calendar_database_session is not None:
-                await app.state.economic_calendar_database_session.close()
-            if app.state.ai_scoring_database_session is not None:
-                await app.state.ai_scoring_database_session.close()
-            if app.state.signal_decision_database_session is not None:
-                await app.state.signal_decision_database_session.close()
-            if app.state.replay_source_database_session is not None:
-                await app.state.replay_source_database_session.close()
-            if app.state.replay_database_session is not None:
-                await app.state.replay_database_session.close()
-            if app.state.integration_database_session is not None:
-                await app.state.integration_database_session.close()
-            if app.state.market_data_database_session is not None:
-                await app.state.market_data_database_session.close()
-            if app.state.market_regime_database_session is not None:
-                await app.state.market_regime_database_session.close()
-            if app.state.institutional_flow_database_session is not None:
-                await app.state.institutional_flow_database_session.close()
-            if app.state.volume_profile_database_session is not None:
-                await app.state.volume_profile_database_session.close()
-            if app.state.liquidity_database_session is not None:
-                await app.state.liquidity_database_session.close()
-            if app.state.smc_database_session is not None:
-                await app.state.smc_database_session.close()
+            # No per-engine sessions to close — every repository call already closed its own
+            # ephemeral session on return (see `scoped_session`). Only the shared engine (and its
+            # connection pool) needs disposing.
             if app.state.smc_database_engine is not None:
                 await app.state.smc_database_engine.dispose()
 
@@ -405,9 +369,52 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
     application.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
     application.include_router(api_router, prefix=settings.api_prefix)
 
+    def _observability_error_response(request: Request, exc: Exception) -> JSONResponse:
+        logger.error(
+            "api.unhandled_exception",
+            extra={"path": request.url.path, "method": request.method, "exception_class": type(exc).__name__},
+            exc_info=exc,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"status": "error", "path": request.url.path, "error": {"exception_class": type(exc).__name__, "message": str(exc)[:500]}},
+        )
+
     @application.exception_handler(TenError)
-    async def handle_ten_error(_: Request, exc: TenError) -> JSONResponse:
+    async def handle_ten_error(request: Request, exc: TenError) -> JSONResponse:
+        # This app has no order-execution surface (see the FastAPI description above) — every
+        # route is read-only analysis/observability. A GET request that fails must degrade to a
+        # graceful, per-endpoint `status: "error"` body at 200, not an opaque failure, so the
+        # dashboard never has to special-case a non-200 response just to render "unavailable".
+        # POST/PUT/DELETE (replay control, decision actions) keep the original 422 behaviour.
+        if request.method == "GET":
+            return _observability_error_response(request, exc)
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
+
+    @application.exception_handler(Exception)
+    async def handle_unhandled_exception(request: Request, exc: Exception) -> Response:
+        # Catches everything NOT already handled above or by FastAPI's own HTTPException/
+        # RequestValidationError handlers (Starlette dispatches to the most specific registered
+        # type, so those keep their existing behaviour untouched) — e.g. a raw AttributeError,
+        # KeyError, or SQLAlchemy driver error bubbling out of a repository/engine call that was
+        # never wrapped in a try/except. Root cause this closes: dozens of observability GET
+        # endpoints called services/repositories directly with no guard at all, so any of those
+        # exception types propagated straight to FastAPI's default 500 handler.
+        #
+        # A handler registered for the bare `Exception` class is dispatched by Starlette's
+        # outermost `ServerErrorMiddleware`, not the inner `ExceptionMiddleware` — which always
+        # re-raises after sending the response (so the exception still surfaces in server logs /
+        # `TestClient(raise_server_exceptions=True)`), and does not tolerate the handler itself
+        # raising. So POST/PUT/DELETE failing closed is expressed as an explicit 500 response
+        # here, not by re-raising and hoping the ASGI server does something reasonable with it.
+        if request.method != "GET":
+            logger.error(
+                "api.unhandled_exception",
+                extra={"path": request.url.path, "method": request.method, "exception_class": type(exc).__name__},
+                exc_info=exc,
+            )
+            return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": "Internal Server Error"})
+        return _observability_error_response(request, exc)
 
     # Static assets and SPA fallback are deliberately registered after every API router.
     assets_directory = resolved_frontend_dist / "assets"

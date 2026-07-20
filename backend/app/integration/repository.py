@@ -8,9 +8,10 @@ from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import IntegrationDataQualityIssueRecord, IntegrationEventRecord, IntegrationEventTraceRecord, IntegrationOutboxRecord, IntegrationProcessedEventRecord, IntegrationSnapshotRecord, OperationalSignalRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import CanonicalEventEnvelope, DataQualityIssue, IntegrationSnapshot, IntegrationTraceRecord, OperationalSignal, OutboxItem, semantic_uuid
 
@@ -132,11 +133,12 @@ class InMemoryIntegrationRepository:
             self._events.pop(next(iter(self._events)))
 
 
-class SqlAlchemyIntegrationRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+class SqlAlchemyIntegrationRepository(ScopedSessionRepository):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
         self._metrics = {"events": 0, "outbox_backlog": 0, "processed": 0, "snapshots": 0, "signals": 0, "quality_issues": 0}
 
+    @scoped_session
     async def enqueue(self, envelope: CanonicalEventEnvelope) -> OutboxItem:
         outbox_id = semantic_uuid("outbox", envelope.event_id)
         try:
@@ -152,11 +154,13 @@ class SqlAlchemyIntegrationRepository:
         assert record is not None
         return OutboxItem(outbox_id=record.outbox_id, envelope=envelope, available_at=record.available_at, attempts=record.attempts, published_at=record.published_at, last_error_code=record.last_error_code)
 
+    @scoped_session
     async def pending(self, now: datetime, limit: int) -> tuple[OutboxItem, ...]:
         query = select(IntegrationOutboxRecord, IntegrationEventRecord).join(IntegrationEventRecord, IntegrationEventRecord.event_id == IntegrationOutboxRecord.event_id).where(IntegrationOutboxRecord.published_at.is_(None), IntegrationOutboxRecord.available_at <= now).order_by(IntegrationOutboxRecord.available_at).limit(limit)
         rows = (await self.session.execute(query)).all()
         return tuple(OutboxItem(outbox_id=outbox.outbox_id, envelope=CanonicalEventEnvelope.model_validate(event.payload), available_at=outbox.available_at, attempts=outbox.attempts, published_at=outbox.published_at, last_error_code=outbox.last_error_code) for outbox, event in rows)
 
+    @scoped_session
     async def complete(self, outbox_id: UUID, now: datetime) -> None:
         try:
             await self.session.execute(update(IntegrationOutboxRecord).where(IntegrationOutboxRecord.outbox_id == outbox_id).values(published_at=now))
@@ -166,6 +170,7 @@ class SqlAlchemyIntegrationRepository:
             raise
         self._metrics["outbox_backlog"] = max(0, self._metrics["outbox_backlog"] - 1)
 
+    @scoped_session
     async def fail(self, outbox_id: UUID, code: str) -> None:
         try:
             await self.session.execute(update(IntegrationOutboxRecord).where(IntegrationOutboxRecord.outbox_id == outbox_id).values(attempts=IntegrationOutboxRecord.attempts + 1, last_error_code=code))
@@ -174,9 +179,11 @@ class SqlAlchemyIntegrationRepository:
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def processed(self, event_id: str) -> bool:
         return await self.session.get(IntegrationProcessedEventRecord, event_id) is not None
 
+    @scoped_session
     async def mark_processed(self, event_id: str) -> None:
         try:
             await self.session.execute(insert(IntegrationProcessedEventRecord).values(event_id=event_id, processed_at=datetime.now(UTC)).on_conflict_do_nothing(index_elements=["event_id"]))
@@ -186,6 +193,7 @@ class SqlAlchemyIntegrationRepository:
             raise
         self._metrics["processed"] += 1
 
+    @scoped_session
     async def save_snapshot(self, value: IntegrationSnapshot) -> IntegrationSnapshot:
         try:
             await self.session.execute(insert(IntegrationSnapshotRecord).values(snapshot_id=value.snapshot_id, semantic_hash=value.semantic_hash, trace_id=semantic_uuid("trace", value.market_event_id), mode=value.mode.value, instrument=value.instrument, timeframe=value.timeframe, analytical_boundary=value.analytical_boundary, status=value.status.value, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["semantic_hash"]))
@@ -196,6 +204,7 @@ class SqlAlchemyIntegrationRepository:
         self._metrics["snapshots"] += 1
         return value
 
+    @scoped_session
     async def latest_snapshot(self, instrument: str | None = None, timeframe: str | None = None) -> IntegrationSnapshot | None:
         query = select(IntegrationSnapshotRecord)
         if instrument:
@@ -205,6 +214,7 @@ class SqlAlchemyIntegrationRepository:
         record = (await self.session.scalars(query.order_by(IntegrationSnapshotRecord.analytical_boundary.desc()).limit(1))).first()
         return IntegrationSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def save_signal(self, value: OperationalSignal) -> OperationalSignal:
         try:
             await self.session.execute(insert(OperationalSignalRecord).values(operational_signal_id=value.operational_signal_id, semantic_hash=value.semantic_hash, decision_id=value.decision_id, ai_score_id=value.ai_score_id, snapshot_id=value.snapshot_id, trace_id=value.trace_id, mode=value.mode.value, instrument=value.instrument, timeframe=value.timeframe, effective_at=value.effective_at, expires_at=value.expires_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["semantic_hash"]))
@@ -217,6 +227,7 @@ class SqlAlchemyIntegrationRepository:
         record = (await self.session.scalars(query)).first()
         return OperationalSignal.model_validate(record.payload) if record else value
 
+    @scoped_session
     async def latest_signal(self, instrument: str | None = None, timeframe: str | None = None) -> OperationalSignal | None:
         query = select(OperationalSignalRecord).where(OperationalSignalRecord.payload["state"].astext == "eligible")
         if instrument:
@@ -226,14 +237,17 @@ class SqlAlchemyIntegrationRepository:
         record = (await self.session.scalars(query.order_by(OperationalSignalRecord.effective_at.desc()).limit(1))).first()
         return OperationalSignal.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def signals(self, limit: int = 100) -> tuple[OperationalSignal, ...]:
         records = (await self.session.scalars(select(OperationalSignalRecord).where(OperationalSignalRecord.payload["state"].astext == "eligible").order_by(OperationalSignalRecord.effective_at.desc()).limit(limit))).all()
         return tuple(OperationalSignal.model_validate(item.payload) for item in records)
 
+    @scoped_session
     async def trace(self, trace_id: UUID) -> tuple[IntegrationTraceRecord, ...]:
         records = (await self.session.scalars(select(IntegrationEventTraceRecord).where(IntegrationEventTraceRecord.trace_id == trace_id).order_by(IntegrationEventTraceRecord.started_at))).all()
         return tuple(IntegrationTraceRecord.model_validate(item.payload) for item in records)
 
+    @scoped_session
     async def save_trace(self, value: IntegrationTraceRecord) -> None:
         try:
             await self.session.execute(insert(IntegrationEventTraceRecord).values(trace_record_id=value.trace_record_id, trace_id=value.trace_id, event_id=value.event_id, status=value.status.value, started_at=value.started_at, completed_at=value.completed_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["trace_record_id"]))
@@ -242,6 +256,7 @@ class SqlAlchemyIntegrationRepository:
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def save_issue(self, value: DataQualityIssue) -> None:
         try:
             await self.session.execute(insert(IntegrationDataQualityIssueRecord).values(issue_id=value.issue_id, event_id=value.event_id, provider=value.provider, status=value.status.value, observed_at=value.observed_at, payload=value.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["issue_id"]))

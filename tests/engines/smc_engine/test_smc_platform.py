@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from backend.app.engines.market_data_engine import Candle, Timeframe
+from tests.conftest import FakeSessionFactory
 from backend.app.engines.smc_engine import (
     AnalysisStatus,
     BaselineSMCAnalyzer,
@@ -187,11 +188,11 @@ class _Session:
 async def test_sql_repository_conflict_safe_write_and_reads(candles: list[Candle]) -> None:
     snapshot = BaselineSMCAnalyzer().analyze_snapshot(candles)
     session = _Session(snapshot.model_dump(mode="json"))
-    repository = SqlAlchemySMCRepository(cast(Any, session))
+    repository = SqlAlchemySMCRepository(cast(Any, FakeSessionFactory(session)))
     await repository.save(snapshot)
     assert session.execute.await_count == 3 and session.commit.await_count == 1
     assert await repository.latest("XAU/USD", Timeframe.M15) == snapshot
     assert await repository.at("XAU/USD", Timeframe.M15, snapshot.analysis_timestamp) == snapshot
     assert await repository.checkpoints() == (snapshot,)
-    empty = SqlAlchemySMCRepository(cast(Any, _Session()))
+    empty = SqlAlchemySMCRepository(cast(Any, FakeSessionFactory(_Session())))
     assert await empty.latest("XAU/USD", Timeframe.M15) is None

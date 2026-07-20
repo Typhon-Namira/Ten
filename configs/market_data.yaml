@@ -9,6 +9,11 @@ providers:
     base_url: https://api.twelvedata.com
     api_key_env: TEN_TWELVE_DATA_API_KEY
     priority: 10
+    # Free-tier TwelveData accounts are rate-limited to 8 requests/minute. Paced
+    # bootstrap/poll requests against this value instead of firing all 7 configured
+    # timeframes back-to-back with no delay (the cause of the reported bootstrap 429s).
+    # Raise or remove this if the account is on a higher-throughput paid plan.
+    quota_per_minute: 8
   - name: oanda
     base_url: https://api-fxpractice.oanda.com
     api_key_env: TEN_OANDA_API_KEY

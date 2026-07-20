@@ -15,6 +15,7 @@ from backend.app.engines.market_data_engine import (
     Timeframe,
 )
 from backend.app.engines.market_data_engine.events import HistoricalUpdated, NewCandle
+from backend.app.engines.market_data_engine.exceptions import ProviderRateLimitedError, ProviderUnavailableError
 from backend.app.engines.market_data_engine.metrics import calculate_metrics
 from backend.app.engines.market_data_engine.models import DataQualityLevel, MarketSession
 from backend.app.engines.market_data_engine.providers import MarketDataProvider, ProviderCapabilities, ProviderName, ProviderRequest
@@ -101,6 +102,60 @@ async def test_provider_manager_fails_over_and_records_health() -> None:
     assert manager.current_provider == ProviderName.MEMORY.value
     assert manager.statistics[ProviderName.TWELVE_DATA.value].healthy is False
     assert manager.statistics[ProviderName.MEMORY.value].successes == 1
+
+
+class RateLimitedProvider(MarketDataProvider):
+    provider_name = ProviderName.TWELVE_DATA
+    capabilities = ProviderCapabilities()
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        self.calls += 1
+        raise ProviderRateLimitedError("rate limited", retry_after_seconds=30)
+
+    async def fetch_latest(self, symbol: str, timeframe: Timeframe) -> Candle:
+        self.calls += 1
+        raise ProviderRateLimitedError("rate limited", retry_after_seconds=30)
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_opens_on_rate_limit_and_skips_further_calls() -> None:
+    """A 429 must open the breaker immediately (not after `failure_threshold` failures) and
+    every subsequent call within the backoff window must be rejected locally — never a second
+    live HTTP call — which is what actually stops a rate-limited provider from being hammered
+    across a bootstrap loop's remaining symbol/timeframe iterations."""
+    registry = ProviderRegistry()
+    limited = RateLimitedProvider()
+    registry.register(limited)
+    manager = ProviderManager(registry, preferred=ProviderName.TWELVE_DATA.value)
+    with pytest.raises(ProviderUnavailableError):
+        await manager.history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.M1))
+    assert limited.calls == 1
+    stats = manager.statistics[ProviderName.TWELVE_DATA.value]
+    assert stats.backoff_until is not None
+    assert stats.last_error == "ProviderRateLimitedError"
+    with pytest.raises(ProviderUnavailableError):
+        await manager.history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.M1))
+    assert limited.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_recovers_after_a_success() -> None:
+    registry = ProviderRegistry()
+    limited = RateLimitedProvider()
+    registry.register(limited)
+    manager = ProviderManager(registry, preferred=ProviderName.TWELVE_DATA.value)
+    with pytest.raises(ProviderUnavailableError):
+        await manager.history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.M1))
+    stats = manager.statistics[ProviderName.TWELVE_DATA.value]
+    assert stats.backoff_until is not None
+    stats.backoff_until = datetime(2000, 1, 1, tzinfo=UTC)  # force the window open again
+    limited.fetch_history = InMemoryMarketDataProvider(series()).fetch_history  # type: ignore[method-assign]
+    result = await manager.history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.M1))
+    assert len(result) == 5
+    assert manager.statistics[ProviderName.TWELVE_DATA.value].backoff_until is None
 
 
 @pytest.mark.asyncio

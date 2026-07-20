@@ -181,29 +181,48 @@ async def performance(request: Request, instrument: str = "XAUUSD", timeframe: s
     settings = app.state.settings
     market = app.state.market_data_service
     integration = app.state.integration_service
+    symbol = instrument.upper()
+    tf = Timeframe(timeframe)
     provider_stats = market.manager.statistics.get(settings.market_data_provider)
     integration_metrics = integration.repository.metrics()
-    stage = app.state.pipeline_stage_tracker.latest(instrument.upper(), timeframe)
+    stage = app.state.pipeline_stage_tracker.latest(symbol, timeframe)
     pipeline_latency_ms = None
     if stage and stage.get("started_at") and stage.get("complete"):
         pipeline_latency_ms = (stage["updated_at"] - stage["started_at"]).total_seconds() * 1000
+    # Database, cache, and provider are independent sources of truth that can legitimately
+    # disagree (e.g. provider rate-limited but the database still serves the last good candle) —
+    # reported separately rather than collapsed into one "market data" status.
+    database_candle, _ = await safe_call(lambda: market.repository.candle_at(symbol, tf, datetime.now(UTC)))
     return {
-        "instrument": instrument.upper(),
+        "instrument": symbol,
         "timeframe": timeframe,
         "pipeline_latency_ms": pipeline_latency_ms,
         "provider": {
             "name": settings.market_data_provider,
             "last_latency_ms": getattr(provider_stats, "last_latency_ms", None) if provider_stats else None,
+            "last_provider_success": provider_stats.last_success_at if provider_stats else None,
+            "last_provider_failure": provider_stats.last_failure_at if provider_stats else None,
             "last_success_at": provider_stats.last_success_at if provider_stats else None,
             "last_failure_at": provider_stats.last_failure_at if provider_stats else None,
             "last_error": provider_stats.last_error if provider_stats else None,
             "healthy": bool(provider_stats and provider_stats.healthy),
+            "consecutive_failures": provider_stats.consecutive_failures if provider_stats else None,
+            "provider_backoff_until": provider_stats.backoff_until if provider_stats else None,
+            "provider_rate_limit_remaining": provider_stats.quota.remaining if provider_stats else None,
+            "provider_rate_limit": provider_stats.quota.limit if provider_stats else None,
         },
         "database": {
             "mode": integration.repository_mode,
             "events": integration_metrics.get("events"),
             "outbox_backlog": integration_metrics.get("outbox_backlog"),
             "processed": integration_metrics.get("processed"),
+            "last_database_update": database_candle.ingestion_timestamp if database_candle else None,
+            "latest_market_candle": database_candle.timestamp if database_candle else None,
+        },
+        "cache": {
+            "last_cache_update": market.cache.statistics.last_write_at,
+            "hit_ratio": market.cache.statistics.hit_ratio,
+            "writes": market.cache.statistics.writes,
         },
         "analysis": {"ai_scoring": app.state.ai_scoring_service.metrics.snapshot(), "signal_decision": app.state.signal_decision_service.metrics.snapshot()},
         "queue_length": integration_metrics.get("outbox_backlog"),

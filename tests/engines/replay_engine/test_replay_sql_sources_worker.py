@@ -25,6 +25,7 @@ from backend.app.engines.replay_engine.registration import _build, _execute
 from backend.app.features import InMemoryFeatureStore
 from backend.app.services.pipeline_contracts import PipelineExecutionContext
 from tests.engines.replay_engine.test_replay_engine import NOW, build_service, dataset, historical_event, replay_request
+from tests.conftest import FakeSessionFactory
 
 
 class ScalarResult:
@@ -64,7 +65,7 @@ async def test_sql_repository_all_operations_and_failure_paths() -> None:
     output_record = SimpleNamespace(payload=output.model_dump(mode="json"))
 
     db = db_session()
-    repository = SqlAlchemyReplayRepository(db)
+    repository = SqlAlchemyReplayRepository(FakeSessionFactory(db))
     db.execute.return_value = ExecuteResult(session.replay_id)
     assert await repository.create_session(session) == session
     db.get.side_effect = [record, None]
@@ -116,7 +117,7 @@ async def test_sql_repository_all_operations_and_failure_paths() -> None:
 async def test_sql_repository_lease_wrappers() -> None:
     service, _ = await build_service((historical_event(5, 1),))
     session = await service.create(replay_request())
-    repository = SqlAlchemyReplayRepository(db_session())
+    repository = SqlAlchemyReplayRepository(FakeSessionFactory(db_session()))
     repository.get_session = AsyncMock(return_value=session)
     repository.save_session = AsyncMock(side_effect=lambda value, _: value)
     leased = await repository.acquire_lease(session.replay_id, "worker", NOW, 30, session.row_version)
@@ -142,7 +143,7 @@ async def test_sql_historical_candle_and_economic_sources() -> None:
     candle = SimpleNamespace(id=1, symbol="XAUUSD", timeframe="M1", timestamp=NOW, open=2000.0, high=2002.0, low=1999.0, close=2001.0, volume=10.0, spread=0.2, provider="test", quality_score=100.0, quality_level="native", ingestion_timestamp=NOW + timedelta(minutes=1))
     revision = SimpleNamespace(event_id=uuid4(), revision_number=1, revision_type="actual", available_at=NOW + timedelta(minutes=2), payload={"actual": 5.0})
     db = db_session()
-    candle_source = SqlAlchemyHistoricalCandleSource(db)
+    candle_source = SqlAlchemyHistoricalCandleSource(FakeSessionFactory(db))
     assert (await candle_source.validate(replay_request())).valid
     mismatch = replay_request().model_copy(update={"dataset": dataset().model_copy(update={"source_name": "other"})})
     assert not (await candle_source.validate(mismatch)).valid
@@ -150,7 +151,7 @@ async def test_sql_historical_candle_and_economic_sources() -> None:
     candle_events = [item async for item in candle_source.stream(HistoricalEventQuery(uuid4(), replay_request(), batch_size=1))]
     assert len(candle_events) == 1 and candle_events[0].available_at == NOW + timedelta(minutes=1)
 
-    economic = SqlAlchemyEconomicRevisionSource(db)
+    economic = SqlAlchemyEconomicRevisionSource(FakeSessionFactory(db))
     assert (await economic.validate(replay_request())).valid
     db.scalars.side_effect = [ScalarResult([revision]), ScalarResult([])]
     economic_events = [item async for item in economic.stream(HistoricalEventQuery(uuid4(), replay_request().model_copy(update={"source_filters": {"source_names": ("economic_calendar",)}}), batch_size=1))]

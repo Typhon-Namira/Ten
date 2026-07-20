@@ -5,11 +5,12 @@ from hashlib import sha256
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
 from backend.app.storage.models import InstitutionalFlowCheckpointRecord, InstitutionalFlowEvidenceRecord, InstitutionalFlowSnapshotRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import InstitutionalFlowAnalysisSnapshot, stable_id
 
@@ -58,10 +59,11 @@ class InMemoryInstitutionalFlowRepository(InstitutionalFlowRepository):
             return tuple(items[-1] for items in self._items.values() if items)
 
 
-class SqlAlchemyInstitutionalFlowRepository(InstitutionalFlowRepository):
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+class SqlAlchemyInstitutionalFlowRepository(InstitutionalFlowRepository, ScopedSessionRepository):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
+    @scoped_session
     async def save(self, snapshot: InstitutionalFlowAnalysisSnapshot) -> None:
         payload = snapshot.model_dump(mode="json")
         try:
@@ -126,9 +128,11 @@ class SqlAlchemyInstitutionalFlowRepository(InstitutionalFlowRepository):
         )
         await self.session.commit()
 
+    @scoped_session
     async def latest(self, symbol: str, timeframe: Timeframe) -> InstitutionalFlowAnalysisSnapshot | None:
         return await self._query(symbol, timeframe, None)
 
+    @scoped_session
     async def at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> InstitutionalFlowAnalysisSnapshot | None:
         return await self._query(symbol, timeframe, timestamp)
 
@@ -141,6 +145,7 @@ class SqlAlchemyInstitutionalFlowRepository(InstitutionalFlowRepository):
         record = (await self.session.scalars(query.order_by(InstitutionalFlowSnapshotRecord.analysis_timestamp.desc()).limit(1))).first()
         return InstitutionalFlowAnalysisSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def checkpoints(self) -> tuple[InstitutionalFlowAnalysisSnapshot, ...]:
         records = list((await self.session.scalars(select(InstitutionalFlowCheckpointRecord))).all())
         result = []

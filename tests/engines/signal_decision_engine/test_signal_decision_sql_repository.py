@@ -6,6 +6,7 @@ import pytest
 
 from backend.app.engines.signal_decision_engine import DecisionMode, DecisionState, SqlAlchemySignalDecisionRepository
 from backend.app.engines.signal_decision_engine.exceptions import SignalDecisionPersistenceError
+from tests.conftest import FakeSessionFactory
 from tests.engines.signal_decision_engine.test_signal_decision_engine import NOW, ConservativeSignalDecisionPolicy, decision_input
 
 
@@ -40,7 +41,7 @@ def decision():
 async def test_sql_save_duplicate_success_and_rollback() -> None:
     value = decision()
     db = session()
-    repository = SqlAlchemySignalDecisionRepository(db)
+    repository = SqlAlchemySignalDecisionRepository(FakeSessionFactory(db))
     repository.find_by_fingerprint = AsyncMock(return_value=value)  # type: ignore[method-assign]
     assert await repository.save_decision(value) == value
     db.execute.assert_not_called()
@@ -53,21 +54,21 @@ async def test_sql_save_duplicate_success_and_rollback() -> None:
 
     raced = session()
     raced.execute.return_value = InsertResult(None)
-    repository = SqlAlchemySignalDecisionRepository(raced)
+    repository = SqlAlchemySignalDecisionRepository(FakeSessionFactory(raced))
     repository.find_by_fingerprint = AsyncMock(side_effect=[None, value])  # type: ignore[method-assign]
     assert await repository.save_decision(value) == value
     raced.rollback.assert_awaited_once()
 
     unresolved = session()
     unresolved.execute.return_value = InsertResult(None)
-    repository = SqlAlchemySignalDecisionRepository(unresolved)
+    repository = SqlAlchemySignalDecisionRepository(FakeSessionFactory(unresolved))
     repository.find_by_fingerprint = AsyncMock(side_effect=[None, None])  # type: ignore[method-assign]
     with pytest.raises(SignalDecisionPersistenceError, match="persistence failed"):
         await repository.save_decision(value)
 
     failing = session()
     failing.execute.side_effect = RuntimeError("database unavailable")
-    repository = SqlAlchemySignalDecisionRepository(failing)
+    repository = SqlAlchemySignalDecisionRepository(FakeSessionFactory(failing))
     repository.find_by_fingerprint = AsyncMock(return_value=None)  # type: ignore[method-assign]
     with pytest.raises(SignalDecisionPersistenceError, match="persistence failed"):
         await repository.save_decision(value)
@@ -79,7 +80,7 @@ async def test_sql_reads_active_filters_history_and_pruning() -> None:
     value = decision()
     record = SimpleNamespace(payload=value.model_dump(mode="json"))
     db = session()
-    repository = SqlAlchemySignalDecisionRepository(db)
+    repository = SqlAlchemySignalDecisionRepository(FakeSessionFactory(db))
     db.get.side_effect = [record, None]
     assert await repository.get_decision(value.decision_id) == value
     assert await repository.get_decision(value.decision_id) is None

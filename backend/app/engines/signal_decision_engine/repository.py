@@ -7,9 +7,10 @@ from uuid import UUID
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import SignalDecisionReasonRecord, SignalDecisionRecord, SignalDecisionRuleRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .exceptions import SignalDecisionPersistenceError
 from .models import DecisionDirection, DecisionMode, DecisionState, SignalDecision, stable_id
@@ -123,10 +124,11 @@ class InMemorySignalDecisionRepository(SignalDecisionRepository):
             return len(expired)
 
 
-class SqlAlchemySignalDecisionRepository(SignalDecisionRepository):
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSessionRepository):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
+    @scoped_session
     async def save_decision(self, decision: SignalDecision) -> SignalDecision:
         try:
             existing = await self.find_by_fingerprint(decision.input_fingerprint, decision.mode)
@@ -193,15 +195,18 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository):
             await self.session.rollback()
             raise SignalDecisionPersistenceError("Signal Decision persistence failed") from exc
 
+    @scoped_session
     async def get_decision(self, decision_id: UUID) -> SignalDecision | None:
         record = await self.session.get(SignalDecisionRecord, decision_id)
         return SignalDecision.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def find_by_fingerprint(self, fingerprint: str, mode: DecisionMode) -> SignalDecision | None:
         query = select(SignalDecisionRecord).where(SignalDecisionRecord.input_fingerprint == fingerprint, SignalDecisionRecord.mode == mode.value).limit(1)
         record = (await self.session.scalars(query)).first()
         return SignalDecision.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def get_active_decision(self, instrument: str, timeframe: str, at: datetime, direction: DecisionDirection | None = None, state: DecisionState | None = None) -> SignalDecision | None:
         query = select(SignalDecisionRecord).where(
             SignalDecisionRecord.instrument == instrument,
@@ -216,6 +221,7 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository):
         record = (await self.session.scalars(query.order_by(SignalDecisionRecord.as_of.desc()).limit(1))).first()
         return SignalDecision.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def list_decisions(
         self,
         instrument: str,
@@ -251,6 +257,7 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository):
     async def find_recent_decisions(self, instrument: str, timeframe: str, at: datetime, limit: int = 20) -> tuple[SignalDecision, ...]:
         return await self.list_decisions(instrument, timeframe, end=at, limit=limit)
 
+    @scoped_session
     async def prune(self, before: datetime, mode: DecisionMode, limit: int) -> int:
         identifiers = (
             await self.session.scalars(

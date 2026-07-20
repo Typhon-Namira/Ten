@@ -6,9 +6,10 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import HistoricalCandleRecord, RealtimeCandleRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import Candle, Timeframe, canonical_symbol
 
@@ -75,13 +76,14 @@ class InMemoryMarketDataRepository(MarketDataRepository):
             return sum(1 for item_symbol, item_timeframe, _ in self._historical if item_symbol == normalized and item_timeframe == timeframe)
 
 
-class SqlAlchemyMarketDataRepository(MarketDataRepository):
+class SqlAlchemyMarketDataRepository(MarketDataRepository, ScopedSessionRepository):
     """PostgreSQL adapter using bulk conflict-safe writes and indexed range reads."""
 
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
         self._lock = asyncio.Lock()
 
+    @scoped_session
     async def upsert_historical(self, candles: list[Candle]) -> int:
         async with self._lock:
             return await self._upsert_historical(candles)
@@ -103,6 +105,7 @@ class SqlAlchemyMarketDataRepository(MarketDataRepository):
             raise
         return len(candles)
 
+    @scoped_session
     async def append_realtime(self, candle: Candle) -> None:
         async with self._lock:
             self.session.add(
@@ -116,6 +119,7 @@ class SqlAlchemyMarketDataRepository(MarketDataRepository):
             )
             await self._upsert_historical([candle])
 
+    @scoped_session
     async def history(self, symbol: str, timeframe: Timeframe, start: datetime | None = None, end: datetime | None = None, limit: int = 500) -> list[Candle]:
         statement = select(HistoricalCandleRecord).where(
             HistoricalCandleRecord.symbol == canonical_symbol(symbol),
@@ -134,6 +138,7 @@ class SqlAlchemyMarketDataRepository(MarketDataRepository):
         candles = await self.history(symbol, timeframe, end=timestamp, limit=1)
         return candles[-1] if candles else None
 
+    @scoped_session
     async def count(self, symbol: str, timeframe: Timeframe) -> int:
         query = select(func.count()).select_from(HistoricalCandleRecord).where(
             HistoricalCandleRecord.symbol == canonical_symbol(symbol),

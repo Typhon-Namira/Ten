@@ -33,6 +33,7 @@ from backend.app.engines.liquidity_engine.registration import register
 from backend.app.engines.liquidity_engine.repository import InMemoryLiquidityRepository, SqlAlchemyLiquidityRepository
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.engines.smc_engine.liquidity_contract import SMCLiquidityContext, SMCLiquidityLevel
+from tests.conftest import FakeSessionFactory
 from backend.app.events import InMemoryEventBus
 from backend.app.features import InMemoryFeatureStore
 from backend.app.services.engine_factory import EngineBuildContext
@@ -297,14 +298,14 @@ async def test_sql_repository_write_query_checkpoint_and_corruption() -> None:
     candles = series([(100, 101, 99, 100), (100, 101.01, 99, 100), (100, 102, 98, 101), (101, 103, 99, 102), (102, 104, 100, 103)])
     snapshot = BaselineLiquidityAnalyzer().analyze_snapshot(LiquidityContext(tuple(candles)))
     session = Session(snapshot.model_dump(mode="json"))
-    repository = SqlAlchemyLiquidityRepository(cast(Any, session))
+    repository = SqlAlchemyLiquidityRepository(cast(Any, FakeSessionFactory(session)))
     await repository.save(snapshot)
     assert session.execute.await_count == 3 and session.commit.await_count == 1
     assert (await repository.latest("XAUUSD", Timeframe.M15)).id == snapshot.id  # type: ignore[union-attr]
     assert (await repository.at("XAUUSD", Timeframe.M15, snapshot.analysis_timestamp)).id == snapshot.id  # type: ignore[union-attr]
     assert [item.id for item in await repository.checkpoints()] == [snapshot.id]
-    assert await SqlAlchemyLiquidityRepository(cast(Any, Session())).latest("XAUUSD", Timeframe.M15) is None
-    assert await SqlAlchemyLiquidityRepository(cast(Any, Session(snapshot.model_dump(mode="json"), corrupt=True))).checkpoints() == ()
+    assert await SqlAlchemyLiquidityRepository(cast(Any, FakeSessionFactory(Session()))).latest("XAUUSD", Timeframe.M15) is None
+    assert await SqlAlchemyLiquidityRepository(cast(Any, FakeSessionFactory(Session(snapshot.model_dump(mode="json"), corrupt=True)))).checkpoints() == ()
 
 
 class Market:

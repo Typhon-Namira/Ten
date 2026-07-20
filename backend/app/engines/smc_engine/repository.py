@@ -6,11 +6,12 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
 from backend.app.storage.models import SMCAnalysisSnapshotRecord, SMCCheckpointRecord, SMCObjectRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import SMCAnalysisSnapshot, stable_id
 
@@ -65,12 +66,17 @@ class InMemorySMCRepository(SMCRepository):
             return tuple(items[-1] for items in self._snapshots.values() if items)
 
 
-class SqlAlchemySMCRepository(SMCRepository):
-    """PostgreSQL adapter with idempotent writes and indexed time travel."""
+class SqlAlchemySMCRepository(SMCRepository, ScopedSessionRepository):
+    """PostgreSQL adapter with idempotent writes and indexed time travel.
 
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    Each method call opens and closes its own `AsyncSession` (see `scoped_session`) — no session
+    is ever shared across concurrent callers or held beyond one call.
+    """
 
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
+
+    @scoped_session
     async def save(self, snapshot: SMCAnalysisSnapshot) -> None:
         values = {"id": snapshot.id, "symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "analysis_timestamp": snapshot.analysis_timestamp, "market_data_boundary": snapshot.market_data_boundary, "status": snapshot.status.value, "processing_mode": snapshot.processing_mode.value, "engine_version": snapshot.engine_version, "configuration_version": snapshot.configuration_version, "payload": snapshot.model_dump(mode="json"), "created_at": snapshot.created_at}
         try:
@@ -86,12 +92,15 @@ class SqlAlchemySMCRepository(SMCRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def latest(self, symbol: str, timeframe: Timeframe) -> SMCAnalysisSnapshot | None:
         return await self._query(symbol, timeframe, None)
 
+    @scoped_session
     async def at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> SMCAnalysisSnapshot | None:
         return await self._query(symbol, timeframe, timestamp)
 
+    @scoped_session
     async def checkpoints(self) -> tuple[SMCAnalysisSnapshot, ...]:
         records = list((await self.session.scalars(select(SMCCheckpointRecord).order_by(SMCCheckpointRecord.updated_at))).all())
         return tuple(SMCAnalysisSnapshot.model_validate(item.state_payload) for item in records)

@@ -9,7 +9,7 @@ from uuid import UUID
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import (
     EconomicCalendarCheckpointRecord,
@@ -20,6 +20,7 @@ from backend.app.storage.models import (
     EconomicCalendarSnapshotRecord,
     EconomicCalendarSyncStateRecord,
 )
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import (
     EconomicCalendarCheckpoint,
@@ -222,10 +223,11 @@ def _checkpoint_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
 
 
-class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository, ScopedSessionRepository):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
+    @scoped_session
     async def save_provider_observations(self, values: tuple[ProviderEventObservation, ...]) -> int:
         if not values:
             return 0
@@ -249,10 +251,12 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             raise
         return len(values)
 
+    @scoped_session
     async def get_provider_observation(self, observation_id: UUID) -> ProviderEventObservation | None:
         record = await self.session.get(EconomicCalendarObservationRecord, observation_id)
         return ProviderEventObservation.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def list_provider_observations(self, event_id: UUID | None = None, limit: int = 100) -> tuple[ProviderEventObservation, ...]:
         query = select(EconomicCalendarObservationRecord).order_by(EconomicCalendarObservationRecord.available_at.desc()).limit(limit)
         values = tuple(ProviderEventObservation.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
@@ -262,6 +266,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         ids = set(event.provider_records) if event else set()
         return tuple(item for item in values if item.observation_id in ids)
 
+    @scoped_session
     async def save_event(self, event: EconomicEvent) -> None:
         statement = insert(EconomicCalendarEventRecord).values(
             id=event.event_id,
@@ -288,10 +293,12 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def get_event(self, event_id: UUID) -> EconomicEvent | None:
         record = await self.session.get(EconomicCalendarEventRecord, event_id)
         return EconomicEvent.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def list_events(
         self, start: datetime | None = None, end: datetime | None = None, as_of: datetime | None = None, limit: int = 500
     ) -> tuple[EconomicEvent, ...]:
@@ -305,6 +312,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         query = query.order_by(EconomicCalendarEventRecord.scheduled_at, EconomicCalendarEventRecord.id).limit(limit)
         return tuple(EconomicEvent.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
+    @scoped_session
     async def get_event_at_boundary(self, event_id: UUID, boundary: datetime) -> EconomicEvent | None:
         revisions = await self.list_revisions(event_id)
         event = await self.get_event(event_id)
@@ -332,6 +340,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         latest = visible[-1]
         return state.model_copy(update={"available_at": latest.available_at, "revision_count": len(visible), "latest_revision_id": latest.revision_id})
 
+    @scoped_session
     async def save_revision(self, revision: EconomicEventRevision) -> None:
         try:
             await self.session.execute(
@@ -352,6 +361,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def list_revisions(self, event_id: UUID, limit: int = 500) -> tuple[EconomicEventRevision, ...]:
         query = (
             select(EconomicCalendarRevisionRecord)
@@ -361,6 +371,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         )
         return tuple(EconomicEventRevision.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
+    @scoped_session
     async def save_snapshot(self, snapshot: EconomicCalendarSnapshot) -> None:
         try:
             await self.session.execute(
@@ -380,14 +391,17 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def get_snapshot(self, snapshot_id: UUID) -> EconomicCalendarSnapshot | None:
         record = await self.session.get(EconomicCalendarSnapshotRecord, snapshot_id)
         return EconomicCalendarSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def list_snapshots(self, limit: int = 100) -> tuple[EconomicCalendarSnapshot, ...]:
         query = select(EconomicCalendarSnapshotRecord).order_by(EconomicCalendarSnapshotRecord.historical_boundary.desc()).limit(limit)
         return tuple(EconomicCalendarSnapshot.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
+    @scoped_session
     async def save_instrument_context(self, context: InstrumentEventContext) -> None:
         try:
             await self.session.execute(
@@ -400,6 +414,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def get_instrument_context(self, symbol: str, boundary: datetime | None = None) -> InstrumentEventContext | None:
         query = select(EconomicCalendarContextRecord).where(EconomicCalendarContextRecord.symbol == symbol.upper())
         if boundary:
@@ -407,6 +422,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
         record = (await self.session.scalars(query.order_by(EconomicCalendarContextRecord.historical_boundary.desc()).limit(1))).first()
         return InstrumentEventContext.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def save_sync_state(self, provider: str, state: dict[str, Any]) -> None:
         statement = insert(EconomicCalendarSyncStateRecord).values(
             provider_name=provider, state=state, updated_at=datetime.fromisoformat(str(state["updated_at"]))
@@ -422,10 +438,12 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def load_sync_state(self, provider: str) -> dict[str, Any] | None:
         record = await self.session.get(EconomicCalendarSyncStateRecord, provider)
         return dict(record.state) if record else None
 
+    @scoped_session
     async def save_checkpoint(self, checkpoint: EconomicCalendarCheckpoint) -> None:
         if sha256(_checkpoint_bytes(checkpoint.state_payload)).hexdigest() != checkpoint.payload_hash:
             raise ValueError("checkpoint payload hash mismatch")
@@ -455,6 +473,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def load_checkpoint(self) -> EconomicCalendarCheckpoint | None:
         record = (
             await self.session.scalars(select(EconomicCalendarCheckpointRecord).order_by(EconomicCalendarCheckpointRecord.created_at.desc()).limit(1))
@@ -480,6 +499,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository):
             created_at=record.created_at,
         )
 
+    @scoped_session
     async def prune_history(self, keep_events: int, keep_observations: int, keep_snapshots: int) -> dict[str, int]:
         removed: dict[str, int] = {}
         for name, model, order, keep in (

@@ -4,11 +4,12 @@ from hashlib import sha256
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
 from backend.app.storage.models import MarketRegimeCheckpointRecord, MarketRegimeEvidenceRecord, MarketRegimeSnapshotRecord, MarketRegimeTransitionRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import MarketRegimeEvidence, MarketRegimeSnapshot, RegimeTransition, stable_id
 
@@ -134,10 +135,11 @@ class InMemoryMarketRegimeRepository(MarketRegimeRepository):
             return len(removed)
 
 
-class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository, ScopedSessionRepository):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
+    @scoped_session
     async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> None:
         try:
             await self.session.execute(
@@ -160,6 +162,7 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def get_latest_snapshot(self, symbol: str, timeframe: Timeframe) -> MarketRegimeSnapshot | None:
         query = (
             select(MarketRegimeSnapshotRecord)
@@ -170,10 +173,12 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
         record = (await self.session.scalars(query)).first()
         return MarketRegimeSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def get_snapshot(self, snapshot_id: object) -> MarketRegimeSnapshot | None:
         record = await self.session.get(MarketRegimeSnapshotRecord, snapshot_id)
         return MarketRegimeSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def list_snapshots(self, symbol: str, timeframe: Timeframe, offset: int = 0, limit: int = 100) -> tuple[MarketRegimeSnapshot, ...]:
         query = (
             select(MarketRegimeSnapshotRecord)
@@ -184,6 +189,7 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
         )
         return tuple(MarketRegimeSnapshot.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
+    @scoped_session
     async def save_evidence(self, snapshot: MarketRegimeSnapshot) -> None:
         rows = [
             dict(
@@ -209,6 +215,7 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
                 await self.session.rollback()
                 raise
 
+    @scoped_session
     async def list_evidence(self, symbol: str, timeframe: Timeframe, offset: int = 0, limit: int = 100) -> tuple[MarketRegimeEvidence, ...]:
         query = (
             select(MarketRegimeEvidenceRecord)
@@ -219,6 +226,7 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
         )
         return tuple(MarketRegimeEvidence.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
+    @scoped_session
     async def save_transition(self, transition: RegimeTransition) -> None:
         try:
             await self.session.execute(
@@ -241,10 +249,12 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def get_transition(self, transition_id: object) -> RegimeTransition | None:
         record = await self.session.get(MarketRegimeTransitionRecord, transition_id)
         return RegimeTransition.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def list_transitions(self, symbol: str, timeframe: Timeframe, offset: int = 0, limit: int = 100) -> tuple[RegimeTransition, ...]:
         query = (
             select(MarketRegimeTransitionRecord)
@@ -255,6 +265,7 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
         )
         return tuple(RegimeTransition.model_validate(item.payload) for item in (await self.session.scalars(query)).all())
 
+    @scoped_session
     async def save_checkpoint(self, snapshot: MarketRegimeSnapshot) -> None:
         payload = snapshot.model_dump(mode="json")
         digest = sha256(snapshot.model_dump_json().encode()).hexdigest()
@@ -296,6 +307,7 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def load_checkpoint(self, symbol: str, timeframe: Timeframe) -> MarketRegimeSnapshot | None:
         query = (
             select(MarketRegimeCheckpointRecord)
@@ -311,6 +323,7 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
             raise ValueError("checkpoint payload integrity validation failed")
         return snapshot
 
+    @scoped_session
     async def checkpoints(self) -> tuple[MarketRegimeSnapshot, ...]:
         records = (await self.session.scalars(select(MarketRegimeCheckpointRecord))).all()
         result = []
@@ -323,6 +336,7 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository):
                 continue
         return tuple(result)
 
+    @scoped_session
     async def prune_history(self, symbol: str, timeframe: Timeframe, keep: int) -> int:
         query = (
             select(MarketRegimeSnapshotRecord.id)

@@ -17,6 +17,7 @@ class CacheStatistics(BaseModel):
     writes: int = 0
     evictions: int = 0
     invalidations: int = 0
+    last_write_at: datetime | None = None
 
     @property
     def hit_ratio(self) -> float:
@@ -69,6 +70,7 @@ class MarketDataCache:
             payload = {"expires": expires.isoformat(), "candles": [item.model_dump(mode="json") for item in candles]}
             self._path(key).write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
             self.statistics.writes += 1
+            self.statistics.last_write_at = datetime.now(UTC)
 
     async def invalidate(self, prefix: str = "") -> None:
         async with self._lock:

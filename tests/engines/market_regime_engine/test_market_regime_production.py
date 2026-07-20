@@ -42,6 +42,7 @@ from backend.app.engines.market_regime_engine.events import MarketRegimeDependen
 from backend.app.engines.market_regime_engine.registration import register
 from backend.app.events import InMemoryEventBus
 from backend.app.features import InMemoryFeatureStore
+from tests.conftest import FakeSessionFactory
 
 BASE = datetime(2026, 7, 1, tzinfo=UTC)
 
@@ -506,7 +507,7 @@ async def test_sqlalchemy_repository_contract_with_fake_session() -> None:
         async def get(self, _: object, __: object) -> object | None: return self.one
 
     session = Session()
-    repo = SqlAlchemyMarketRegimeRepository(session)  # type: ignore[arg-type]
+    repo = SqlAlchemyMarketRegimeRepository(FakeSessionFactory(session))  # type: ignore[arg-type]
     await repo.save_snapshot(snapshot)
     await repo.save_evidence(snapshot)
     await repo.save_transition(transition)

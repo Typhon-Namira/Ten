@@ -176,12 +176,12 @@ def build_market_data_service(config: MarketDataConfig | None = None) -> MarketD
             continue
         account_id = provider_api_key(item.account_id_env) if item.account_id_env else None
         if item.name == "twelve_data":
-            registry.register(TwelveDataProvider(api_key=key, base_url=item.base_url, timeout_seconds=item.request_timeout_seconds, account_id=account_id))
+            registry.register(TwelveDataProvider(api_key=key, base_url=item.base_url, timeout_seconds=item.request_timeout_seconds, account_id=account_id, requests_per_minute=item.quota_per_minute))
         elif item.name == "alpha_vantage":
-            registry.register(AlphaVantageProvider(api_key=key, base_url=item.base_url, timeout_seconds=item.request_timeout_seconds, account_id=account_id))
+            registry.register(AlphaVantageProvider(api_key=key, base_url=item.base_url, timeout_seconds=item.request_timeout_seconds, account_id=account_id, requests_per_minute=item.quota_per_minute))
         elif item.name == "financial_modeling_prep":
-            registry.register(FinancialModelingPrepProvider(api_key=key, base_url=item.base_url, timeout_seconds=item.request_timeout_seconds, account_id=account_id))
+            registry.register(FinancialModelingPrepProvider(api_key=key, base_url=item.base_url, timeout_seconds=item.request_timeout_seconds, account_id=account_id, requests_per_minute=item.quota_per_minute))
         elif item.name == "oanda":
-            registry.register(OandaProvider(api_key=key, base_url=item.base_url, timeout_seconds=item.request_timeout_seconds, account_id=account_id))
+            registry.register(OandaProvider(api_key=key, base_url=item.base_url, timeout_seconds=item.request_timeout_seconds, account_id=account_id, requests_per_minute=item.quota_per_minute))
     manager = ProviderManager(registry, preferred=resolved.preferred_provider, failure_threshold=resolved.provider_failure_threshold, recovery_successes=resolved.provider_recovery_successes)
     return MarketDataService(manager, config=resolved)

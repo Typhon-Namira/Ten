@@ -5,11 +5,12 @@ from hashlib import sha256
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
 from backend.app.storage.models import VolumeProfileCheckpointRecord, VolumeProfileObjectRecord, VolumeProfileSnapshotRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import VolumeProfileAnalysisSnapshot, stable_id
 
@@ -55,10 +56,11 @@ class InMemoryVolumeProfileRepository(VolumeProfileRepository):
             return tuple(x[-1] for x in self._items.values() if x)
 
 
-class SqlAlchemyVolumeProfileRepository(VolumeProfileRepository):
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+class SqlAlchemyVolumeProfileRepository(VolumeProfileRepository, ScopedSessionRepository):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
+    @scoped_session
     async def save(self, snapshot: VolumeProfileAnalysisSnapshot) -> None:
         payload = snapshot.model_dump(mode="json")
         try:
@@ -127,9 +129,11 @@ class SqlAlchemyVolumeProfileRepository(VolumeProfileRepository):
         )
         await self.session.commit()
 
+    @scoped_session
     async def latest(self, symbol: str, timeframe: Timeframe) -> VolumeProfileAnalysisSnapshot | None:
         return await self._query(symbol, timeframe, None)
 
+    @scoped_session
     async def at(self, symbol: str, timeframe: Timeframe, timestamp: datetime) -> VolumeProfileAnalysisSnapshot | None:
         return await self._query(symbol, timeframe, timestamp)
 
@@ -142,6 +146,7 @@ class SqlAlchemyVolumeProfileRepository(VolumeProfileRepository):
         record = (await self.session.scalars(query.order_by(VolumeProfileSnapshotRecord.analysis_timestamp.desc()).limit(1))).first()
         return VolumeProfileAnalysisSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def checkpoints(self) -> tuple[VolumeProfileAnalysisSnapshot, ...]:
         records = list((await self.session.scalars(select(VolumeProfileCheckpointRecord))).all())
         result = []

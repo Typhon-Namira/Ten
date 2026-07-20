@@ -43,6 +43,7 @@ from backend.app.engines.replay_engine.models import ReplaySession, _validate_js
 from backend.app.events import Event, InMemoryEventBus
 from tests.engines.replay_engine.test_replay_engine import NOW, build_service, dataset, historical_event, replay_request
 from tests.engines.replay_engine.test_replay_sql_sources_worker import ScalarResult, db_session
+from tests.conftest import FakeSessionFactory
 
 
 def test_defensive_model_and_clock_invariants() -> None:
@@ -235,8 +236,8 @@ async def test_short_sql_source_pages_cover_final_batch() -> None:
     revision = SimpleNamespace(event_id=uuid4(), revision_number=1, revision_type="actual", available_at=NOW + timedelta(minutes=2), payload={})
     db = db_session()
     db.scalars.side_effect = [ScalarResult([candle]), ScalarResult([revision])]
-    assert len([item async for item in SqlAlchemyHistoricalCandleSource(db).stream(HistoricalEventQuery(uuid4(), replay_request(), batch_size=2))]) == 1
-    assert len([item async for item in SqlAlchemyEconomicRevisionSource(db).stream(HistoricalEventQuery(uuid4(), replay_request(), batch_size=2))]) == 1
+    assert len([item async for item in SqlAlchemyHistoricalCandleSource(FakeSessionFactory(db)).stream(HistoricalEventQuery(uuid4(), replay_request(), batch_size=2))]) == 1
+    assert len([item async for item in SqlAlchemyEconomicRevisionSource(FakeSessionFactory(db)).stream(HistoricalEventQuery(uuid4(), replay_request(), batch_size=2))]) == 1
 
 
 class FailingBus(InMemoryEventBus):

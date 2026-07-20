@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.app.api.dependencies import get_economic_calendar_service
 from backend.app.engines.economic_calendar_engine import EconomicCalendarService
+from backend.app.engines.economic_calendar_engine.analyzer import staged_diagnostics
 
 router = APIRouter(prefix="/economic-calendar", tags=["economic-calendar"])
 Service = Annotated[EconomicCalendarService, Depends(get_economic_calendar_service)]
@@ -53,6 +54,18 @@ async def metrics(service: Service) -> dict[str, int | float | str | None]:
 @router.get("/providers")
 async def providers(service: Service) -> object:
     return await service.provider_status()
+
+
+@router.get("/diagnostics")
+async def diagnostics(service: Service, symbol: str = "XAUUSD", as_of: datetime | None = None) -> dict[str, object]:
+    """Provider health -> downloaded events -> mapped events -> relevant events -> trading
+    context, each reported independently, so "no relevant events right now" (routine) is never
+    confused with "the provider is actually down" (a real failure) — both used to collapse into
+    the same `degraded`/`unavailable_context` flag with no way to tell them apart."""
+    boundary = _aware(as_of, "as_of") or service.clock.now()
+    context = await service.context(symbol, as_of=boundary, publish=False)
+    snapshot = await service.snapshot(boundary - timedelta(days=2), boundary + timedelta(days=7), as_of=boundary)
+    return staged_diagnostics(snapshot, context)
 
 
 @router.get("/events")

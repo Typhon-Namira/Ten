@@ -309,6 +309,47 @@ def instrument_context(symbol: str, snapshot: EconomicCalendarSnapshot, config: 
     )
 
 
+def staged_diagnostics(snapshot: EconomicCalendarSnapshot, context: InstrumentEventContext) -> dict[str, Any]:
+    """Break the collapsed `degraded`/`unavailable_context` booleans into the five independent
+    stages of the calendar pipeline, so "0 relevant events right now" (routine, expected most of
+    the time) is distinguishable from "the provider is actually unreachable" (a real failure) —
+    both currently surface as the same opaque signal downstream. Purely additive/read-only: does
+    not change `degradation`/`unavailable_context`, which fail-closed trading logic still uses."""
+    reachable_providers = [item for item in snapshot.provider_status if item.enabled and item.reachable]
+    mapped_count = snapshot.event_count - snapshot.unavailable_count
+    return {
+        "provider_health": {
+            "status": "healthy" if reachable_providers else "unavailable",
+            "reachable_providers": [item.provider_name for item in reachable_providers],
+            "providers": [item.model_dump(mode="json") for item in snapshot.provider_status],
+        },
+        "downloaded_events": {
+            "status": "ok" if snapshot.event_count > 0 else "empty",
+            "count": snapshot.event_count,
+            "window_start": snapshot.window_start,
+            "window_end": snapshot.window_end,
+        },
+        "mapped_events": {
+            "status": "ok" if snapshot.event_count == 0 or mapped_count > 0 else "degraded",
+            "mapped_count": mapped_count,
+            "unmapped_count": snapshot.unavailable_count,
+        },
+        "relevant_events": {
+            "status": "none_relevant" if context.unavailable_context else "available",
+            "symbol": context.symbol,
+            "active_count": len(context.active_relevant_events),
+            "has_previous_event": context.previous_relevant_event is not None,
+            "has_next_event": context.next_relevant_event is not None,
+        },
+        "trading_context": {
+            "status": "ready" if not context.unavailable_context else "unavailable",
+            "risk_window_phase": context.risk_window_phase.value,
+            "risk_score": context.risk_score,
+            "reason": context.unavailable_context[0] if context.unavailable_context else None,
+        },
+    }
+
+
 def surprise(event: EconomicEvent, config: EconomicCalendarConfig) -> dict[str, Any]:
     if event.actual_value is None or event.forecast_value is None or event.value_type.value in {"text", "not_applicable", "unknown"}:
         return {"available": False, "raw": None, "normalized": None, "direction": "unavailable", "trading_instruction": False}

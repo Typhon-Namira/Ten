@@ -7,9 +7,10 @@ from uuid import UUID
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import ReplayCheckpointRecord, ReplayOutputRecord, ReplaySessionRecord, ReplayTraceRecordModel, ReplayTransitionRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .exceptions import ReplayCheckpointError, ReplayConcurrencyError, ReplayPersistenceError
 from .models import (
@@ -209,16 +210,17 @@ class InMemoryReplayRepository(ReplayRepository):
         return len(selected)
 
 
-class SqlAlchemyReplayRepository(ReplayRepository):
+class SqlAlchemyReplayRepository(ReplayRepository, ScopedSessionRepository):
     """PostgreSQL adapter. Session payload is canonical; indexed columns coordinate workers."""
 
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
     @staticmethod
     def _session(record: ReplaySessionRecord) -> ReplaySession:
         return ReplaySession.model_validate(record.payload)
 
+    @scoped_session
     async def create_session(self, session: ReplaySession) -> ReplaySession:
         statement = insert(ReplaySessionRecord).values(self._session_values(session)).on_conflict_do_nothing(index_elements=["id"]).returning(ReplaySessionRecord.id)
         try:
@@ -234,10 +236,12 @@ class SqlAlchemyReplayRepository(ReplayRepository):
             await self.session.rollback()
             raise ReplayPersistenceError("replay session persistence failed") from exc
 
+    @scoped_session
     async def get_session(self, replay_id: UUID) -> ReplaySession | None:
         record = await self.session.get(ReplaySessionRecord, replay_id)
         return self._session(record) if record is not None else None
 
+    @scoped_session
     async def list_sessions(self, offset: int = 0, limit: int = 100, status: ReplayStatus | None = None) -> tuple[ReplaySession, ...]:
         statement = select(ReplaySessionRecord)
         if status is not None:
@@ -245,6 +249,7 @@ class SqlAlchemyReplayRepository(ReplayRepository):
         records = list((await self.session.scalars(statement.order_by(ReplaySessionRecord.created_at.desc(), ReplaySessionRecord.id).offset(offset).limit(limit))).all())
         return tuple(self._session(item) for item in records)
 
+    @scoped_session
     async def save_session(self, session: ReplaySession, expected_version: int) -> ReplaySession:
         statement = update(ReplaySessionRecord).where(ReplaySessionRecord.id == session.replay_id, ReplaySessionRecord.row_version == expected_version).values(**self._session_values(session))
         try:
@@ -260,6 +265,7 @@ class SqlAlchemyReplayRepository(ReplayRepository):
             await self.session.rollback()
             raise ReplayPersistenceError("replay session update failed") from exc
 
+    @scoped_session
     async def save_transition(self, transition: ReplayTransition) -> None:
         statement = insert(ReplayTransitionRecord).values(id=transition.transition_id, replay_id=transition.replay_id, occurred_at=transition.occurred_at, from_status=transition.from_status.value, to_status=transition.to_status.value, reason_code=transition.reason_code, payload=transition.model_dump(mode="json")).on_conflict_do_nothing(index_elements=["id"])
         try:
@@ -269,10 +275,12 @@ class SqlAlchemyReplayRepository(ReplayRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def list_transitions(self, replay_id: UUID, offset: int = 0, limit: int = 200) -> tuple[ReplayTransition, ...]:
         records = list((await self.session.scalars(select(ReplayTransitionRecord).where(ReplayTransitionRecord.replay_id == replay_id).order_by(ReplayTransitionRecord.occurred_at, ReplayTransitionRecord.id).offset(offset).limit(limit))).all())
         return tuple(ReplayTransition.model_validate(item.payload) for item in records)
 
+    @scoped_session
     async def save_checkpoint(self, checkpoint: ReplayCheckpoint) -> ReplayCheckpoint:
         if checkpoint.calculated_state_hash() != checkpoint.state_hash:
             raise ReplayCheckpointError("checkpoint state hash is invalid")
@@ -294,11 +302,13 @@ class SqlAlchemyReplayRepository(ReplayRepository):
         records = await self.list_checkpoints(replay_id, 0, 1, descending=True)
         return records[0] if records else None
 
+    @scoped_session
     async def list_checkpoints(self, replay_id: UUID, offset: int = 0, limit: int = 100, *, descending: bool = False) -> tuple[ReplayCheckpoint, ...]:
         order = ReplayCheckpointRecord.sequence.desc() if descending else ReplayCheckpointRecord.sequence
         records = list((await self.session.scalars(select(ReplayCheckpointRecord).where(ReplayCheckpointRecord.replay_id == replay_id).order_by(order).offset(offset).limit(limit))).all())
         return tuple(ReplayCheckpoint.model_validate(item.payload) for item in records)
 
+    @scoped_session
     async def save_trace(self, records: tuple[ReplayTraceRecord, ...]) -> None:
         if not records:
             return
@@ -310,10 +320,12 @@ class SqlAlchemyReplayRepository(ReplayRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def list_trace(self, replay_id: UUID, offset: int = 0, limit: int = 200) -> tuple[ReplayTraceRecord, ...]:
         records = list((await self.session.scalars(select(ReplayTraceRecordModel).where(ReplayTraceRecordModel.replay_id == replay_id).order_by(ReplayTraceRecordModel.sequence).offset(offset).limit(limit))).all())
         return tuple(ReplayTraceRecord.model_validate(item.payload) for item in records)
 
+    @scoped_session
     async def save_outputs(self, outputs: tuple[ReplayOutputReference, ...]) -> None:
         if not outputs:
             return
@@ -325,6 +337,7 @@ class SqlAlchemyReplayRepository(ReplayRepository):
             await self.session.rollback()
             raise
 
+    @scoped_session
     async def list_outputs(self, replay_id: UUID, output_type: str | None = None, offset: int = 0, limit: int = 200) -> tuple[ReplayOutputReference, ...]:
         statement = select(ReplayOutputRecord).where(ReplayOutputRecord.replay_id == replay_id)
         if output_type is not None:
@@ -355,6 +368,7 @@ class SqlAlchemyReplayRepository(ReplayRepository):
         updated = current.model_copy(update={"worker_id": None, "heartbeat_at": None, "lease_expires_at": None, "row_version": current.row_version + 1})
         return await self.save_session(updated, current.row_version)
 
+    @scoped_session
     async def cleanup(self, before: datetime, limit: int) -> int:
         ids = list((await self.session.scalars(select(ReplaySessionRecord.id).where(ReplaySessionRecord.status.in_([ReplayStatus.COMPLETED.value, ReplayStatus.CANCELLED.value, ReplayStatus.FAILED.value]), ReplaySessionRecord.created_at < before).order_by(ReplaySessionRecord.created_at).limit(limit))).all())
         if ids:

@@ -35,6 +35,7 @@ from backend.app.engines.volume_profile_engine.config import AllocationConfig, M
 from backend.app.engines.volume_profile_engine.models import AnchorType, ValueArea, VolumeProfile, stable_id, utc, _TRANSITIONS
 from backend.app.engines.volume_profile_engine.registration import _build, _execute, register
 from backend.app.engines.volume_profile_engine.repository import SqlAlchemyVolumeProfileRepository
+from tests.conftest import FakeSessionFactory
 from backend.app.events import InMemoryEventBus
 from backend.app.features import InMemoryFeatureStore
 from backend.app.services.engine_factory import EngineBuildContext, EngineFactory
@@ -325,14 +326,14 @@ async def test_memory_and_sql_repository_checkpoint_restart_and_corruption() -> 
             return Scalars([SimpleNamespace(payload=self.payload)])
 
     session = Session(snapshot.model_dump(mode="json"))
-    sql = SqlAlchemyVolumeProfileRepository(cast(Any, session))
+    sql = SqlAlchemyVolumeProfileRepository(cast(Any, FakeSessionFactory(session)))
     await sql.save(snapshot)
     assert session.execute.await_count == 3 and session.commit.await_count == 1
     assert (await sql.latest("XAUUSD", Timeframe.M15)).id == snapshot.id  # type: ignore[union-attr]
     assert (await sql.at("XAUUSD", Timeframe.M15, snapshot.analysis_timestamp)).id == snapshot.id  # type: ignore[union-attr]
     assert (await sql.checkpoints())[0].id == snapshot.id
-    assert await SqlAlchemyVolumeProfileRepository(cast(Any, Session())).latest("XAUUSD", Timeframe.M15) is None
-    assert await SqlAlchemyVolumeProfileRepository(cast(Any, Session(snapshot.model_dump(mode="json"), True))).checkpoints() == ()
+    assert await SqlAlchemyVolumeProfileRepository(cast(Any, FakeSessionFactory(Session()))).latest("XAUUSD", Timeframe.M15) is None
+    assert await SqlAlchemyVolumeProfileRepository(cast(Any, FakeSessionFactory(Session(snapshot.model_dump(mode="json"), True)))).checkpoints() == ()
 
 
 class Market:

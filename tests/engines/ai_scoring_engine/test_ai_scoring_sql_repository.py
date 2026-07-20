@@ -6,6 +6,7 @@ import pytest
 
 from backend.app.engines.ai_scoring_engine import DeterministicAIScoringEngine, FixedClock, ScoreMode, SqlAlchemyAIScoringRepository
 from backend.app.engines.ai_scoring_engine.exceptions import AIScoringPersistenceError
+from tests.conftest import FakeSessionFactory
 from tests.engines.ai_scoring_engine.test_ai_scoring import NOW, aligned_input, evidence, scoring_input
 
 
@@ -35,7 +36,7 @@ def snapshots() -> tuple[object, object]:
 async def test_sql_save_duplicate_success_and_rollback() -> None:
     aligned, conflict = snapshots()
     db = session()
-    repository = SqlAlchemyAIScoringRepository(db)
+    repository = SqlAlchemyAIScoringRepository(FakeSessionFactory(db))
     repository.find_by_fingerprint = AsyncMock(return_value=aligned)  # type: ignore[method-assign]
     assert await repository.save_snapshot(aligned) == aligned
     db.execute.assert_not_called()
@@ -47,7 +48,7 @@ async def test_sql_save_duplicate_success_and_rollback() -> None:
 
     failing = session()
     failing.execute.side_effect = RuntimeError("database unavailable")
-    repository = SqlAlchemyAIScoringRepository(failing)
+    repository = SqlAlchemyAIScoringRepository(FakeSessionFactory(failing))
     repository.find_by_fingerprint = AsyncMock(return_value=None)  # type: ignore[method-assign]
     with pytest.raises(AIScoringPersistenceError, match="persistence failed"):
         await repository.save_snapshot(aligned)
@@ -59,7 +60,7 @@ async def test_sql_reads_filters_and_pruning() -> None:
     aligned, _ = snapshots()
     record = SimpleNamespace(payload=aligned.model_dump(mode="json"))
     db = session()
-    repository = SqlAlchemyAIScoringRepository(db)
+    repository = SqlAlchemyAIScoringRepository(FakeSessionFactory(db))
 
     db.get.side_effect = [record, None]
     assert await repository.get_snapshot(aligned.snapshot_id) == aligned

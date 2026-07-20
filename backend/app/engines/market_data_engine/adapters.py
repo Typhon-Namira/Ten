@@ -1,14 +1,15 @@
 """HTTP provider adapters. Provider-specific formats terminate in this module."""
 
+import asyncio
 import os
 from abc import abstractmethod
 from datetime import UTC, datetime
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any
 
 import httpx
 
-from .exceptions import ProviderResponseError
+from .exceptions import ProviderRateLimitedError, ProviderResponseError
 from .models import Candle, Timeframe
 from .providers import (
     MarketDataProvider,
@@ -20,6 +21,16 @@ from .providers import (
 from .symbols import provider_symbol
 
 
+def _parse_retry_after(headers: httpx.Headers) -> float | None:
+    value = headers.get("retry-after")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
+
 class HttpMarketDataProvider(MarketDataProvider):
     def __init__(
         self,
@@ -28,6 +39,8 @@ class HttpMarketDataProvider(MarketDataProvider):
         base_url: str,
         timeout_seconds: float = 15,
         account_id: str | None = None,
+        requests_per_minute: int | None = None,
+        max_rate_limit_retries: int = 2,
     ) -> None:
         if not api_key:
             raise ValueError(f"{self.provider_name.value} API key is required")
@@ -37,18 +50,54 @@ class HttpMarketDataProvider(MarketDataProvider):
         self._client = httpx.AsyncClient(timeout=timeout_seconds)
         self.last_latency_ms = 0.0
         self._quota = ProviderQuota()
+        self._min_interval_seconds = 60.0 / requests_per_minute if requests_per_minute else 0.0
+        self._max_rate_limit_retries = max_rate_limit_retries
+        self._rate_gate = asyncio.Lock()
+        self._next_allowed_at: float = 0.0
+
+    async def _await_rate_gate(self) -> None:
+        """Proactively pace requests to `requests_per_minute` (config-driven, opt-in).
+
+        Root cause this addresses: bootstrap loops through every configured timeframe
+        sequentially with zero delay between requests. Against a provider with a tight
+        free-tier quota (e.g. a handful of requests/minute), that alone is enough to
+        trip a 429 before the loop even finishes. This lock also means every caller of
+        this provider instance — the background worker AND any concurrent dashboard-
+        triggered `refresh=True` fetch — shares one pacing queue instead of racing.
+        """
+        if self._min_interval_seconds <= 0:
+            return
+        async with self._rate_gate:
+            now = monotonic()
+            wait = self._next_allowed_at - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = monotonic()
+            self._next_allowed_at = now + self._min_interval_seconds
 
     async def _get(self, path: str, *, params: dict[str, Any], headers: dict[str, str] | None = None) -> Any:
-        started = perf_counter()
-        try:
-            response = await self._client.get(f"{self.base_url}{path}", params=params, headers=headers)
-            response.raise_for_status()
-            self._update_quota(response.headers)
-            return response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ProviderResponseError(f"{self.provider_name.value} request failed") from exc
-        finally:
-            self.last_latency_ms = (perf_counter() - started) * 1000
+        rate_limited: ProviderRateLimitedError | None = None
+        for attempt in range(self._max_rate_limit_retries + 1):
+            await self._await_rate_gate()
+            started = perf_counter()
+            try:
+                response = await self._client.get(f"{self.base_url}{path}", params=params, headers=headers)
+                if response.status_code == 429:
+                    self._update_quota(response.headers)
+                    retry_after = _parse_retry_after(response.headers)
+                    rate_limited = ProviderRateLimitedError(f"{self.provider_name.value} rate limited (429)", retry_after_seconds=retry_after)
+                    if attempt < self._max_rate_limit_retries:
+                        await asyncio.sleep(retry_after if retry_after is not None else min(2**attempt, 30))
+                        continue
+                    raise rate_limited
+                response.raise_for_status()
+                self._update_quota(response.headers)
+                return response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                raise ProviderResponseError(f"{self.provider_name.value} request failed") from exc
+            finally:
+                self.last_latency_ms = (perf_counter() - started) * 1000
+        raise rate_limited or ProviderResponseError(f"{self.provider_name.value} request failed")  # pragma: no cover - loop always returns/raises above
 
     def _update_quota(self, headers: httpx.Headers) -> None:
         def integer(name: str) -> int | None:

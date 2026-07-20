@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import TypeVar
 
@@ -13,6 +13,8 @@ from .models import Candle, Timeframe
 from .providers import MarketDataProvider, ProviderName, ProviderQuota, ProviderRequest
 
 ResultT = TypeVar("ResultT")
+
+_MAX_BACKOFF_SECONDS = 300.0
 
 
 class ProviderStatistics(BaseModel):
@@ -32,6 +34,7 @@ class ProviderStatistics(BaseModel):
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
     last_error: str | None = None
+    backoff_until: datetime | None = None
 
 
 class ProviderRegistry:
@@ -95,7 +98,12 @@ class ProviderManager:
 
     async def _execute(self, symbol: str, timeframe: Timeframe, operation: Callable[[MarketDataProvider], Awaitable[ResultT]], *, realtime: bool) -> ResultT:
         errors: list[str] = []
+        now = datetime.now(UTC)
         for name in self.rankings(symbol, timeframe, realtime=realtime):
+            stats = self.statistics[name]
+            if stats.backoff_until is not None and stats.backoff_until > now:
+                errors.append(f"{name}: circuit open until {stats.backoff_until.isoformat()}")
+                continue
             provider = self.registry.get(name)
             started = perf_counter()
             try:
@@ -105,7 +113,7 @@ class ProviderManager:
                 self.current_provider = name
                 return result
             except Exception as exc:
-                await self._record_failure(name, (perf_counter() - started) * 1000, type(exc).__name__)
+                await self._record_failure(name, (perf_counter() - started) * 1000, type(exc).__name__, retry_after_seconds=getattr(exc, "retry_after_seconds", None))
                 errors.append(f"{name}: {exc}")
         raise ProviderUnavailableError("all eligible providers failed: " + "; ".join(errors))
 
@@ -120,6 +128,7 @@ class ProviderManager:
             stats.average_latency_ms += (latency - stats.average_latency_ms) / stats.successes
             stats.last_success_at = datetime.now(UTC)
             stats.last_error = None
+            stats.backoff_until = None
             candles = result if isinstance(result, list) else [result]
             timestamps = [item.timestamp for item in candles if isinstance(item, Candle)]
             stats.freshness_seconds = max(0, (datetime.now(UTC) - max(timestamps)).total_seconds()) if timestamps else None
@@ -129,7 +138,7 @@ class ProviderManager:
                 stats.healthy = True
             stats.quota = await self.registry.get(name).quota()
 
-    async def _record_failure(self, name: str, latency: float, error_type: str) -> None:
+    async def _record_failure(self, name: str, latency: float, error_type: str, *, retry_after_seconds: float | None = None) -> None:
         async with self._lock:
             stats = self.statistics[name]
             stats.requests += 1
@@ -143,6 +152,16 @@ class ProviderManager:
             stats.confidence = max(0, stats.uptime_ratio * 70 - stats.consecutive_failures * 10)
             if stats.consecutive_failures >= self.failure_threshold:
                 stats.healthy = False
+            # Circuit breaker: a rate-limit response opens the breaker immediately (even on
+            # the first occurrence) since retrying a provider that just said "too many
+            # requests" only compounds the problem. Any other failure only opens the breaker
+            # once the provider is already considered unhealthy, so a single transient error
+            # doesn't stall an otherwise-healthy provider.
+            is_rate_limited = error_type == "ProviderRateLimitedError"
+            if is_rate_limited or not stats.healthy:
+                exponent = min(stats.consecutive_failures - 1, 8)
+                backoff_seconds = retry_after_seconds if retry_after_seconds is not None else min(2**exponent, _MAX_BACKOFF_SECONDS)
+                stats.backoff_until = stats.last_failure_at + timedelta(seconds=backoff_seconds)
 
     async def close(self) -> None:
         await asyncio.gather(*(provider.close() for provider in self.registry.all()))

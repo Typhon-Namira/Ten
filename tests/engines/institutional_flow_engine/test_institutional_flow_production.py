@@ -35,6 +35,7 @@ from backend.app.engines.institutional_flow_engine.registration import register
 from backend.app.events import InMemoryEventBus
 from backend.app.features import InMemoryFeatureStore
 from backend.app.engines.market_data_engine import Candle, Timeframe
+from tests.conftest import FakeSessionFactory
 
 
 BASE = datetime(2026, 7, 1, tzinfo=UTC)
@@ -423,7 +424,7 @@ async def test_sqlalchemy_repository_save_queries_and_checkpoint_integrity() -> 
             return ScalarResult(self.scalar_values)
 
     session = FakeSession()
-    repository = SqlAlchemyInstitutionalFlowRepository(session)  # type: ignore[arg-type]
+    repository = SqlAlchemyInstitutionalFlowRepository(FakeSessionFactory(session))  # type: ignore[arg-type]
     await repository.save(snapshot)
     assert session.execute.await_count == 3
     session.scalar_values = [SimpleNamespace(payload=snapshot.model_dump(mode="json"))]

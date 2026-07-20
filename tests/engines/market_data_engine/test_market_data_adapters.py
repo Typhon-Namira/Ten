@@ -17,12 +17,13 @@ from backend.app.engines.market_data_engine.adapters import (
 )
 from backend.app.engines.market_data_engine.cache import MarketDataCache
 from backend.app.engines.market_data_engine.config import MarketDataConfig, ProviderConfig
-from backend.app.engines.market_data_engine.exceptions import ProviderResponseError, ProviderUnavailableError
+from backend.app.engines.market_data_engine.exceptions import ProviderRateLimitedError, ProviderResponseError, ProviderUnavailableError
 from backend.app.engines.market_data_engine.manager import ProviderManager, ProviderRegistry
 from backend.app.engines.market_data_engine.metrics import calculate_metrics
 from backend.app.engines.market_data_engine.models import Candle, DataQualityLevel, MarketSession, Tick, Timeframe, canonical_symbol
 from backend.app.engines.market_data_engine.providers import CsvHistoricalProvider, InMemoryMarketDataProvider, ProviderName, ProviderRequest
 from backend.app.engines.market_data_engine.repository import InMemoryMarketDataRepository, SqlAlchemyMarketDataRepository
+from tests.conftest import FakeSessionFactory
 from backend.app.engines.market_data_engine.service import MarketDataService, build_market_data_service
 from backend.app.engines.market_data_engine.sessions import MarketSessionEngine
 from backend.app.engines.market_data_engine.validation import AnomalyType, MarketDataValidator
@@ -54,6 +55,63 @@ async def test_http_transport_quota_error_and_close() -> None:
         TwelveDataProvider(api_key="", base_url="https://example.test")
     assert _parse_timestamp(0) == datetime(1970, 1, 1, tzinfo=UTC)
     assert _parse_timestamp("2026-01-01T00:00:00") == datetime(2026, 1, 1, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_http_provider_retries_429_then_succeeds() -> None:
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] < 3:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, json={"ok": True}, headers={"x-ratelimit-remaining": "1"})
+
+    provider = TwelveDataProvider(api_key="key", base_url="https://example.test")
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    assert await provider._get("/ok", params={}) == {"ok": True}
+    assert calls["count"] == 3
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_http_provider_raises_rate_limited_after_exhausting_retries() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "0"})
+
+    provider = TwelveDataProvider(api_key="key", base_url="https://example.test", max_rate_limit_retries=1)
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderRateLimitedError) as excinfo:
+        await provider._get("/ok", params={})
+    assert excinfo.value.retry_after_seconds == 0.0
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_http_provider_rate_gate_paces_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"t": 0.0}
+
+    def fake_monotonic() -> float:
+        return clock["t"]
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(duration: float) -> None:
+        sleep_calls.append(duration)
+        clock["t"] += duration
+
+    monkeypatch.setattr("backend.app.engines.market_data_engine.adapters.monotonic", fake_monotonic)
+    monkeypatch.setattr("backend.app.engines.market_data_engine.adapters.asyncio.sleep", fake_sleep)
+    provider = TwelveDataProvider(api_key="key", base_url="https://example.test", requests_per_minute=60)
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True})))
+    await provider._get("/a", params={})
+    await provider._get("/a", params={})
+    await provider._get("/a", params={})
+    await provider.close()
+    assert sleep_calls == [1.0, 1.0]
 
 
 @pytest.mark.asyncio
@@ -161,7 +219,7 @@ async def test_gap_recovery_and_sql_write_paths(tmp_path: Path) -> None:
     assert len(result) == 3 and result[1].quality_score == 95
 
     session = AsyncMock()
-    repository = SqlAlchemyMarketDataRepository(session)
+    repository = SqlAlchemyMarketDataRepository(FakeSessionFactory(session))
     assert await repository.upsert_historical([first]) == 1
     assert await repository.upsert_historical([]) == 0
     await repository.append_realtime(first)
@@ -244,7 +302,7 @@ async def test_sql_history_and_time_travel_read_paths() -> None:
 
     session = AsyncMock()
     session.scalars.return_value = Scalars()
-    repository = SqlAlchemyMarketDataRepository(session)
+    repository = SqlAlchemyMarketDataRepository(FakeSessionFactory(session))
     result = await repository.history("XAUUSD", Timeframe.M1, start=NOW - timedelta(minutes=1), end=NOW + timedelta(minutes=1))
     assert result == [item]
     assert await repository.candle_at("XAUUSD", Timeframe.M1, NOW) == item

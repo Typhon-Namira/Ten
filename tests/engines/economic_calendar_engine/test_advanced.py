@@ -29,6 +29,7 @@ from backend.app.engines.economic_calendar_engine.normalization import normalize
 from backend.app.engines.economic_calendar_engine.providers import EconomicCalendarProvider, ProviderFetchRequest, ProviderFetchResult, _datetime
 from backend.app.engines.economic_calendar_engine.registration import _build, _execute, register
 from backend.app.engines.economic_calendar_engine.repository import _checkpoint_bytes
+from tests.conftest import FakeSessionFactory
 from backend.app.events import InMemoryEventBus
 from backend.app.features import InMemoryFeatureStore
 from backend.app.services.engine_factory import EngineFactory
@@ -203,7 +204,7 @@ class FakeSession:
 @pytest.mark.asyncio
 async def test_sqlalchemy_repository_all_operations() -> None:
     session = FakeSession()
-    repository = SqlAlchemyEconomicCalendarRepository(session)  # type: ignore[arg-type]
+    repository = SqlAlchemyEconomicCalendarRepository(FakeSessionFactory(session))  # type: ignore[arg-type]
     obs = observation()
     item = economic_event()
     revision = revision_between(None, item, 1)
@@ -306,7 +307,7 @@ async def test_in_memory_repository_remaining_filters_and_corrupt_checkpoint() -
 @pytest.mark.asyncio
 async def test_sql_provider_observation_filter_and_boundary_future() -> None:
     session = FakeSession()
-    repository = SqlAlchemyEconomicCalendarRepository(session)  # type: ignore[arg-type]
+    repository = SqlAlchemyEconomicCalendarRepository(FakeSessionFactory(session))  # type: ignore[arg-type]
     obs = observation()
     item = economic_event()
     session.scalar_values.append([SimpleNamespace(payload=obs.model_dump(mode="json"))])

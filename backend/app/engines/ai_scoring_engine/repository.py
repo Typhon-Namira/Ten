@@ -7,9 +7,10 @@ from uuid import UUID
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import AIScoreComponentRecord, AIScoreConflictRecord, AIScoreSnapshotRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .exceptions import AIScoringPersistenceError
 from .models import AIScoreSnapshot, ScoreMode, ScoreStatus
@@ -111,10 +112,11 @@ class InMemoryAIScoringRepository(AIScoringRepository):
             return len(expired)
 
 
-class SqlAlchemyAIScoringRepository(AIScoringRepository):
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+class SqlAlchemyAIScoringRepository(AIScoringRepository, ScopedSessionRepository):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
+    @scoped_session
     async def save_snapshot(self, snapshot: AIScoreSnapshot) -> AIScoreSnapshot:
         try:
             existing = await self.find_by_fingerprint(snapshot.metadata.input_fingerprint, snapshot.mode)
@@ -169,10 +171,12 @@ class SqlAlchemyAIScoringRepository(AIScoringRepository):
             await self.session.rollback()
             raise AIScoringPersistenceError("AI Scoring snapshot persistence failed") from exc
 
+    @scoped_session
     async def get_snapshot(self, snapshot_id: UUID) -> AIScoreSnapshot | None:
         record = await self.session.get(AIScoreSnapshotRecord, snapshot_id)
         return AIScoreSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def get_latest_snapshot(self, instrument: str, timeframe: str, policy_version: str | None = None) -> AIScoreSnapshot | None:
         query = select(AIScoreSnapshotRecord).where(AIScoreSnapshotRecord.instrument == instrument, AIScoreSnapshotRecord.timeframe == timeframe)
         if policy_version:
@@ -180,6 +184,7 @@ class SqlAlchemyAIScoringRepository(AIScoringRepository):
         record = (await self.session.scalars(query.order_by(AIScoreSnapshotRecord.as_of.desc()).limit(1))).first()
         return AIScoreSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def list_snapshots(
         self,
         instrument: str,
@@ -206,11 +211,13 @@ class SqlAlchemyAIScoringRepository(AIScoringRepository):
         records = (await self.session.scalars(query.order_by(AIScoreSnapshotRecord.as_of.desc(), AIScoreSnapshotRecord.id.desc()).offset(offset).limit(limit))).all()
         return tuple(AIScoreSnapshot.model_validate(item.payload) for item in records)
 
+    @scoped_session
     async def find_by_fingerprint(self, fingerprint: str, mode: ScoreMode) -> AIScoreSnapshot | None:
         query = select(AIScoreSnapshotRecord).where(AIScoreSnapshotRecord.input_fingerprint == fingerprint, AIScoreSnapshotRecord.mode == mode.value).limit(1)
         record = (await self.session.scalars(query)).first()
         return AIScoreSnapshot.model_validate(record.payload) if record else None
 
+    @scoped_session
     async def prune(self, before: datetime, mode: ScoreMode, limit: int) -> int:
         identifiers = (
             await self.session.scalars(

@@ -6,10 +6,11 @@ from datetime import datetime
 from typing import Protocol
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.storage.models import EconomicCalendarRevisionRecord, HistoricalCandleRecord
+from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session_stream
 
 from .exceptions import ReplayConfigurationError, ReplayValidationError
 from .models import HistoricalEvent, ReplayDatasetReference, ReplayRequest, stable_hash, stable_id
@@ -115,18 +116,19 @@ class InMemoryHistoricalSource:
             yield event
 
 
-class SqlAlchemyHistoricalCandleSource:
+class SqlAlchemyHistoricalCandleSource(ScopedSessionRepository):
     source_name = "historical_candles"
     source_version = "1.0.0"
 
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
     async def validate(self, request: ReplayRequest) -> HistoricalSourceValidation:
         if request.dataset.source_name != self.source_name:
             return HistoricalSourceValidation(self.source_name, self.source_version, False, warnings=("dataset_source_mismatch",))
         return HistoricalSourceValidation(self.source_name, self.source_version, True, None, ("candle_timestamp_is_open_boundary",))
 
+    @scoped_session_stream
     async def stream(self, query: HistoricalEventQuery) -> AsyncIterator[HistoricalEvent]:
         request = query.request
         for instrument in request.instruments:
@@ -189,16 +191,17 @@ class SqlAlchemyHistoricalCandleSource:
                         break
 
 
-class SqlAlchemyEconomicRevisionSource:
+class SqlAlchemyEconomicRevisionSource(ScopedSessionRepository):
     source_name = "economic_calendar"
     source_version = "1.0.0"
 
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        ScopedSessionRepository.__init__(self, session_factory)
 
     async def validate(self, request: ReplayRequest) -> HistoricalSourceValidation:
         return HistoricalSourceValidation(self.source_name, self.source_version, True, None, ("provider_health_history_unavailable",))
 
+    @scoped_session_stream
     async def stream(self, query: HistoricalEventQuery) -> AsyncIterator[HistoricalEvent]:
         request = query.request
         offset = 0

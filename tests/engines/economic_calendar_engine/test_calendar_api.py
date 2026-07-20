@@ -55,6 +55,7 @@ async def test_all_read_only_routes_and_safe_validation() -> None:
             "config",
             "metrics",
             "providers",
+            "diagnostics",
             "events",
             "upcoming",
             "recent",
@@ -73,6 +74,34 @@ async def test_all_read_only_routes_and_safe_validation() -> None:
         for suffix in ("", "/revisions", "/observations"):
             assert (await client.get(f"/economic-calendar/events/{event_id}{suffix}")).status_code == 200
         assert (await client.get("/economic-calendar/events/not-a-uuid")).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_reports_five_independent_stages() -> None:
+    """A synced, reachable provider with a relevant USD event scheduled must report every
+    stage healthy — proving 'degraded' isn't reported just because *some* symbol elsewhere
+    might have no relevant events, and proving each stage is genuinely independent."""
+    app, _ = await application()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/economic-calendar/diagnostics", params={"symbol": "XAUUSD"})
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body) == {"provider_health", "downloaded_events", "mapped_events", "relevant_events", "trading_context"}
+        assert body["provider_health"]["status"] == "healthy"
+        assert body["downloaded_events"]["status"] == "ok" and body["downloaded_events"]["count"] >= 1
+        assert body["mapped_events"]["status"] == "ok"
+        assert body["relevant_events"]["status"] == "available"
+        assert body["trading_context"]["status"] == "ready"
+
+        # An irrelevant symbol has no matching currency: relevant/trading_context degrade
+        # independently while provider_health/downloaded_events/mapped_events stay healthy —
+        # proving the five stages don't collapse into one shared boolean.
+        unrelated = await client.get("/economic-calendar/diagnostics", params={"symbol": "GBPCHF"})
+        unrelated_body = unrelated.json()
+        assert unrelated_body["provider_health"]["status"] == "healthy"
+        assert unrelated_body["relevant_events"]["status"] == "none_relevant"
+        assert unrelated_body["trading_context"]["status"] == "unavailable"
         assert (await client.get(f"/economic-calendar/events/{'0' * 8}-0000-0000-0000-000000000000")).status_code == 404
         assert (await client.get("/economic-calendar/context/../../bad")).status_code in {404, 422}
         assert (await client.get("/economic-calendar/events", params={"country": "USA"})).status_code == 422
