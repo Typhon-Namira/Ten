@@ -154,3 +154,71 @@ def test_mark_and_fail_are_keyed_by_the_exact_boundary_not_the_most_recently_beg
     newer_cycle = {item["key"]: item["status"] for item in tracker.recent("XAUUSD", "M15", limit=5)[0]["stages"]}
     assert older_cycle["liquidity_analysis"] == "success"
     assert newer_cycle["liquidity_analysis"] == "waiting"
+
+
+def test_fail_in_flight_captures_full_exception_detail_against_the_failing_stage() -> None:
+    tracker = PipelineStageTracker()
+    boundary = _boundary()
+    tracker.begin("XAUUSD", "M15", boundary, correlation_id="corr-123")
+    tracker.mark("XAUUSD", "M15", boundary, ("candle_received", "candle_normalized", "stored_in_database"), "success")
+
+    def _raise_inside_smc() -> None:
+        raise ZeroDivisionError("float division by zero")
+
+    try:
+        _raise_inside_smc()
+    except ZeroDivisionError as exc:
+        tracker.fail_in_flight("XAUUSD", "M15", boundary, exc=exc)
+
+    cycle = tracker.latest("XAUUSD", "M15")
+    assert cycle is not None
+    assert cycle["correlation_id"] == "corr-123"
+    smc_stage = next(item for item in cycle["stages"] if item["key"] == "smc_analysis")
+    assert smc_stage["status"] == "failed"
+    assert smc_stage["error"] is not None
+    assert smc_stage["error"]["exception_class"] == "ZeroDivisionError"
+    assert smc_stage["error"]["message"] == "float division by zero"
+    assert "ZeroDivisionError" in smc_stage["error"]["traceback"]
+    assert smc_stage["error"]["function"] == "_raise_inside_smc"
+    assert smc_stage["error"]["line"] is not None
+    assert smc_stage["error"]["file"].endswith("test_stage_tracker.py")
+
+    liquidity_stage = next(item for item in cycle["stages"] if item["key"] == "liquidity_analysis")
+    assert liquidity_stage["status"] == "skipped"
+    assert liquidity_stage["error"] is None
+
+
+def test_stage_attempt_exposes_the_failure_independent_of_snapshot_lookup() -> None:
+    """`stage_attempt()` is what backs `latest_attempt_*` in Market Intelligence — it must report
+    a failure regardless of whatever a separate persisted-snapshot query would find."""
+    tracker = PipelineStageTracker()
+    boundary = _boundary()
+    tracker.begin("XAUUSD", "M15", boundary)
+    tracker.mark("XAUUSD", "M15", boundary, ("candle_received", "candle_normalized", "stored_in_database"), "success")
+    try:
+        raise ValueError("insufficient candle history")
+    except ValueError as exc:
+        tracker.fail_in_flight("XAUUSD", "M15", boundary, exc=exc)
+
+    attempt = tracker.stage_attempt("XAUUSD", "M15", "smc_analysis")
+    assert attempt is not None
+    assert attempt["status"] == "failed"
+    assert attempt["error"]["exception_class"] == "ValueError"
+
+
+def test_a_successful_retry_clears_the_previously_recorded_error_for_that_stage() -> None:
+    tracker = PipelineStageTracker()
+    boundary = _boundary()
+    tracker.begin("XAUUSD", "M15", boundary)
+    try:
+        raise RuntimeError("transient")
+    except RuntimeError as exc:
+        tracker.fail_in_flight("XAUUSD", "M15", boundary, exc=exc)
+
+    tracker.begin("XAUUSD", "M15", boundary)  # outbox retries the same candle
+    tracker.mark("XAUUSD", "M15", boundary, ("smc_analysis",), "success")
+
+    attempt = tracker.stage_attempt("XAUUSD", "M15", "smc_analysis")
+    assert attempt is not None
+    assert attempt["status"] == "success"
+    assert attempt["error"] is None

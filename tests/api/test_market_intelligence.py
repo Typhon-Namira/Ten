@@ -74,6 +74,19 @@ def _ai_score(as_of: datetime) -> SimpleNamespace:
     return SimpleNamespace(as_of=as_of, confidence_score=64.0, directional_label=SimpleNamespace(value="bullish"), composite_score=42.0, missing_sources=[], degraded_sources=[])
 
 
+def _smc_snapshot(as_of: datetime) -> SimpleNamespace:
+    structure = SimpleNamespace(current_direction=SimpleNamespace(value="bullish"), active_dealing_range_id=None)
+    return SimpleNamespace(
+        status=SimpleNamespace(value="ready"),
+        analysis_timestamp=as_of,
+        structure_state=structure,
+        structure_events=(),
+        zones=(),
+        dealing_ranges=(),
+        multi_timeframe_context=None,
+    )
+
+
 def _decision(as_of: datetime, valid_until: datetime) -> SimpleNamespace:
     return SimpleNamespace(as_of=as_of, state=SimpleNamespace(value="eligible"), direction=SimpleNamespace(value="bullish"), eligibility_score=78.0, valid_until=valid_until)
 
@@ -173,11 +186,81 @@ def test_spread_is_returned_when_provider_supports_it() -> None:
     assert result["spread"] == 0.42
 
 
+def test_latest_attempt_failure_is_visible_even_with_a_stale_successful_snapshot() -> None:
+    """Regression test for the exact reported gap: Market Intelligence showed SMC as `ok` from a
+    stale 16:00 snapshot while the live 18:30 cycle had actually failed. `status`/`snapshot_found`
+    may legitimately still describe the old snapshot, but `latest_attempt_status` must show the
+    real, current failure — the two must never be conflated into one misleading "healthy" signal.
+    """
+    stale = _now() - timedelta(hours=2, minutes=30)
+    failure_at = _now() - timedelta(seconds=5)
+    stage_attempts = {
+        "smc": {
+            "status": "failed",
+            "updated_at": failure_at,
+            "error": {"exception_class": "ZeroDivisionError", "message": "float division by zero", "file": "backend/app/engines/smc_engine/analyzer.py", "line": 214, "function": "_displacement_score"},
+        }
+    }
+    result = _build(smc=_smc_snapshot(stale), stage_attempts=stage_attempts)
+
+    diagnostic = {item["source"]: item for item in result["diagnostics"]}["smc"]
+    assert diagnostic["status"] == "ok"  # the stale snapshot is genuinely still there
+    assert diagnostic["snapshot_found"] is True
+    assert diagnostic["freshness"] == "stale"
+    assert diagnostic["latest_attempt_status"] == "failed"  # but the latest run did not succeed
+    assert diagnostic["latest_attempt_at"] == failure_at
+    assert diagnostic["latest_attempt_error"]["exception_class"] == "ZeroDivisionError"
+    assert diagnostic["latest_attempt_error"]["file"] == "backend/app/engines/smc_engine/analyzer.py"
+
+
+def test_source_without_a_stage_mapping_reports_no_latest_attempt() -> None:
+    """market_data and economic_calendar aren't tracked pipeline stages (see STAGE_KEYS), so they
+    must never claim a latest_attempt_status rather than fabricating one."""
+    result = _build(candle=_candle(), spread_supported=True)
+    diagnostic = {item["source"]: item for item in result["diagnostics"]}["market_data"]
+    assert diagnostic["latest_attempt_status"] is None
+    assert diagnostic["latest_attempt_error"] is None
+
+
+def test_economic_calendar_degraded_data_reflected_in_diagnostics_not_just_ok() -> None:
+    """Regression test: diagnostics previously said `ok`/`fresh` for economic_calendar purely
+    because the call didn't raise, while the main panel separately said `degraded` based on the
+    actual data (`unavailable_context`) — the two must agree."""
+    context = SimpleNamespace(
+        analysis_timestamp=_now(),
+        unavailable_context=("no relevant event mapping",),
+        risk_window_phase=SimpleNamespace(value="outside"),
+        risk_score=0.0,
+        next_relevant_event=None,
+    )
+    result = _build(economic_context=context)
+
+    assert result["economic_status"]["degraded"] is True
+    diagnostic = {item["source"]: item for item in result["diagnostics"]}["economic_calendar"]
+    assert diagnostic["status"] == "degraded"
+    assert diagnostic["status"] != "ok"
+
+
+def test_economic_calendar_with_relevant_events_reports_ok_consistently() -> None:
+    context = SimpleNamespace(
+        analysis_timestamp=_now(),
+        unavailable_context=(),
+        risk_window_phase=SimpleNamespace(value="pre_event"),
+        risk_score=0.4,
+        next_relevant_event=SimpleNamespace(display_name="Non-Farm Payrolls"),
+    )
+    result = _build(economic_context=context)
+
+    assert result["economic_status"]["degraded"] is False
+    diagnostic = {item["source"]: item for item in result["diagnostics"]}["economic_calendar"]
+    assert diagnostic["status"] == "ok"
+
+
 def test_generated_at_is_separate_from_latest_candle_and_snapshot_timestamps() -> None:
     fresh = _now() - timedelta(minutes=2)
     result = _build(candle=_candle(), spread_supported=True, liquidity=_liquidity(fresh))
     assert result["generated_at"] == _now()
     assert result["latest_candle_timestamp"] == _candle().timestamp
     diagnostic = {item["source"]: item for item in result["diagnostics"]}["liquidity"]
-    assert diagnostic["snapshot_timestamp"] == fresh
-    assert diagnostic["snapshot_timestamp"] != result["generated_at"]
+    assert diagnostic["last_successful_snapshot_at"] == fresh
+    assert diagnostic["last_successful_snapshot_at"] != result["generated_at"]

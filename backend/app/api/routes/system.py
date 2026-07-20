@@ -134,6 +134,20 @@ async def market_intelligence(request: Request, instrument: str = "XAUUSD", time
     decisions, errors["signal_decision"] = await safe_call(lambda: app.state.signal_decision_service.repository.find_recent_decisions(symbol, timeframe, now, 1))
     decision = decisions[0] if decisions else None
 
+    # A stale-but-successful snapshot must not read as "healthy" if the pipeline's latest attempt
+    # at that stage actually failed — cross-reference the stage tracker (which knows about the
+    # current/most recent run, success or not) independently of whatever was last persisted.
+    tracker = app.state.pipeline_stage_tracker
+    stage_attempts = {
+        "smc": tracker.stage_attempt(symbol, timeframe, "smc_analysis"),
+        "liquidity": tracker.stage_attempt(symbol, timeframe, "liquidity_analysis"),
+        "volume_profile": tracker.stage_attempt(symbol, timeframe, "volume_profile"),
+        "institutional_flow": tracker.stage_attempt(symbol, timeframe, "institutional_flow"),
+        "market_regime": tracker.stage_attempt(symbol, timeframe, "market_regime"),
+        "ai_scoring": tracker.stage_attempt(symbol, timeframe, "ai_scoring"),
+        "signal_decision": tracker.stage_attempt(symbol, timeframe, "scenario_decision"),
+    }
+
     try:
         session_status = market.sessions.status_at(now)
         errors["session"] = None
@@ -155,6 +169,7 @@ async def market_intelligence(request: Request, instrument: str = "XAUUSD", time
         ai_score=ai_score,
         decision=decision,
         errors={key: value for key, value in errors.items() if value is not None},
+        stage_attempts=stage_attempts,
     )
 
 

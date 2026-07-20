@@ -131,12 +131,12 @@ class FullSystemIntegrationService:
         boundary = envelope.available_at
         logger.info("snapshot.started", extra={"symbol": symbol, "timeframe": timeframe.value, "mode": envelope.mode.value, "candle_timestamp": boundary.isoformat()})
         tracker = self.stage_tracker
+        correlation = envelope.correlation_id
         if tracker is not None:
-            tracker.begin(symbol, timeframe.value, boundary)
+            tracker.begin(symbol, timeframe.value, boundary, correlation_id=str(correlation))
             tracker.mark(symbol, timeframe.value, boundary, ("candle_received", "candle_normalized", "stored_in_database"), "success")
         candles = await self.market_data.history(symbol, timeframe, end=boundary, limit=self.config.limits.maximum_candles)
         outputs: list[tuple[str, object]] = []
-        correlation = envelope.correlation_id
         try:
             if candles:
                 smc_snapshot = await self.smc.analyze_candles(candles, correlation_id=correlation)
@@ -162,9 +162,9 @@ class FullSystemIntegrationService:
             elif tracker is not None:
                 tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis", "liquidity_analysis", "volume_profile", "institutional_flow", "market_regime"), "skipped")
             outputs.append(("economic_calendar", await self.economic_calendar.context(symbol, as_of=boundary)))
-        except Exception:
+        except Exception as exc:
             if tracker is not None:
-                tracker.fail_in_flight(symbol, timeframe.value, boundary)
+                tracker.fail_in_flight(symbol, timeframe.value, boundary, exc=exc)
             raise
         evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]
         for name, value in outputs:
@@ -194,9 +194,9 @@ class FullSystemIntegrationService:
             if tracker is not None:
                 tracker.mark(symbol, timeframe.value, boundary, ("scenario_decision",), "success")
                 tracker.complete(symbol, timeframe.value, boundary)
-        except Exception:
+        except Exception as exc:
             if tracker is not None:
-                tracker.fail_in_flight(symbol, timeframe.value, boundary)
+                tracker.fail_in_flight(symbol, timeframe.value, boundary, exc=exc)
             raise
         logger.info("signal_decision.completed", extra={"snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "state": decision.state.value, "mode": envelope.mode.value})
         blocker_codes = tuple(item.reason_code for item in decision.blockers)

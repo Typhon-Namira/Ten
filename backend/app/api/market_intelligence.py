@@ -64,21 +64,49 @@ def _snapshot_timestamp(snapshot: Any, timestamp_attrs: tuple[str, ...]) -> date
 
 
 def source_diagnostic(
-    name: str, instrument: str, timeframe: str, snapshot: Any, error: str | None, now: datetime, timestamp_attrs: tuple[str, ...] = ("analysis_timestamp", "as_of", "created_at")
+    name: str,
+    instrument: str,
+    timeframe: str,
+    snapshot: Any,
+    error: str | None,
+    now: datetime,
+    timestamp_attrs: tuple[str, ...] = ("analysis_timestamp", "as_of", "created_at"),
+    *,
+    degraded: bool = False,
+    latest_attempt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Per-source retrieval diagnostics: exactly what was queried, what came back, and how old it is."""
+    """Per-source retrieval diagnostics: exactly what was queried, what came back, and how old it is.
+
+    `last_successful_snapshot_at` describes the persisted snapshot this endpoint retrieved — it
+    can be stale. `latest_attempt_*` describes the pipeline's most recent *execution* of that
+    stage (from `PipelineStageTracker`), independent of whether it ever succeeded. The two are
+    reported separately on purpose: a source is never "ok" just because an old snapshot exists —
+    if the latest attempt failed, `latest_attempt_status` says so even while `status` still
+    reflects a usable (if stale) snapshot.
+    """
     timestamp = _snapshot_timestamp(snapshot, timestamp_attrs) if snapshot is not None else None
     age_seconds = (now - timestamp).total_seconds() if timestamp is not None else None
+    if error:
+        status = "error"
+    elif degraded:
+        status = "degraded"
+    elif snapshot is not None:
+        status = "ok"
+    else:
+        status = "unavailable"
     return {
         "source": name,
         "instrument": instrument,
         "timeframe": timeframe,
-        "status": "error" if error else ("ok" if snapshot is not None else "unavailable"),
+        "status": status,
         "snapshot_found": snapshot is not None,
-        "snapshot_timestamp": timestamp,
+        "last_successful_snapshot_at": timestamp,
         "age_seconds": age_seconds,
         "freshness": _freshness(age_seconds),
         "error": error,
+        "latest_attempt_status": latest_attempt["status"] if latest_attempt else None,
+        "latest_attempt_at": latest_attempt["updated_at"] if latest_attempt else None,
+        "latest_attempt_error": latest_attempt["error"] if latest_attempt else None,
     }
 
 
@@ -134,22 +162,32 @@ def build_market_intelligence(
     ai_score: Any,
     decision: Any,
     errors: dict[str, str | None],
+    stage_attempts: dict[str, dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     smc_summary = _smc_summary(smc)
+    stage_attempts = stage_attempts or {}
     # Real spread requires provider bid/ask capability (see docs/MARKET_DATA_ENGINE.md); providers
     # without it leave Candle.spread at its Pydantic default of 0.0, which is indistinguishable
     # from a genuine zero spread unless the provider's capability is checked explicitly here.
     spread = candle.spread if candle is not None and spread_supported else None
+    # `economic_context` is always a freshly-computed object (never a persisted snapshot lookup),
+    # so it is structurally always "found" — but a context with no relevant event mapping is a
+    # substantively degraded result, not a healthy one. `degraded` here must match the same
+    # `unavailable_context` signal the "economic_status" block below reports, so the diagnostics
+    # table and the main panel can never contradict each other the way they previously did (the
+    # diagnostics table said "ok/fresh" purely because the call succeeded, while the main panel
+    # separately said "degraded" based on the data itself).
+    economic_degraded = bool(getattr(economic_context, "unavailable_context", None)) if economic_context is not None else False
     diagnostics = [
         source_diagnostic("market_data", instrument, timeframe, candle, errors.get("candle"), now, ("timestamp",)),
-        source_diagnostic("smc", instrument, timeframe, smc, errors.get("smc"), now),
-        source_diagnostic("liquidity", instrument, timeframe, liquidity, errors.get("liquidity"), now),
-        source_diagnostic("volume_profile", instrument, timeframe, volume_profile, errors.get("volume_profile"), now),
-        source_diagnostic("institutional_flow", instrument, timeframe, institutional_flow, errors.get("institutional_flow"), now),
-        source_diagnostic("market_regime", instrument, timeframe, market_regime, errors.get("market_regime"), now),
-        source_diagnostic("economic_calendar", instrument, timeframe, economic_context, errors.get("economic_calendar"), now, ("analysis_timestamp",)),
-        source_diagnostic("ai_scoring", instrument, timeframe, ai_score, errors.get("ai_scoring"), now, ("as_of",)),
-        source_diagnostic("signal_decision", instrument, timeframe, decision, errors.get("signal_decision"), now, ("as_of",)),
+        source_diagnostic("smc", instrument, timeframe, smc, errors.get("smc"), now, latest_attempt=stage_attempts.get("smc")),
+        source_diagnostic("liquidity", instrument, timeframe, liquidity, errors.get("liquidity"), now, latest_attempt=stage_attempts.get("liquidity")),
+        source_diagnostic("volume_profile", instrument, timeframe, volume_profile, errors.get("volume_profile"), now, latest_attempt=stage_attempts.get("volume_profile")),
+        source_diagnostic("institutional_flow", instrument, timeframe, institutional_flow, errors.get("institutional_flow"), now, latest_attempt=stage_attempts.get("institutional_flow")),
+        source_diagnostic("market_regime", instrument, timeframe, market_regime, errors.get("market_regime"), now, latest_attempt=stage_attempts.get("market_regime")),
+        source_diagnostic("economic_calendar", instrument, timeframe, economic_context, errors.get("economic_calendar"), now, ("analysis_timestamp",), degraded=economic_degraded),
+        source_diagnostic("ai_scoring", instrument, timeframe, ai_score, errors.get("ai_scoring"), now, ("as_of",), latest_attempt=stage_attempts.get("ai_scoring")),
+        source_diagnostic("signal_decision", instrument, timeframe, decision, errors.get("signal_decision"), now, ("as_of",), latest_attempt=stage_attempts.get("signal_decision")),
     ]
     return {
         "instrument": instrument,
