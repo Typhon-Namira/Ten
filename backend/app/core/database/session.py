@@ -4,8 +4,6 @@ from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from backend.app.core.config import get_settings
-
 
 def build_session_factory(database_url: str) -> async_sessionmaker[AsyncSession]:
     """Build a session factory without opening a connection eagerly."""
@@ -16,6 +14,8 @@ def build_session_factory(database_url: str) -> async_sessionmaker[AsyncSession]
 
 async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency yielding a transactional database session."""
+
+    from backend.app.core.config.settings import get_settings
 
     factory = build_session_factory(get_settings().database_url)
     async with factory() as session:
