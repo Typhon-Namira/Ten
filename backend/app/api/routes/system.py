@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 
+from backend.app.api.market_intelligence import build_market_intelligence
+from backend.app.api.safe import safe_call
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.repository import SqlAlchemyMarketDataRepository
 from backend.app.engines.market_data_engine.symbols import provider_symbol
@@ -97,4 +99,90 @@ async def diagnostics(request: Request) -> dict[str, object]:
             "latest_status": app.state.ai_scoring_service.metrics.snapshot(),
         },
         "replay": {"enabled": replay_enabled, "status": "enabled" if replay_enabled else "disabled"},
+    }
+
+
+@router.get("/market-intelligence")
+async def market_intelligence(request: Request, instrument: str = "XAUUSD", timeframe: str = "M15") -> dict[str, object]:
+    """Every live field for the market-intelligence panel. Never 500s: a failing source is
+    reported per-field in `source_errors` and every other field is still returned."""
+    app = request.app
+    market = app.state.market_data_service
+    symbol = instrument.upper()
+    tf = Timeframe(timeframe)
+    now = datetime.now(UTC)
+    errors: dict[str, str | None] = {}
+
+    candle, errors["candle"] = await safe_call(lambda: market.latest(symbol, tf))
+    smc, errors["smc"] = await safe_call(lambda: app.state.smc_service.state(symbol, tf))
+    liquidity, errors["liquidity"] = await safe_call(lambda: app.state.liquidity_service.state(symbol, tf))
+    volume_profile, errors["volume_profile"] = await safe_call(lambda: app.state.volume_profile_service.state(symbol, tf))
+    institutional_flow, errors["institutional_flow"] = await safe_call(lambda: app.state.institutional_flow_service.state(symbol, tf))
+    market_regime, errors["market_regime"] = await safe_call(lambda: app.state.market_regime_service.state(symbol, tf))
+    economic_context, errors["economic_calendar"] = await safe_call(lambda: app.state.economic_calendar_service.context(symbol, as_of=now, publish=False))
+    ai_score, errors["ai_scoring"] = await safe_call(lambda: app.state.ai_scoring_service.repository.get_latest_snapshot(symbol, timeframe))
+    decision, errors["signal_decision"] = await safe_call(lambda: app.state.signal_decision_service.repository.get_active_decision(symbol, timeframe, now))
+
+    try:
+        session_status = market.sessions.status_at(now)
+        errors["session"] = None
+    except Exception as exc:
+        session_status, errors["session"] = None, type(exc).__name__
+    return build_market_intelligence(
+        instrument=symbol,
+        timeframe=timeframe,
+        now=now,
+        session=session_status,
+        candle=candle,
+        smc=smc,
+        liquidity=liquidity,
+        volume_profile=volume_profile,
+        institutional_flow=institutional_flow,
+        market_regime=market_regime,
+        economic_context=economic_context,
+        ai_score=ai_score,
+        decision=decision,
+        errors={key: value for key, value in errors.items() if value is not None},
+    )
+
+
+@router.get("/performance")
+async def performance(request: Request, instrument: str = "XAUUSD", timeframe: str = "M15") -> dict[str, object]:
+    """Pipeline/provider/database/analysis latency, last successful/failed provider call,
+    queue length, and worker health — never 500s, unavailable metrics are reported as null."""
+    app = request.app
+    settings = app.state.settings
+    market = app.state.market_data_service
+    integration = app.state.integration_service
+    provider_stats = market.manager.statistics.get(settings.market_data_provider)
+    integration_metrics = integration.repository.metrics()
+    stage = app.state.pipeline_stage_tracker.latest(instrument.upper(), timeframe)
+    pipeline_latency_ms = None
+    if stage and stage.get("started_at") and stage.get("complete"):
+        pipeline_latency_ms = (stage["updated_at"] - stage["started_at"]).total_seconds() * 1000
+    return {
+        "instrument": instrument.upper(),
+        "timeframe": timeframe,
+        "pipeline_latency_ms": pipeline_latency_ms,
+        "provider": {
+            "name": settings.market_data_provider,
+            "last_latency_ms": getattr(provider_stats, "last_latency_ms", None) if provider_stats else None,
+            "last_success_at": provider_stats.last_success_at if provider_stats else None,
+            "last_failure_at": provider_stats.last_failure_at if provider_stats else None,
+            "last_error": provider_stats.last_error if provider_stats else None,
+            "healthy": bool(provider_stats and provider_stats.healthy),
+        },
+        "database": {
+            "mode": integration.repository_mode,
+            "events": integration_metrics.get("events"),
+            "outbox_backlog": integration_metrics.get("outbox_backlog"),
+            "processed": integration_metrics.get("processed"),
+        },
+        "analysis": {"ai_scoring": app.state.ai_scoring_service.metrics.snapshot(), "signal_decision": app.state.signal_decision_service.metrics.snapshot()},
+        "queue_length": integration_metrics.get("outbox_backlog"),
+        "workers": {
+            "market_data_worker": app.state.market_data_worker.status(),
+            "integration_worker": app.state.integration_worker.status(settings.integration_worker_enabled),
+        },
+        "event_bus": app.state.pipeline_manager.event_bus.metrics(),
     }

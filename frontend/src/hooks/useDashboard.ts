@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { tenApi } from '../services/api'
 import type { AIScoreSnapshot, EngineStatus, MarketStatus, OperationalSignal, ReplaySessionOverview, Signal, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
@@ -16,6 +16,15 @@ interface DashboardState {
   refresh: () => Promise<void>
 }
 
+/** Settles a fetch without letting one failing source blank out an already-loaded value. */
+async function settle<T>(promise: Promise<T>, previous: T): Promise<{ value: T; error: string | null }> {
+  try {
+    return { value: await promise, error: null }
+  } catch (caught) {
+    return { value: previous, error: caught instanceof Error ? caught.message : 'request failed' }
+  }
+}
+
 export function useDashboard(): DashboardState {
   const [signals, setSignals] = useState<Signal[]>([])
   const [engines, setEngines] = useState<EngineStatus[]>([])
@@ -27,34 +36,33 @@ export function useDashboard(): DashboardState {
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const latest = useRef({ signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics })
+  latest.current = { signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics }
 
   const refresh = useCallback(async () => {
     setLoading(true)
-    try {
-      const [nextSignals, nextEngines, nextMarket, nextAIScore, nextDecision, nextOperational, nextReplays, nextDiagnostics] = await Promise.all([
-        tenApi.signals(),
-        tenApi.engines(),
-        tenApi.market(),
-        tenApi.latestAIScore(),
-        tenApi.latestSignalDecision(),
-        tenApi.latestOperationalSignal(),
-        tenApi.replays(),
-        tenApi.diagnostics(),
-      ])
-      setSignals(nextSignals)
-      setEngines(nextEngines)
-      setMarket(nextMarket)
-      setAIScore(nextAIScore)
-      setSignalDecision(nextDecision)
-      setOperationalSignal(nextOperational)
-      setReplays(nextReplays)
-      setDiagnostics(nextDiagnostics)
-      setError(null)
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to reach TEN API')
-    } finally {
-      setLoading(false)
-    }
+    const current = latest.current
+    const [nextSignals, nextEngines, nextMarket, nextAIScore, nextDecision, nextOperational, nextReplays, nextDiagnostics] = await Promise.all([
+      settle(tenApi.signals(), current.signals),
+      settle(tenApi.engines(), current.engines),
+      settle(tenApi.market(), current.market),
+      settle(tenApi.latestAIScore(), current.aiScore),
+      settle(tenApi.latestSignalDecision(), current.signalDecision),
+      settle(tenApi.latestOperationalSignal(), current.operationalSignal),
+      settle(tenApi.replays(), current.replays),
+      settle(tenApi.diagnostics(), current.diagnostics),
+    ])
+    setSignals(nextSignals.value)
+    setEngines(nextEngines.value)
+    setMarket(nextMarket.value)
+    setAIScore(nextAIScore.value)
+    setSignalDecision(nextDecision.value)
+    setOperationalSignal(nextOperational.value)
+    setReplays(nextReplays.value)
+    setDiagnostics(nextDiagnostics.value)
+    const firstError = [nextSignals, nextEngines, nextMarket, nextAIScore, nextDecision, nextOperational, nextReplays, nextDiagnostics].find((item) => item.error)?.error
+    setError(firstError ?? null)
+    setLoading(false)
   }, [])
 
   useEffect(() => {
@@ -65,4 +73,3 @@ export function useDashboard(): DashboardState {
 
   return { signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics, loading, error, refresh }
 }
-

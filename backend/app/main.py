@@ -52,6 +52,8 @@ from backend.app.core.database import prepare_database_schema
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
 from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, IntegrationWorker, SqlAlchemyIntegrationRepository
+from backend.app.integration.activity_log import PipelineActivityLog
+from backend.app.integration.stage_tracker import PipelineStageTracker
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -278,6 +280,9 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             integration_repository = SqlAlchemyIntegrationRepository(app.state.integration_database_session)
             integration_mode = "postgresql"
         app.state.integration_repository = integration_repository
+        app.state.pipeline_activity_log = PipelineActivityLog(app.state.pipeline_manager.event_bus)
+        app.state.pipeline_activity_log.start()
+        app.state.pipeline_stage_tracker = PipelineStageTracker()
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
             repository=app.state.integration_repository,
@@ -292,6 +297,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             ai_scoring=app.state.ai_scoring_service,
             signal_decision=app.state.signal_decision_service,
             repository_mode=integration_mode,
+            stage_tracker=app.state.pipeline_stage_tracker,
         )
         if integration_config.enabled and integration_config.live_pipeline_enabled:
             await app.state.integration_service.start()
@@ -352,6 +358,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         try:
             yield
         finally:
+            app.state.pipeline_activity_log.stop()
             await app.state.market_data_worker.stop()
             await app.state.integration_worker.stop()
             await app.state.integration_service.stop()

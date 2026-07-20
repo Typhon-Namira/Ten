@@ -15,6 +15,8 @@ from .replays import router as replays_router
 from .status import router as status_router
 from .integration import router as integration_router
 from .system import router as system_router
+from .stream import router as stream_router
+from .pipeline import router as pipeline_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -32,3 +34,5 @@ api_router.include_router(replays_router)
 api_router.include_router(status_router)
 api_router.include_router(integration_router)
 api_router.include_router(system_router)
+api_router.include_router(stream_router)
+api_router.include_router(pipeline_router)

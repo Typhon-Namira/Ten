@@ -16,6 +16,7 @@ from backend.app.events import Event, EventBus
 from .config import IntegrationConfig
 from .models import CanonicalEventEnvelope, DataQualityIssue, DataQualityStatus, EvidenceReference, IntegrationMode, IntegrationSnapshot, IntegrationTraceRecord, MarketCandlePayload, OperationalSignal, SnapshotStatus, TraceStatus, canonical_hash, semantic_uuid
 from .repository import IntegrationRepository
+from .stage_tracker import PipelineStageTracker
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 class FullSystemIntegrationService:
     """Coordinates existing engines at a final-candle boundary; contains no analytics."""
 
-    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None) -> None:
         self.event_bus, self.repository, self.config = event_bus, repository, config
         self.market_data, self.smc, self.liquidity = market_data, smc, liquidity
         self.volume_profile, self.institutional_flow = volume_profile, institutional_flow
@@ -31,6 +32,7 @@ class FullSystemIntegrationService:
         self.ai_scoring, self.signal_decision = ai_scoring, signal_decision
         self.repository_mode = repository_mode
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.stage_tracker = stage_tracker
         self._unsubscribe: Callable[[], None] | None = None
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self.started = False
@@ -114,16 +116,37 @@ class FullSystemIntegrationService:
         timeframe = Timeframe(timeframe_name)
         boundary = envelope.available_at
         logger.info("snapshot.started", extra={"symbol": symbol, "timeframe": timeframe.value, "mode": envelope.mode.value, "candle_timestamp": boundary.isoformat()})
+        tracker = self.stage_tracker
+        if tracker is not None:
+            tracker.begin(symbol, timeframe.value, boundary)
+            tracker.mark(symbol, timeframe.value, boundary, ("candle_received", "candle_normalized", "stored_in_database"), "success")
         candles = await self.market_data.history(symbol, timeframe, end=boundary, limit=self.config.limits.maximum_candles)
         outputs: list[tuple[str, object]] = []
         correlation = envelope.correlation_id
-        if candles:
-            outputs.append(("smc", await self.smc.analyze_candles(candles, correlation_id=correlation)))
-            outputs.append(("liquidity", await self.liquidity.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
-            outputs.append(("volume_profile", await self.volume_profile.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
-            outputs.append(("institutional_flow", await self.institutional_flow.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
-            outputs.append(("market_regime", await self.market_regime.analyze_snapshot(symbol, timeframe, timestamp=boundary)))
-        outputs.append(("economic_calendar", await self.economic_calendar.context(symbol, as_of=boundary)))
+        try:
+            if candles:
+                outputs.append(("smc", await self.smc.analyze_candles(candles, correlation_id=correlation)))
+                if tracker is not None:
+                    tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis",), "success")
+                outputs.append(("liquidity", await self.liquidity.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
+                if tracker is not None:
+                    tracker.mark(symbol, timeframe.value, boundary, ("liquidity_analysis",), "success")
+                outputs.append(("volume_profile", await self.volume_profile.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
+                if tracker is not None:
+                    tracker.mark(symbol, timeframe.value, boundary, ("volume_profile",), "success")
+                outputs.append(("institutional_flow", await self.institutional_flow.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)))
+                if tracker is not None:
+                    tracker.mark(symbol, timeframe.value, boundary, ("institutional_flow",), "success")
+                outputs.append(("market_regime", await self.market_regime.analyze_snapshot(symbol, timeframe, timestamp=boundary)))
+                if tracker is not None:
+                    tracker.mark(symbol, timeframe.value, boundary, ("market_regime",), "success")
+            elif tracker is not None:
+                tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis", "liquidity_analysis", "volume_profile", "institutional_flow", "market_regime"), "skipped")
+            outputs.append(("economic_calendar", await self.economic_calendar.context(symbol, as_of=boundary)))
+        except Exception:
+            if tracker is not None:
+                tracker.fail_in_flight(symbol, timeframe.value, boundary)
+            raise
         evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]
         for name, value in outputs:
             identifier = next((getattr(value, key) for key in ("snapshot_id", "id", "context_id") if getattr(value, key, None) is not None), semantic_uuid(name, envelope.event_id))
@@ -136,13 +159,26 @@ class FullSystemIntegrationService:
         await self.repository.save_snapshot(snapshot)
         if missing:
             logger.warning("snapshot.incomplete", extra={"snapshot_id": str(snapshot.snapshot_id), "symbol": symbol, "timeframe": timeframe.value, "missing": missing})
+            if tracker is not None:
+                tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation", "scenario_decision"), "skipped")
+                tracker.complete(symbol, timeframe.value, boundary)
             await self.repository.mark_processed(envelope.event_id)
             await self._trace(envelope, TraceStatus.BLOCKED, "snapshot_barrier", (envelope.event_id,), (str(snapshot.snapshot_id),), started)
             return None
         score_mode = ScoreMode.LIVE if envelope.mode == IntegrationMode.LIVE else ScoreMode.REPLAY
         decision_mode = DecisionMode.LIVE if envelope.mode == IntegrationMode.LIVE else DecisionMode.REPLAY
-        score = await self.ai_scoring.calculate(ScoreRequest(instrument=symbol, timeframe=timeframe.value, as_of=boundary, mode=score_mode))
-        decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=decision_mode))
+        try:
+            score = await self.ai_scoring.calculate(ScoreRequest(instrument=symbol, timeframe=timeframe.value, as_of=boundary, mode=score_mode))
+            if tracker is not None:
+                tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation"), "success")
+            decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=decision_mode))
+            if tracker is not None:
+                tracker.mark(symbol, timeframe.value, boundary, ("scenario_decision",), "success")
+                tracker.complete(symbol, timeframe.value, boundary)
+        except Exception:
+            if tracker is not None:
+                tracker.fail_in_flight(symbol, timeframe.value, boundary)
+            raise
         logger.info("signal_decision.completed", extra={"snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "state": decision.state.value, "mode": envelope.mode.value})
         blocker_codes = tuple(item.reason_code for item in decision.blockers)
         warning_codes = tuple(item.reason_code for item in decision.warnings)

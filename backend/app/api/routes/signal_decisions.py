@@ -2,9 +2,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend.app.api.dependencies import get_signal_decision_service
+from backend.app.api.rejection_diagnostics import build_rejection_diagnostics
+from backend.app.api.safe import safe_call
 from backend.app.engines.signal_decision_engine import (
     DecisionDirection,
     DecisionMode,
@@ -101,6 +103,48 @@ async def history(
         raise HTTPException(422, "history range exceeds configured maximum")
     bounded = min(limit, service.config.api.maximum_page_size)
     return list(await service.repository.list_decisions(instrument.upper(), timeframe, start, end, direction, state, decision_policy_version, ai_score_policy_version, mode, cursor, bounded))
+
+
+@router.get("/rejections/recent")
+async def rejections_recent(
+    request: Request,
+    service: Service,
+    instrument: str = "XAUUSD",
+    timeframe: str = "M15",
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> dict[str, object]:
+    """Recent non-eligible decisions with a full, human-readable breakdown of every failed condition."""
+    now = service.clock.now()
+    decisions = await service.repository.find_recent_decisions(instrument.upper(), timeframe, now, limit)
+    rejected = [item for item in decisions if item.state.value != "eligible"]
+    app = request.app
+    market = app.state.market_data_service
+    try:
+        session_status = market.sessions.status_at(now)
+        session_error = None
+    except Exception as exc:
+        session_status, session_error = None, type(exc).__name__
+    active_session = session_status.active_session if session_status else None
+    items = []
+    for item in rejected:
+        score, score_error = await safe_call(lambda item=item: app.state.ai_scoring_service.repository.get_snapshot(item.ai_score_snapshot_id))
+        diagnostics = build_rejection_diagnostics(item, score, active_session)
+        items.append(
+            {
+                "decision_id": str(item.decision_id),
+                "instrument": item.instrument,
+                "timeframe": item.timeframe,
+                "state": item.state.value,
+                "direction": item.direction.value,
+                "as_of": item.as_of,
+                "confidence_score": item.confidence_score,
+                "blockers": [reason.reason_code for reason in item.blockers],
+                "warnings": [reason.reason_code for reason in item.warnings],
+                "ai_score_unavailable": score_error,
+                "diagnostics": diagnostics,
+            }
+        )
+    return {"instrument": instrument.upper(), "timeframe": timeframe, "count": len(items), "session_status_error": session_error, "rejections": items}
 
 
 async def _decision(decision_id: UUID, service: SignalDecisionService) -> SignalDecision:

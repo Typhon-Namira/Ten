@@ -1,4 +1,4 @@
-import type { AIScoreSnapshot, EngineStatus, MarketStatus, OperationalSignal, ReplaySessionOverview, Signal, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { AIScoreSnapshot, EngineStatus, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, RejectionsResponse, ReplaySessionOverview, Signal, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
 
@@ -26,4 +26,10 @@ export const tenApi = {
   latestSignalDecision: () => requestOptional<SignalDecisionSnapshot>('/signal-decisions/latest?instrument=XAUUSD&timeframe=M15'),
   latestOperationalSignal: () => requestOptional<OperationalSignal>('/integration/signals/latest?instrument=XAUUSD&timeframe=M15'),
   replays: () => request<ReplaySessionOverview[]>('/replays?limit=5'),
+  pipelineStages: () => request<PipelineStagesResponse>('/api/v1/pipeline/stages/latest?instrument=XAUUSD&timeframe=M15'),
+  rejections: () => request<RejectionsResponse>('/signal-decisions/rejections/recent?instrument=XAUUSD&timeframe=M15&limit=10'),
+  marketIntelligence: () => request<MarketIntelligence>('/api/v1/system/market-intelligence?instrument=XAUUSD&timeframe=M15'),
+  performance: () => request<PerformanceMetrics>('/api/v1/system/performance?instrument=XAUUSD&timeframe=M15'),
 }
+
+export const STREAM_URL = `${API_BASE_URL}/stream/events`

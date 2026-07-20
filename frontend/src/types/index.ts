@@ -130,6 +130,115 @@ export interface OperationalSignal {
 export type ReplayStatus = 'created' | 'validating' | 'ready' | 'running' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'completed' | 'failed' | 'recovering'
 export type ReplayMode = 'maximum_speed' | 'accelerated' | 'real_time' | 'step'
 
+export type StageStatus = 'waiting' | 'running' | 'success' | 'failed' | 'skipped'
+
+export interface PipelineStage {
+  key: string
+  label: string
+  status: StageStatus
+}
+
+export interface PipelineStageCycle {
+  symbol: string
+  timeframe: string
+  candle_timestamp: string
+  started_at: string
+  updated_at: string
+  complete: boolean
+  stages: PipelineStage[]
+}
+
+export interface PipelineStagesResponse extends Partial<PipelineStageCycle> {
+  available: boolean
+  reason?: string
+}
+
+export interface ActivityEvent {
+  id: string
+  type: string
+  source: string
+  occurred_at: string
+  correlation_id: string
+  payload: Record<string, unknown>
+}
+
+export type DiagnosticStatus = 'passed' | 'failed' | 'not_evaluated' | 'informational'
+
+export interface RejectionDiagnosticEntry {
+  key: string
+  label: string
+  status: DiagnosticStatus
+  detail: string
+  observed_value: unknown
+  threshold: unknown
+}
+
+export interface RejectedDecision {
+  decision_id: string
+  instrument: string
+  timeframe: string
+  state: string
+  direction: string
+  as_of: string
+  confidence_score: number
+  blockers: string[]
+  warnings: string[]
+  ai_score_unavailable: string | null
+  diagnostics: RejectionDiagnosticEntry[]
+}
+
+export interface RejectionsResponse {
+  instrument: string
+  timeframe: string
+  count: number
+  session_status_error: string | null
+  rejections: RejectedDecision[]
+}
+
+export interface MarketIntelligence {
+  instrument: string
+  timeframe: string
+  as_of: string
+  current_session: string
+  market_open: boolean | null
+  current_candle: { timestamp: string; open: number; high: number; low: number; close: number; volume: number; spread: number | null } | null
+  spread: number | null
+  current_bias: string | null
+  htf_bias: Record<string, string> | null
+  current_bos: { direction: string; at: string; price: number } | null
+  current_choch: { direction: string; at: string; price: number } | null
+  current_fvg: { type: string; upper: number; lower: number; lifecycle: string } | null
+  current_order_block: { type: string; upper: number; lower: number; lifecycle: string } | null
+  premium_discount: 'premium' | 'discount' | 'equilibrium' | 'unknown'
+  liquidity: { available: boolean; state: Record<string, unknown> | null }
+  volume_profile: { available: boolean; quality: Record<string, unknown> | null }
+  institutional_flow: { available: boolean; state: Record<string, unknown> | null; quality: Record<string, unknown> | null }
+  market_regime: { available: boolean; dominant_regime: string | null; trend_regime: string | null; directional_bias: string | null; trend_strength: number | null; volatility_score: number | null; confidence: number | null }
+  economic_status: { available: boolean; degraded: boolean; risk_window_phase: string | null; risk_score: number | null; next_relevant_event: string | null }
+  confidence_percent: number | null
+  ai_directional_label: string | null
+  ai_composite_score: number | null
+  ai_missing_sources: string[]
+  ai_degraded_sources: string[]
+  scenario_readiness_percent: number | null
+  decision_status: string | null
+  decision_direction: string | null
+  last_update_time: string
+  source_errors: Record<string, string>
+}
+
+export interface PerformanceMetrics {
+  instrument: string
+  timeframe: string
+  pipeline_latency_ms: number | null
+  provider: { name: string; last_latency_ms: number | null; last_success_at: string | null; last_failure_at: string | null; last_error: string | null; healthy: boolean }
+  database: { mode: string; events: number | null; outbox_backlog: number | null; processed: number | null }
+  analysis: { ai_scoring: Record<string, unknown>; signal_decision: Record<string, unknown> }
+  queue_length: number | null
+  workers: { market_data_worker: Record<string, unknown>; integration_worker: Record<string, unknown> }
+  event_bus: Record<string, unknown>
+}
+
 export interface ReplaySessionOverview {
   replay_id: string
   request_fingerprint: string

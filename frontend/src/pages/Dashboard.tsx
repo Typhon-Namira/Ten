@@ -1,11 +1,20 @@
-import { Activity, Clock3, History, RefreshCw, ShieldCheck, Signal as SignalIcon } from 'lucide-react'
+import { Activity, Clock3, History, RefreshCw, ShieldCheck, Signal as SignalIcon, Wifi, WifiOff } from 'lucide-react'
 import { EngineGrid } from '../components/EngineGrid'
+import { LiveLogPanel } from '../components/LiveLogPanel'
+import { MarketIntelligencePanel } from '../components/MarketIntelligencePanel'
 import { MetricCard } from '../components/MetricCard'
+import { PerformancePanel } from '../components/PerformancePanel'
+import { PipelineStageTracker } from '../components/PipelineStageTracker'
+import { RejectionReasonPanel } from '../components/RejectionReasonPanel'
 import { SignalTable } from '../components/SignalTable'
 import { useDashboard } from '../hooks/useDashboard'
+import { useEventStream } from '../hooks/useEventStream'
+import { useLiveDashboard } from '../hooks/useLiveDashboard'
 
 export function Dashboard() {
   const { signals, engines, market, aiScore, operationalSignal, replays, diagnostics, loading, error, refresh } = useDashboard()
+  const { status: streamStatus, events } = useEventStream()
+  const { stages, rejections, marketIntelligence, performance, lastUpdated } = useLiveDashboard()
   const latest = signals[0]
   const latestReplay = replays[0]
   const ready = engines.filter((engine) => engine.state === 'ready').length
@@ -15,23 +24,33 @@ export function Dashboard() {
     : `${market?.closure_reason?.replaceAll('_', ' ') ?? 'status unavailable'}${market?.next_expected_open_at ? ` · expected open ${new Date(market.next_expected_open_at).toLocaleString()}` : ''}`
   const latestDecision = diagnostics?.pipeline.latest_decision
   const pipelineHealthy = diagnostics?.operational_state.startsWith('HEALTHY') ?? false
+  const topRejection = rejections?.rejections[0]
   const operationalValue = !market?.is_open ? 'MARKET CLOSED'
     : operationalSignal?.state.replaceAll('_', ' ').toUpperCase()
-      ?? (latestDecision ? latestDecision.state === 'eligible' ? 'QUALIFIED SIGNAL' : 'NO QUALIFIED CONFLUENCE' : undefined)
-      ?? (diagnostics?.operational_state.replaceAll('_', ' ') ?? 'NO QUALIFIED CONFLUENCE')
+      ?? (latestDecision ? latestDecision.state === 'eligible' ? 'QUALIFIED SIGNAL' : latestDecision.state.replaceAll('_', ' ').toUpperCase() : undefined)
+      ?? (diagnostics?.operational_state.replaceAll('_', ' ') ?? 'AWAITING FIRST DECISION')
   const operationalDetail = !market?.is_open
     ? diagnostics?.history.initialized
       ? `Historical data loaded · no live scenario until ${market?.next_expected_open_at ? new Date(market.next_expected_open_at).toLocaleString() : 'the market reopens'}`
       : `Initializing market history · ${diagnostics?.history.candle_count ?? 0} / ${diagnostics?.history.required_candle_count ?? 0} candles`
     : operationalSignal
       ? `${operationalSignal.direction.toUpperCase()} · ${operationalSignal.provider_provenance.join(', ')} · ${operationalSignal.data_quality_status}`
-      : latestDecision
-        ? latestDecision.blockers.map((item) => item.reason_code).join(', ') || 'Completed without a publishable live scenario'
-        : pipelineHealthy ? 'Pipeline healthy; no live scenario is currently published' : 'Pipeline has not completed a persisted snapshot'
+      : topRejection
+        ? `Failed: ${topRejection.diagnostics.filter((item) => item.status === 'failed').map((item) => item.label).join(', ') || topRejection.blockers.join(', ') || 'see rejection detail below'}`
+        : latestDecision
+          ? latestDecision.blockers.map((item) => item.reason_code).join(', ') || 'Completed without a publishable live scenario'
+          : pipelineHealthy ? 'Pipeline healthy; no live scenario is currently published' : 'Pipeline has not completed a persisted snapshot'
 
   return <div className="page">
-    <header><div><p className="eyebrow">INSTITUTIONAL ANALYSIS WORKSPACE</p><h1>Gold intelligence <em>without the noise.</em></h1></div><button onClick={() => void refresh()} disabled={loading}><RefreshCw size={16} className={loading ? 'spin' : ''} />Refresh</button></header>
-    {error && <div className="alert"><span>API offline</span>{error}. Dashboard will retry automatically.</div>}
+    <header>
+      <div><p className="eyebrow">INSTITUTIONAL ANALYSIS WORKSPACE</p><h1>Gold intelligence <em>without the noise.</em></h1></div>
+      <div className="header-actions">
+        <span className={`stream-status stream-status--${streamStatus}`}>{streamStatus === 'open' ? <Wifi size={13} /> : <WifiOff size={13} />}{streamStatus === 'open' ? 'Live' : streamStatus}</span>
+        {lastUpdated && <span className="stream-status">updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>}
+        <button onClick={() => void refresh()} disabled={loading}><RefreshCw size={16} className={loading ? 'spin' : ''} />Refresh</button>
+      </div>
+    </header>
+    {error && <div className="alert"><span>API degraded</span>{error}. Showing the last known-good data; retrying automatically.</div>}
     <section className="metrics" id="overview">
       <MetricCard label="Market" value={marketValue} detail={marketDetail} icon={<Clock3 size={18} />} accent={market?.is_open ? 'green' : market?.market_status === 'UNKNOWN' ? 'gold' : 'red'} />
       <MetricCard label="Operational decision" value={operationalValue} detail={operationalDetail} icon={<SignalIcon size={18} />} accent={operationalSignal?.state === 'eligible' ? 'green' : pipelineHealthy ? 'gold' : 'red'} />
@@ -39,7 +58,12 @@ export function Dashboard() {
       <MetricCard label="System" value={diagnostics?.operational_state.replaceAll('_', ' ') ?? `${ready}/${engines.length || '—'}`} detail={`${ready}/${engines.length || '—'} pipeline components registered`} icon={<ShieldCheck size={18} />} accent={pipelineHealthy ? 'green' : 'gold'} />
       <MetricCard label="Historical replay" value={latestReplay?.status.replaceAll('_', ' ').toUpperCase() ?? (diagnostics?.replay.enabled ? 'NO SESSIONS CREATED' : 'REPLAY DISABLED')} detail={latestReplay ? `${latestReplay.request.dataset.dataset_version} · ${latestReplay.processed_events.toLocaleString()} events · ${latestReplay.progress_percent ?? '—'}%` : diagnostics?.replay.enabled ? 'No replay sessions have been created' : 'Replay worker is intentionally disabled'} icon={<History size={18} />} accent={latestReplay?.status === 'completed' ? 'green' : latestReplay?.status === 'failed' ? 'red' : 'gold'} />
     </section>
+    <section className="panel" id="stages"><div className="panel__head"><div><p className="eyebrow">PIPELINE STAGES</p><h2>Live stage tracker</h2></div><span>updates every 5s</span></div><div className="panel-body"><PipelineStageTracker data={stages} /></div></section>
     <section className="panel" id="signals"><div className="panel__head"><div><p className="eyebrow">SCENARIO FEED</p><h2>Current signals</h2></div><span>{signals.length} scenarios</span></div><SignalTable signals={signals} /></section>
+    <section className="panel" id="rejections"><div className="panel__head"><div><p className="eyebrow">REJECTED SETUPS</p><h2>Why signals were rejected</h2></div><span>{rejections?.count ?? 0} recent</span></div><div className="panel-body"><RejectionReasonPanel data={rejections} /></div></section>
+    <section className="panel" id="intelligence"><div className="panel__head"><div><p className="eyebrow">MARKET INTELLIGENCE</p><h2>Live market state</h2></div><span>updates every 5s</span></div><div className="panel-body"><MarketIntelligencePanel data={marketIntelligence} /></div></section>
     <section className="panel" id="engines"><div className="panel__head"><div><p className="eyebrow">PIPELINE HEALTH</p><h2>Pipeline components</h2></div><span>30s refresh</span></div><EngineGrid engines={engines} /></section>
+    <section className="panel" id="logs"><div className="panel__head"><div><p className="eyebrow">LIVE LOGS</p><h2>Pipeline event stream</h2></div><span>{events.length} events</span></div><LiveLogPanel status={streamStatus} events={events} /></section>
+    <section className="panel" id="performance"><div className="panel__head"><div><p className="eyebrow">PERFORMANCE</p><h2>Latency &amp; worker health</h2></div><span>updates every 5s</span></div><div className="panel-body"><PerformancePanel data={performance} /></div></section>
   </div>
 }
