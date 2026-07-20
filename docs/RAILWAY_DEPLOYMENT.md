@@ -9,8 +9,10 @@ Pre-deploy Command on the existing service:
 python -m alembic upgrade head
 ```
 
-The command reads `TEN_DATABASE_URL` directly and accepts Railway's
-`postgresql+asyncpg://` URL. The application verifies the Alembic head on managed
+The command reads `TEN_DATABASE_URL` directly and accepts both Railway's native
+`${{Postgres.DATABASE_URL}}` reference and `postgresql+asyncpg://` URLs. Native
+PostgreSQL URLs are normalized to asyncpg without exposing credentials. The
+application verifies the Alembic head on managed
 runtimes and does not call `Base.metadata.create_all` there. Development runtimes
 retain automatic metadata creation for isolated local tests.
 

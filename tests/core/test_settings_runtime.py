@@ -41,3 +41,13 @@ def test_market_data_timeframes_normalize_railway_provider_notation(monkeypatch)
     settings = Settings(_env_file=None, market_data_worker_enabled=False)
 
     assert settings.market_data_timeframes == ("M1", "M5", "M15", "H1")
+
+
+def test_railway_postgresql_url_uses_asyncpg(monkeypatch) -> None:
+    monkeypatch.setenv("TEN_DATABASE_URL", "postgresql://postgres:secret@postgres.railway.internal:5432/railway")
+
+    settings = Settings(_env_file=None, market_data_worker_enabled=False)
+
+    assert settings.database_url == (
+        "postgresql+asyncpg://postgres:secret@postgres.railway.internal:5432/railway"
+    )

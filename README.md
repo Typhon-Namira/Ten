@@ -96,7 +96,8 @@ deployment healthy.
 2. Keep the service root directory at the repository root.
 3. AI Scoring Production 1.0 is deterministic and requires no LLM or provider API key.
 4. Add a Railway PostgreSQL service and set `TEN_DATABASE_URL` to its async
-   SQLAlchemy URL when durable persistence is enabled.
+   SQLAlchemy URL, or to `${{Postgres.DATABASE_URL}}`, when durable persistence
+   is enabled.
 5. Set the Railway Pre-deploy Command to `python -m alembic upgrade head`.
 6. Generate a public domain under the service's Networking settings.
 

@@ -10,6 +10,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from backend.app.core.database.base import Base
+from backend.app.core.database.url import normalize_async_database_url
 import backend.app.storage.models  # noqa: F401 -- registers every table with Base.metadata
 
 
@@ -22,7 +23,8 @@ target_metadata = Base.metadata
 
 def database_url() -> str:
     """Return the Railway-compatible async database URL without logging it."""
-    url = os.environ.get("TEN_DATABASE_URL")
+    raw_url = os.environ.get("TEN_DATABASE_URL")
+    url = normalize_async_database_url(raw_url) if raw_url else None
     if not url:
         raise RuntimeError("TEN_DATABASE_URL is required to run database migrations")
     if not url.startswith(("postgresql+asyncpg://", "sqlite+aiosqlite://")):

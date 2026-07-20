@@ -38,6 +38,15 @@ def test_initial_migration_renders_every_model_as_postgresql_ddl(monkeypatch: py
     assert "JSONB" in ddl
 
 
+def test_alembic_accepts_railways_native_postgresql_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEN_DATABASE_URL", "postgresql://postgres:secret@postgres.railway.internal:5432/railway")
+    output = StringIO()
+
+    command.upgrade(alembic_config(output_buffer=output), "head", sql=True)
+
+    assert SCHEMA_HEAD_REVISION in output.getvalue()
+
+
 @pytest.mark.asyncio
 async def test_managed_runtime_requires_the_alembic_head() -> None:
     connection = AsyncMock()

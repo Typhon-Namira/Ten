@@ -8,6 +8,8 @@ from typing import Annotated, Any
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from backend.app.core.database.url import normalize_async_database_url
+
 
 class Settings(BaseSettings):
     """Validated runtime settings. Secrets are loaded only from the environment."""
@@ -38,6 +40,12 @@ class Settings(BaseSettings):
     replay_worker_enabled: bool = False
     public_read_access: bool = True
     api_keys: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value: Any) -> Any:
+        """Accept Railway's native PostgreSQL URL and select asyncpg."""
+        return normalize_async_database_url(value) if isinstance(value, str) else value
 
     @field_validator("market_data_symbols", "market_data_timeframes", mode="before")
     @classmethod
