@@ -1,21 +1,40 @@
 import { useEffect, useState } from 'react'
-import { AIAnalysisPage, ConfigurationPage, EconomicCalendarPage, EngineStatusPage, InstitutionalFlowPage, LiquidityPage, LogsPage, MarketPage, SMCPage, VolumeProfilePage } from '../pages/ModulePages'
+import { AIAnalysisPage, ConfigurationPage, EngineStatusPage, InstitutionalFlowPage, LiquidityPage, LogsPage, MarketRegimePage, VolumeProfilePage } from '../pages/ModulePages'
 import { Dashboard } from '../pages/Dashboard'
-import { SignalsPage } from '../pages/SignalsPage'
+import { MarketPage } from '../pages/MarketPage'
+import { ReplaySessionsPage } from '../pages/ReplaySessionsPage'
+import { CurrentSignalsPage } from '../pages/CurrentSignalsPage'
+import { RejectedSignalsPage } from '../pages/RejectedSignalsPage'
+import { SignalHistoryPage } from '../pages/SignalHistoryPage'
+import { PipelinePage } from '../pages/PipelinePage'
+import { PerformancePage } from '../pages/PerformancePage'
+import { DiagnosticsPage } from '../pages/DiagnosticsPage'
+import { SMCEnginePage } from '../pages/engines/SMCEnginePage'
+import { EconomicCalendarEnginePage } from '../pages/engines/EconomicCalendarEnginePage'
+import { SignalDecisionTreePage } from '../pages/engines/SignalDecisionTreePage'
 import { AppShell } from '../components/AppShell'
 
 const routes: Record<string, () => React.JSX.Element> = {
   '/': Dashboard,
-  '/signals': SignalsPage,
   '/market': MarketPage,
-  '/smc': SMCPage,
+  '/market/sessions': MarketPage,
+  '/replay': ReplaySessionsPage,
+  '/smc': SMCEnginePage,
   '/liquidity': LiquidityPage,
-  '/institutional-flow': InstitutionalFlowPage,
   '/volume-profile': VolumeProfilePage,
-  '/economic-calendar': EconomicCalendarPage,
+  '/institutional-flow': InstitutionalFlowPage,
+  '/market-regime': MarketRegimePage,
+  '/economic-calendar': EconomicCalendarEnginePage,
   '/ai-analysis': AIAnalysisPage,
-  '/engine-status': EngineStatusPage,
+  '/signals': CurrentSignalsPage,
+  '/signals/rejected': RejectedSignalsPage,
+  '/signals/history': SignalHistoryPage,
+  '/signals/decision-tree': SignalDecisionTreePage,
+  '/pipeline': PipelinePage,
+  '/performance': PerformancePage,
   '/logs': LogsPage,
+  '/diagnostics': DiagnosticsPage,
+  '/engine-status': EngineStatusPage,
   '/configuration': ConfigurationPage,
 }
 

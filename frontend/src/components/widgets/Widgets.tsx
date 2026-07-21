@@ -3,6 +3,13 @@
  * npm install. Used throughout the dashboard to replace raw text ("Confidence: 74%") with
  * professional visual widgets (a gauge needle, a trend line, a radar shape).
  */
+import { useAnimatedNumber } from '../../hooks/useAnimatedNumber'
+
+/** Plain animated number readout — ticks toward a new value instead of snapping. */
+export function AnimatedCounter({ value, suffix = '', decimals = 0 }: { value: number | null; suffix?: string; decimals?: number }) {
+  const animated = useAnimatedNumber(value)
+  return <span className="animated-counter">{animated === null ? '—' : `${animated.toFixed(decimals)}${suffix}`}</span>
+}
 
 function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
   const rad = ((angleDeg - 180) * Math.PI) / 180
@@ -27,16 +34,17 @@ export function Gauge({ value, label, max = 100, invert = false }: { value: numb
   const cx = 60
   const cy = 58
   const r = 46
-  const fraction = value === null ? 0 : Math.max(0, Math.min(1, value / max))
+  const animated = useAnimatedNumber(value)
+  const fraction = animated === null ? 0 : Math.max(0, Math.min(1, animated / max))
   const displayFraction = invert ? 1 - fraction : fraction
   const zone = GAUGE_ZONES.find((z) => displayFraction <= z.upTo) ?? GAUGE_ZONES[GAUGE_ZONES.length - 1]
   return (
     <div className="gauge">
       <svg width={120} height={70} viewBox="0 0 120 70">
         <path d={arcPath(cx, cy, r, 0, 180)} fill="none" stroke="#20252c" strokeWidth={10} strokeLinecap="round" />
-        {value !== null && <path d={arcPath(cx, cy, r, 0, fraction * 180)} fill="none" stroke={zone.color} strokeWidth={10} strokeLinecap="round" />}
+        {animated !== null && <path d={arcPath(cx, cy, r, 0, fraction * 180)} fill="none" stroke={zone.color} strokeWidth={10} strokeLinecap="round" style={{ transition: 'stroke .4s ease' }} />}
       </svg>
-      <b className="gauge__value">{value === null ? '—' : `${Math.round(value)}${max === 100 ? '%' : ''}`}</b>
+      <b className="gauge__value">{animated === null ? '—' : `${Math.round(animated)}${max === 100 ? '%' : ''}`}</b>
       <span className="gauge__label">{label}</span>
     </div>
   )
@@ -46,7 +54,8 @@ export function Gauge({ value, label, max = 100, invert = false }: { value: numb
 export function RadialProgress({ value, label, size = 92 }: { value: number | null; label: string; size?: number }) {
   const r = size / 2 - 8
   const circumference = 2 * Math.PI * r
-  const pct = value === null ? 0 : Math.max(0, Math.min(1, value / 100))
+  const animated = useAnimatedNumber(value)
+  const pct = animated === null ? 0 : Math.max(0, Math.min(1, animated / 100))
   const offset = circumference * (1 - pct)
   return (
     <div className="radial-progress">
@@ -65,7 +74,7 @@ export function RadialProgress({ value, label, size = 92 }: { value: number | nu
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
           style={{ transition: 'stroke-dashoffset .6s ease' }}
         />
-        <text x="50%" y="48%" textAnchor="middle" dominantBaseline="central" className="radial-progress__value">{value === null ? '—' : `${Math.round(value)}%`}</text>
+        <text x="50%" y="48%" textAnchor="middle" dominantBaseline="central" className="radial-progress__value">{animated === null ? '—' : `${Math.round(animated)}%`}</text>
       </svg>
       <span className="radial-progress__label">{label}</span>
     </div>

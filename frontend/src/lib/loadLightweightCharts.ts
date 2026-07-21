@@ -27,6 +27,7 @@ export interface LWSeriesApi {
 export interface LWTimeScale {
   fitContent(): void
   subscribeVisibleLogicalRangeChange(callback: (range: unknown) => void): void
+  setVisibleRange(range: { from: number; to: number }): void
 }
 
 export interface LWPriceScaleApi {

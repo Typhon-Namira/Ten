@@ -7,7 +7,7 @@ than a 500 — the chart must always render whatever data IS available.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -105,6 +105,37 @@ def _liquidity_sweeps(liquidity: Any) -> list[dict[str, Any]]:
     return [{"id": str(item.id), "kind": type(item).__name__, "time": _epoch(item.occurred_at), "price": item.price, "side": item.side.value} for item in liquidity.sweeps]
 
 
+def _equal_levels(liquidity: Any) -> list[dict[str, Any]]:
+    if liquidity is None:
+        return []
+    return [
+        {"id": str(item.id), "side": item.side.value, "price": item.price, "time": _epoch(item.available_at), "member_count": len(item.member_prices)}
+        for item in liquidity.equal_levels
+        if item.lifecycle_state.value not in {"invalidated", "archived", "expired"}
+    ]
+
+
+def _economic_events(events: Any) -> list[dict[str, Any]]:
+    if not events:
+        return []
+    return [
+        {"id": str(item.event_id), "name": item.display_name, "importance": item.importance.value, "time": _epoch(item.scheduled_at_utc)}
+        for item in events
+        if item.scheduled_at_utc is not None
+    ]
+
+
+def _decision_annotation(decision: Any) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    return {
+        "direction": decision.direction.value,
+        "state": decision.state.value,
+        "confidence": decision.confidence_score,
+        "time": _epoch(decision.as_of),
+    }
+
+
 def _sessions(liquidity: Any) -> list[dict[str, Any]]:
     if liquidity is None:
         return []
@@ -145,6 +176,10 @@ async def overlays(request: Request, instrument: str | None = None, timeframe: s
     smc, errors["smc"] = await safe_call(lambda: app.state.smc_service.state(symbol, tf))
     liquidity, errors["liquidity"] = await safe_call(lambda: app.state.liquidity_service.state(symbol, tf))
     volume_profile, errors["volume_profile"] = await safe_call(lambda: app.state.volume_profile_service.state(symbol, tf))
+    economic_events, errors["economic_calendar"] = await safe_call(
+        lambda: app.state.economic_calendar_service.events(now - timedelta(days=2), now + timedelta(days=5), now, 100)
+    )
+    decisions, errors["signal_decision"] = await safe_call(lambda: app.state.signal_decision_service.repository.find_recent_decisions(symbol, resolved_timeframe, now, 1))
 
     return {
         "instrument": symbol,
@@ -156,7 +191,10 @@ async def overlays(request: Request, instrument: str | None = None, timeframe: s
         "dealing_range": _dealing_range(smc),
         "liquidity_pools": _liquidity_pools(liquidity),
         "liquidity_sweeps": _liquidity_sweeps(liquidity),
+        "equal_levels": _equal_levels(liquidity),
         "sessions": _sessions(liquidity),
         "volume_profile": _volume_profile(volume_profile),
+        "economic_events": _economic_events(economic_events),
+        "decision": _decision_annotation(decisions[0] if decisions else None),
         "source_errors": {key: value for key, value in errors.items() if value is not None},
     }

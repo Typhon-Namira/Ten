@@ -158,8 +158,13 @@ def test_chart_overlays_endpoint_returns_candles_and_engine_overlays() -> None:
         response = client.get("/api/v1/chart/overlays")
     assert response.status_code == 200
     body = response.json()
-    assert set(body) >= {"instrument", "timeframe", "candles", "structure_events", "zones", "dealing_range", "liquidity_pools", "liquidity_sweeps", "sessions", "volume_profile", "source_errors"}
+    assert set(body) >= {
+        "instrument", "timeframe", "candles", "structure_events", "zones", "dealing_range", "liquidity_pools",
+        "liquidity_sweeps", "equal_levels", "sessions", "volume_profile", "economic_events", "decision", "source_errors",
+    }
     assert isinstance(body["candles"], list)
+    assert isinstance(body["equal_levels"], list)
+    assert isinstance(body["economic_events"], list)
 
 
 def test_signal_endpoints_start_empty() -> None:

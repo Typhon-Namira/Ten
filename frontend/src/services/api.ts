@@ -23,6 +23,19 @@ function scoped(instrument: string, timeframe: string): string {
   return `instrument=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}`
 }
 
+/** Never throws — resolves to `null` on any failure. Used by the generic engine-detail pages,
+ * which fetch several loosely-typed endpoints in parallel and must not let one failing source
+ * blank out the others. */
+export async function fetchSafe<T>(path: string): Promise<T | null> {
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`)
+    if (!response.ok) return null
+    return (await response.json()) as T
+  } catch {
+    return null
+  }
+}
+
 export const tenApi = {
   selection: () => request<ActiveSelection>('/api/v1/system/selection'),
   // `/signals` (backend.app.engines.signal_engine) is a disconnected legacy repository that

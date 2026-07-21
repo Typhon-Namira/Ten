@@ -10,6 +10,7 @@ import { PublicationDistancePanel } from '../components/PublicationDistancePanel
 import { RejectionReasonPanel } from '../components/RejectionReasonPanel'
 import { SignalTable } from '../components/SignalTable'
 import { Sparkline } from '../components/widgets/Widgets'
+import { ChartFocusProvider } from '../lib/ChartFocusContext'
 import { useActiveSelection } from '../hooks/useActiveSelection'
 import { useAiScoreHistory } from '../hooks/useAiScoreHistory'
 import { useChartOverlays } from '../hooks/useChartOverlays'
@@ -57,7 +58,7 @@ export function Dashboard() {
           ? latestDecision.blockers.map((item) => item.reason_code).join(', ') || 'Completed without a publishable live scenario'
           : pipelineHealthy ? 'Pipeline healthy; no live scenario is currently published' : 'Pipeline has not completed a persisted snapshot'
 
-  return <div className="page">
+  return <ChartFocusProvider><div className="page">
     <header>
       <div><p className="eyebrow">INSTITUTIONAL ANALYSIS WORKSPACE</p><h1>Gold intelligence <em>without the noise.</em></h1></div>
       <div className="header-actions">
@@ -102,5 +103,5 @@ export function Dashboard() {
         <section className="panel" id="logs"><div className="panel__head"><div><p className="eyebrow">LIVE LOGS</p><h2>Pipeline event stream</h2></div><span>{events.length} events</span></div><LiveLogPanel status={streamStatus} events={events} /></section>
       </div>
     </div>
-  </div>
+  </div></ChartFocusProvider>
 }

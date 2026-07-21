@@ -365,6 +365,28 @@ export interface ChartVolumeProfile {
   end_time: number
 }
 
+export interface ChartEqualLevel {
+  id: string
+  side: string
+  price: number
+  time: number
+  member_count: number
+}
+
+export interface ChartEconomicEvent {
+  id: string
+  name: string
+  importance: string
+  time: number
+}
+
+export interface ChartDecisionAnnotation {
+  direction: string
+  state: string
+  confidence: number
+  time: number
+}
+
 export interface ChartOverlays {
   instrument: string
   timeframe: string
@@ -375,8 +397,11 @@ export interface ChartOverlays {
   dealing_range: ChartDealingRange | null
   liquidity_pools: ChartLiquidityPool[]
   liquidity_sweeps: ChartLiquiditySweep[]
+  equal_levels: ChartEqualLevel[]
   sessions: ChartSession[]
   volume_profile: ChartVolumeProfile | null
+  economic_events: ChartEconomicEvent[]
+  decision: ChartDecisionAnnotation | null
   source_errors: Record<string, string>
 }
 

@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import { useChartOverlays } from '../hooks/useChartOverlays'
 import { loadLightweightCharts, type LWChartApi, type LWPriceLine, type LWSeriesApi } from '../lib/loadLightweightCharts'
+import { useChartFocus } from '../lib/ChartFocusContext'
 import type { ChartCandle } from '../types'
 
 const TIMEFRAMES = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1']
 
-type OverlayKey = 'structure' | 'zones' | 'liquidity' | 'volumeProfile'
+type OverlayKey = 'structure' | 'zones' | 'liquidity' | 'volumeProfile' | 'events'
 
 const OVERLAY_TOGGLES: { key: OverlayKey; label: string }[] = [
   { key: 'structure', label: 'Structure (BOS/CHOCH)' },
   { key: 'zones', label: 'Zones (OB/FVG)' },
   { key: 'liquidity', label: 'Liquidity' },
   { key: 'volumeProfile', label: 'POC/VAH/VAL' },
+  { key: 'events', label: 'Economic events' },
 ]
 
 const number = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -39,7 +41,8 @@ export function ChartWorkspace({ instrument, defaultTimeframe }: { instrument: s
   const [ready, setReady] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [crosshair, setCrosshair] = useState<ChartCandle | null>(null)
-  const [overlays, setOverlays] = useState<Record<OverlayKey, boolean>>({ structure: true, zones: true, liquidity: true, volumeProfile: true })
+  const [overlays, setOverlays] = useState<Record<OverlayKey, boolean>>({ structure: true, zones: true, liquidity: true, volumeProfile: true, events: true })
+  const { focusTime } = useChartFocus()
 
   useEffect(() => {
     let disposed = false
@@ -114,6 +117,10 @@ export function ChartWorkspace({ instrument, defaultTimeframe }: { instrument: s
         const color = pool.side === 'buy_side' ? '#59b993' : '#c26965'
         priceLinesRef.current.push(series.createPriceLine({ price: (pool.upper + pool.lower) / 2, color, lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: `liquidity ${pool.side.replace('_side', '')}` }))
       }
+      for (const level of data.equal_levels) {
+        const color = level.side === 'buy_side' ? '#59b993' : '#c26965'
+        priceLinesRef.current.push(series.createPriceLine({ price: level.price, color, lineWidth: 1, lineStyle: 4, axisLabelVisible: true, title: `EQ${level.side === 'buy_side' ? 'H' : 'L'} ×${level.member_count}` }))
+      }
     }
     if (overlays.structure && data.dealing_range) {
       const dr = data.dealing_range
@@ -139,9 +146,29 @@ export function ChartWorkspace({ instrument, defaultTimeframe }: { instrument: s
         markers.push({ time: sweep.time, position: 'inBar', color: '#c4a359', shape: 'circle', text: sweep.kind.replace('Liquidity', '') })
       }
     }
+    if (overlays.events) {
+      for (const event of data.economic_events) {
+        const highImpact = event.importance === 'high' || event.importance === 'critical'
+        markers.push({ time: event.time, position: 'aboveBar', color: highImpact ? '#c26965' : '#8a929b', shape: 'square', text: `📅 ${event.name}` })
+      }
+    }
+    // A log entry (or any cross-linked object) that called `useChartFocus().focus(time)` gets a
+    // distinct highlight marker merged in here, on top of whatever overlays are already showing —
+    // "click a log line, see it on the chart" without a full object-selection subsystem.
+    if (focusTime !== null) {
+      markers.push({ time: focusTime, position: 'inBar', color: '#f0dfb1', shape: 'arrowDown', text: '◆ focused', size: 2 })
+    }
     markers.sort((a, b) => (a as { time: number }).time - (b as { time: number }).time)
     series.setMarkers(markers)
-  }, [data, ready, overlays])
+  }, [data, ready, overlays, focusTime])
+
+  // Cross-link: when something elsewhere on the page focuses a timestamp, recenter the visible
+  // range on it instead of requiring the user to manually scroll/zoom to find it.
+  useEffect(() => {
+    if (focusTime === null || !ready || !chartRef.current) return
+    const span = 60 * 30 // 30 candle-minutes of padding on each side, timeframe-agnostic enough for a visual nudge
+    chartRef.current.timeScale().setVisibleRange({ from: focusTime - span, to: focusTime + span })
+  }, [focusTime, ready])
 
   const latest = data?.candles.at(-1) ?? null
   const displayed = crosshair ?? latest
@@ -174,6 +201,11 @@ export function ChartWorkspace({ instrument, defaultTimeframe }: { instrument: s
             <span className={displayed.close >= displayed.open ? 'chart-ohlc__up' : 'chart-ohlc__down'}>C <b>{number.format(displayed.close)}</b></span>
           </>
         ) : <span>Loading candles…</span>}
+        {data?.decision && (
+          <span className={`chart-ohlc__decision chart-ohlc__decision--${data.decision.direction === 'bullish' ? 'up' : data.decision.direction === 'bearish' ? 'down' : 'neutral'}`}>
+            AI: {data.decision.direction} · {data.decision.state.replaceAll('_', ' ')} · {data.decision.confidence.toFixed(0)}% confidence
+          </span>
+        )}
       </div>
       <div className="chart-canvas" ref={containerRef}>
         {loadError && <div className="chart-canvas__message">Chart library unavailable ({loadError}) — the CDN may be unreachable.</div>}
