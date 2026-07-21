@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,6 +155,61 @@ async def test_all_provider_payloads_normalize(monkeypatch: pytest.MonkeyPatch) 
     await alpha.close()
     await fmp.close()
     await oanda.close()
+
+
+@pytest.mark.asyncio
+async def test_fmp_provider_uses_stable_endpoint_with_symbol_as_query_param() -> None:
+    """Regression test: FMP's stable API moved `symbol` out of the URL path and into a query
+    parameter — the legacy `/api/v3/historical-chart/{interval}/{symbol}` path 403s on the
+    current API. The interval stays in the path; symbol must be a query param."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["symbol"] = request.url.params["symbol"]
+        seen["apikey"] = request.url.params["apikey"]
+        return httpx.Response(200, json=[])
+
+    provider = FinancialModelingPrepProvider(api_key="secret", base_url="https://financialmodelingprep.com/stable")
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await provider.fetch_history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.H1, limit=2))
+    assert seen["path"] == "/stable/historical-chart/1hour"
+    assert seen["symbol"] == "XAUUSD"
+    assert seen["apikey"] == "secret"
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fmp_provider_logs_authentication_failures_clearly(caplog: pytest.LogCaptureFixture) -> None:
+    """Regression test for FMP's retired-endpoint 403: "Legacy Endpoint... only available for
+    legacy users who have valid subscriptions prior August 31, 2025." Must raise (never silently
+    swallow) and must log the endpoint, status code, and FMP's own message."""
+    message = "Legacy Endpoint: Due to Legacy endpoints being no longer supported."
+    provider = FinancialModelingPrepProvider(api_key="bad-key", base_url="https://financialmodelingprep.com/stable")
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(403, text=message)))
+    # `caplog.at_level(logger=...)` only relies on propagation reaching pytest's handler on the
+    # root logger — `configure_logging()`'s `logging.basicConfig(force=True)` (triggered by any
+    # earlier test that builds the app) strips that handler permanently for the rest of the
+    # session, and `tests/database/test_alembic_migrations.py` triggers Alembic's `fileConfig()`,
+    # which disables every logger that already existed at that point — so attach directly to this
+    # logger AND force it enabled, instead of trusting ambient process-wide logging state.
+    target_logger = logging.getLogger("backend.app.engines.market_data_engine.adapters")
+    target_logger.addHandler(caplog.handler)
+    original_level, original_disabled = target_logger.level, target_logger.disabled
+    target_logger.setLevel(logging.ERROR)
+    target_logger.disabled = False
+    try:
+        with pytest.raises(ProviderResponseError):
+            await provider.fetch_history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.H1, limit=2))
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(original_level)
+        target_logger.disabled = original_disabled
+    logged = next(record.message for record in caplog.records if "authentication failed" in record.message)
+    assert "/historical-chart/1hour" in logged
+    assert "403" in logged
+    assert message in logged
+    await provider.close()
 
 
 @pytest.mark.asyncio

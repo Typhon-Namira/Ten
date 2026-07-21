@@ -17,7 +17,9 @@ providers:
     requests_per_minute: 30
     circuit_failure_threshold: 5
     api_key_env: TEN_FMP_API_KEY
-    base_url: https://financialmodelingprep.com/api/v3
+    # FMP retired /api/v3 for post-2025-08-31 accounts (403 "Legacy Endpoint"); /stable is the
+    # current, supported base URL.
+    base_url: https://financialmodelingprep.com/stable
   # Optional fallback only — queried alongside FMP every sync so calendar data still arrives if
   # FMP is down; never the primary source. Degrades to disabled automatically if TEN_FINNHUB_API_KEY
   # is unset.

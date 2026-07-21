@@ -1,6 +1,7 @@
 """HTTP provider adapters. Provider-specific formats terminate in this module."""
 
 import asyncio
+import logging
 import os
 from abc import abstractmethod
 from datetime import UTC, datetime
@@ -20,6 +21,8 @@ from .providers import (
 )
 from .symbols import provider_symbol
 
+logger = logging.getLogger(__name__)
+
 
 def _parse_retry_after(headers: httpx.Headers) -> float | None:
     value = headers.get("retry-after")
@@ -29,6 +32,18 @@ def _parse_retry_after(headers: httpx.Headers) -> float | None:
         return max(0.0, float(value))
     except ValueError:
         return None
+
+
+def _http_error_detail(error: ProviderResponseError) -> tuple[int | None, str]:
+    """Best-effort status code + message extraction from a `ProviderResponseError` — `_get()`
+    chains the original `httpx` exception via `__cause__`, so this recovers the real HTTP status
+    and response body instead of only the generic "request failed" wrapper message."""
+    if isinstance(error, ProviderRateLimitedError):
+        return 429, str(error)
+    cause = error.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        return cause.response.status_code, cause.response.text[:300]
+    return None, str(cause) if cause else str(error)
 
 
 class HttpMarketDataProvider(MarketDataProvider):
@@ -272,16 +287,28 @@ class FinancialModelingPrepProvider(HttpMarketDataProvider):
     }
 
     async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        # FMP's stable API moved the symbol out of the path and into a query parameter (the
+        # legacy /api/v3 endpoint took it as a path segment) — interval stays in the path, e.g.
+        # /stable/historical-chart/1hour?symbol=XAUUSD.
         interval = self._intervals[request.timeframe]
-        path = f"/historical-chart/{interval}/{provider_symbol(self.provider_name.value, request.symbol)}"
-        data = await self._get(
-            path,
-            params={
-                "from": request.start.date().isoformat() if request.start else None,
-                "to": request.end.date().isoformat() if request.end else None,
-                "apikey": self.api_key,
-            },
-        )
+        path = f"/historical-chart/{interval}"
+        try:
+            data = await self._get(
+                path,
+                params={
+                    "symbol": provider_symbol(self.provider_name.value, request.symbol),
+                    "from": request.start.date().isoformat() if request.start else None,
+                    "to": request.end.date().isoformat() if request.end else None,
+                    "apikey": self.api_key,
+                },
+            )
+        except ProviderResponseError as exc:
+            status_code, message = _http_error_detail(exc)
+            if status_code in (401, 403):
+                logger.error("Financial Modeling Prep authentication failed: endpoint=%s status=%s message=%s", path, status_code, message)
+            else:
+                logger.warning("Financial Modeling Prep request failed: endpoint=%s status=%s message=%s", path, status_code, message)
+            raise
         if not isinstance(data, list):
             raise ProviderResponseError("Financial Modeling Prep response must be a list")
         candles = [

@@ -7,6 +7,7 @@ network call and never require a real API key.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -29,6 +30,71 @@ def _request() -> ProviderFetchRequest:
 def _mounted(provider: FinancialModelingPrepProvider | FinnhubEconomicCalendarProvider, handler) -> None:
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider.retry_backoff_seconds = 0  # keep retry-path tests fast/deterministic
+
+
+def test_fmp_provider_defaults_to_the_stable_api_base_url() -> None:
+    """Regression test: FMP retired `/api/v3` for accounts authorized after 2025-08-31 — it now
+    returns 403 "Legacy Endpoint" for every request. The default base URL must be `/stable`."""
+    provider = FinancialModelingPrepProvider(api_key="secret")
+    assert provider.base_url == "https://financialmodelingprep.com/stable"
+
+
+@pytest.mark.asyncio
+async def test_fmp_provider_calls_the_stable_economics_calendar_endpoint() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["apikey"] = request.url.params["apikey"]
+        return httpx.Response(200, json=[])
+
+    provider = FinancialModelingPrepProvider(api_key="secret")
+    _mounted(provider, handler)
+    await provider.fetch_events(_request())
+    assert seen["path"] == "/stable/economics-calendar"
+    assert seen["apikey"] == "secret"
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fmp_provider_logs_legacy_endpoint_403_clearly(caplog: pytest.LogCaptureFixture) -> None:
+    """Regression test for the exact failure FMP returns on the retired /api/v3 base URL — a 403
+    with a "Legacy Endpoint" body. Must be reported as an authentication failure (not a generic
+    "unavailable"), and must be logged with the endpoint, status code, and FMP's own message —
+    never silently swallowed."""
+    message = "Legacy Endpoint: Due to Legacy endpoints being no longer supported - This endpoint is only available for legacy users who have valid subscriptions prior August 31, 2025."
+    provider = FinancialModelingPrepProvider(api_key="secret")
+    _mounted(provider, lambda request: httpx.Response(403, text=message))
+    # `caplog.at_level(logger=...)` only relies on propagation reaching pytest's handler on the
+    # root logger — `configure_logging()`'s `logging.basicConfig(force=True)` (triggered by any
+    # earlier test that builds the app) strips that handler permanently for the rest of the
+    # session, and `tests/database/test_alembic_migrations.py` triggers Alembic's `fileConfig()`,
+    # which disables every logger that already existed at that point — so attach directly to this
+    # logger AND force it enabled, instead of trusting ambient process-wide logging state.
+    target_logger = logging.getLogger("backend.app.engines.economic_calendar_engine.providers")
+    target_logger.addHandler(caplog.handler)
+    original_level, original_disabled = target_logger.level, target_logger.disabled
+    target_logger.setLevel(logging.ERROR)
+    target_logger.disabled = False
+    try:
+        result = await provider.fetch_events(_request())
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(original_level)
+        target_logger.disabled = original_disabled
+    assert result.observations == ()
+
+    status = await provider.health()
+    assert status.connection_state == ConnectionState.UNAUTHORIZED
+    assert status.http_status == 403
+    assert status.authenticated is False
+
+    assert any(record.levelname == "ERROR" and "authentication failed" in record.message for record in caplog.records)
+    logged = next(record.message for record in caplog.records if "authentication failed" in record.message)
+    assert "financial_modeling_prep" in logged
+    assert "/economics-calendar" in logged
+    assert "403" in logged
+    await provider.close()
 
 
 @pytest.mark.asyncio

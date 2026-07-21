@@ -24,7 +24,9 @@ providers:
     api_key_env: TEN_ALPHA_VANTAGE_API_KEY
     priority: 30
   - name: financial_modeling_prep
-    base_url: https://financialmodelingprep.com/api/v3
+    # FMP retired /api/v3 for post-2025-08-31 accounts (403 "Legacy Endpoint"); /stable is the
+    # current, supported base URL.
+    base_url: https://financialmodelingprep.com/stable
     api_key_env: TEN_FMP_API_KEY
     priority: 40
 cache:

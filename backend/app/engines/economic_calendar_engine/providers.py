@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
@@ -15,6 +16,8 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import ConnectionState, ProviderCapabilities, ProviderEventObservation, ProviderMode, ProviderStatus, payload_hash, stable_id
+
+logger = logging.getLogger(__name__)
 
 
 def provider_api_key(environment_name: str) -> str:
@@ -312,12 +315,17 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
                 if response.status_code in (401, 403):
                     self._connection_state, self._failure_reason = ConnectionState.UNAUTHORIZED, f"HTTP {response.status_code}: authentication failed"
                     self._raw_error, self._last_failure, self._retry_count = _sanitized_body(response), now, attempt
+                    # Never silently fail an auth error — log provider, endpoint (no query string,
+                    # so the API key is never written to logs), status code, and the provider's own
+                    # error message so this is diagnosable from logs alone.
+                    logger.error("economic_calendar provider authentication failed: provider=%s endpoint=%s status=%s message=%s", self.name, path, response.status_code, self._raw_error)
                     return None
                 if response.status_code == 429:
                     self._connection_state, self._failure_reason = ConnectionState.RATE_LIMITED, "HTTP 429: rate limited"
                     retry_after = response.headers.get("retry-after", "")
                     self._backoff_until = now + timedelta(seconds=float(retry_after)) if retry_after.isdigit() else now + timedelta(seconds=60)
                     self._raw_error, self._last_failure, self._retry_count = _sanitized_body(response), now, attempt
+                    logger.warning("economic_calendar provider rate limited: provider=%s endpoint=%s status=%s backoff_until=%s", self.name, path, response.status_code, self._backoff_until)
                     return None
                 if response.status_code >= 400:
                     retryable = response.status_code >= 500
@@ -328,6 +336,7 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
                         await asyncio.sleep(self.retry_backoff_seconds * attempt)
                         continue
                     self._last_failure, self._retry_count = now, attempt
+                    logger.warning("economic_calendar provider request failed: provider=%s endpoint=%s status=%s message=%s", self.name, path, response.status_code, self._raw_error)
                     return None
                 self._connection_state, self._failure_reason, self._raw_error, self._backoff_until = ConnectionState.CONNECTED, None, None, None
                 self._last_success, self._retry_count = now, attempt
@@ -337,6 +346,7 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
                 await asyncio.sleep(self.retry_backoff_seconds * attempt)
         self.last_latency_ms = (perf_counter() - started) * 1000
         self._raw_error = f"{type(last_exception).__name__}: {last_exception}"[:300] if last_exception else self._failure_reason
+        logger.warning("economic_calendar provider unreachable: provider=%s endpoint=%s connection_state=%s message=%s", self.name, path, self._connection_state.value, self._raw_error)
         self._last_failure, self._retry_count = now, attempt
         return None
 
@@ -369,17 +379,22 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
 
 
 class FinancialModelingPrepProvider(HttpEconomicCalendarProvider):
-    """Live adapter for Financial Modeling Prep's `/api/v3/economic_calendar` endpoint — TEN's
-    primary economic calendar provider."""
+    """Live adapter for Financial Modeling Prep's stable `/stable/economics-calendar` endpoint —
+    TEN's primary economic calendar provider.
+
+    FMP retired its legacy `/api/v3/*` endpoints for accounts created/authorized after 2025-08-31
+    (they now return `403 Forbidden` with a "Legacy Endpoint" error body) — every request here
+    must go through the `/stable` base URL instead."""
 
     def __init__(
-        self, *, api_key: str, base_url: str = "https://financialmodelingprep.com/api/v3", timeout_seconds: float = 10, version: str = "1", max_retries: int = 2, retry_backoff_seconds: float = 0.5
+        self, *, api_key: str, base_url: str = "https://financialmodelingprep.com/stable", timeout_seconds: float = 10, version: str = "1", max_retries: int = 2, retry_backoff_seconds: float = 0.5
     ) -> None:
         super().__init__("financial_modeling_prep", api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds, version=version, max_retries=max_retries, retry_backoff_seconds=retry_backoff_seconds)
 
     async def fetch_events(self, request: ProviderFetchRequest) -> ProviderFetchResult:
         now = datetime.now(UTC)
-        response = await self._get("/economic_calendar", {"from": request.start.date().isoformat(), "to": request.end.date().isoformat(), "apikey": self.api_key})
+        endpoint = "/economics-calendar"
+        response = await self._get(endpoint, {"from": request.start.date().isoformat(), "to": request.end.date().isoformat(), "apikey": self.api_key})
         if response is None:
             return ProviderFetchResult(observations=(), warnings=(f"fmp_request_failed:{self._connection_state.value}",))
         try:
@@ -388,12 +403,14 @@ class FinancialModelingPrepProvider(HttpEconomicCalendarProvider):
             self._connection_state, self._failure_reason = ConnectionState.UNREACHABLE, "response was not valid JSON"
             return ProviderFetchResult(observations=(), warnings=("fmp_unexpected_response_shape",))
         if isinstance(payload, dict) and ("Error Message" in payload or "error" in payload):
-            # FMP returns HTTP 200 with an error body for some invalid-key/invalid-plan cases —
-            # a real authentication/authorization failure, not "zero events today".
+            # FMP returns HTTP 200 with an error body for some invalid-key/invalid-plan/legacy-
+            # endpoint cases — a real authentication/authorization failure, not "zero events
+            # today". Treated identically to a 401/403: logged loudly, never silently swallowed.
             self._connection_state = ConnectionState.UNAUTHORIZED
             self._failure_reason = str(payload.get("Error Message") or payload.get("error"))[:300]
             self._raw_error = self._failure_reason
             self._last_failure = now
+            logger.error("economic_calendar provider authentication failed: provider=%s endpoint=%s status=%s message=%s", self.name, endpoint, response.status_code, self._failure_reason)
             return ProviderFetchResult(observations=(), warnings=("fmp_error_response",))
         if not isinstance(payload, list):
             self._connection_state, self._failure_reason = ConnectionState.UNREACHABLE, "unexpected response shape"
@@ -496,8 +513,8 @@ _LIVE_PROVIDER_DEFAULT_KEY_ENV = {
     "finnhub": "TEN_FINNHUB_API_KEY",
 }
 _LIVE_PROVIDER_DEFAULT_BASE_URL = {
-    "financial_modeling_prep": "https://financialmodelingprep.com/api/v3",
-    "fmp": "https://financialmodelingprep.com/api/v3",
+    "financial_modeling_prep": "https://financialmodelingprep.com/stable",
+    "fmp": "https://financialmodelingprep.com/stable",
     "finnhub": "https://finnhub.io/api/v1",
 }
 
