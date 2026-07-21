@@ -4,12 +4,29 @@ versions:
   schema_version: "1.0"
   normalization_version: "1.0.0"
 providers:
-  - name: finnhub
+  # Primary production provider. Requires TEN_FMP_API_KEY; if unset, this entry degrades to a
+  # disabled provider automatically (build_providers) rather than failing startup.
+  - name: fmp
     mode: live_provider
     enabled: true
     version: "1"
     timezone: UTC
     priority: 10
+    timeout_seconds: 10
+    retry_count: 2
+    requests_per_minute: 30
+    circuit_failure_threshold: 5
+    api_key_env: TEN_FMP_API_KEY
+    base_url: https://financialmodelingprep.com/api/v3
+  # Optional fallback only — queried alongside FMP every sync so calendar data still arrives if
+  # FMP is down; never the primary source. Degrades to disabled automatically if TEN_FINNHUB_API_KEY
+  # is unset.
+  - name: finnhub
+    mode: live_provider
+    enabled: true
+    version: "1"
+    timezone: UTC
+    priority: 20
     timeout_seconds: 10
     retry_count: 2
     requests_per_minute: 30
@@ -26,7 +43,7 @@ providers:
     retry_count: 2
     requests_per_minute: 30
     circuit_failure_threshold: 5
-provider_priority: [finnhub, disabled]
+provider_priority: [fmp, finnhub, disabled]
 windows:
   low: {pre_minutes: 5, imminent_minutes: 2, post_minutes: 5, cooldown_minutes: 5}
   medium: {pre_minutes: 15, imminent_minutes: 5, post_minutes: 15, cooldown_minutes: 15}

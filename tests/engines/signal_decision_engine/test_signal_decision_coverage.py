@@ -92,6 +92,7 @@ async def test_repository_duplicate_context_branches_and_publication_no_event_st
     service.economic_calendar = SimpleNamespace(context=AsyncMock(return_value=SimpleNamespace(
         context_id=uuid4(), risk_window_phase=SimpleNamespace(value="outside"), risk_score=0.1, analysis_timestamp=NOW,
         unavailable_context=(), active_relevant_events=(), next_relevant_event=SimpleNamespace(event_id=uuid4()),
+        context_state=SimpleNamespace(value="outside_risk_window"),
     )))
     service.market_regime = SimpleNamespace(state=AsyncMock(return_value=None))
     assert await service._economic_context("XAUUSD", NOW) is not None

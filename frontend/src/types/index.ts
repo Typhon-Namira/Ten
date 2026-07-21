@@ -232,6 +232,10 @@ export interface MarketIntelligence {
   economic_status: {
     available: boolean
     degraded: boolean
+    /** The canonical categorical state (see lib/economicState.ts `CalendarContextState`) — the
+     * same value signal_decision_engine and the explainability layer read, so this can never
+     * disagree with why a decision was or wasn't blocked. */
+    context_state: string
     risk_window_phase: string | null
     risk_score: number | null
     next_relevant_event: string | null
@@ -242,7 +246,7 @@ export interface MarketIntelligence {
       downloaded_events: { status: 'ok' | 'empty'; count: number }
       mapped_events: { status: 'ok' | 'degraded'; mapped_count: number; unmapped_count: number }
       relevant_events: { status: 'available' | 'none_relevant'; active_count: number; has_previous_event: boolean; has_next_event: boolean }
-      trading_context: { status: 'ready' | 'unavailable'; risk_window_phase: string; risk_score: number; reason: string | null }
+      trading_context: { status: 'ready' | 'unavailable'; context_state: string; risk_window_phase: string; risk_score: number; reason: string | null }
     } | null
   }
   confidence_percent: number | null
@@ -403,6 +407,37 @@ export interface ChartOverlays {
   economic_events: ChartEconomicEvent[]
   decision: ChartDecisionAnnotation | null
   source_errors: Record<string, string>
+}
+
+export interface ProviderStatus {
+  provider_name: string
+  provider_version: string
+  base_url: string | null
+  mode: string
+  enabled: boolean
+  api_key_configured: boolean
+  authenticated: boolean
+  reachable: boolean
+  stale: boolean
+  rate_limited: boolean
+  connection_state: string
+  failure_reason: string | null
+  http_status: number | null
+  last_request: string | null
+  last_success: string | null
+  last_failure: string | null
+  last_cursor: string | null
+  response_time_ms: number | null
+  retry_count: number
+  backoff_until: string | null
+  rate_limit_remaining: number | null
+  rate_limit_limit: number | null
+  daily_quota_used: number | null
+  daily_quota_limit: number | null
+  monthly_quota_used: number | null
+  monthly_quota_limit: number | null
+  raw_error: string | null
+  message: string
 }
 
 export interface EngineInfluence {

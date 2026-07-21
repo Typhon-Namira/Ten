@@ -3,7 +3,10 @@ import { useEffect, useState } from 'react'
 import { useActiveSelection } from '../../hooks/useActiveSelection'
 import { fetchSafe } from '../../services/api'
 import { normalizeEngineState } from '../../lib/engineState'
-import { StateBadge } from '../../components/StateBadge'
+import { tradingContextBadge } from '../../lib/economicState'
+import { EconomicStateBadge } from '../../components/EconomicStateBadge'
+import { ProviderHealthPanel } from '../../components/ProviderHealthPanel'
+import type { ProviderStatus } from '../../types'
 import { EngineDetailPage } from './EngineDetailPage'
 
 const POLL_MS = 5_000
@@ -13,24 +16,8 @@ interface StagedDiagnostics {
   downloaded_events: { status: string; count: number }
   mapped_events: { status: string; mapped_count: number; unmapped_count: number }
   relevant_events: { status: string; active_count: number }
-  trading_context: { status: string; reason: string | null }
+  trading_context: { status: string; context_state: string; risk_window_phase: string; reason: string | null }
 }
-
-interface ProviderStatus {
-  provider_name: string
-  mode: string
-  enabled: boolean
-  authenticated: boolean
-  reachable: boolean
-  stale: boolean
-  rate_limited: boolean
-  last_request: string | null
-  last_success: string | null
-  last_failure: string | null
-  message: string
-}
-
-const time = (value: string | null) => (value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'never')
 
 /** Provider -> Download -> Mapping -> Relevance -> Trading context, each independently
  * observable, sourced from `/economic-calendar/diagnostics` (built to answer exactly "why did
@@ -79,7 +66,10 @@ export function EconomicCalendarEnginePage() {
       extra={
         <>
           <section className="panel">
-            <div className="panel__head"><div><p className="eyebrow">STAGED PIPELINE</p><h2>Provider → download → mapping → relevance → trading context</h2></div></div>
+            <div className="panel__head">
+              <div><p className="eyebrow">STAGED PIPELINE</p><h2>Provider → download → mapping → relevance → trading context</h2></div>
+              {stages && <EconomicStateBadge visual={tradingContextBadge(stages.trading_context.context_state, stages.trading_context.risk_window_phase)} detail={stages.trading_context.reason ?? undefined} />}
+            </div>
             <div className="panel-body">
               <div className="stage-flow stage-flow--horizontal">
                 {pipelineStages.map((stage, index) => {
@@ -100,23 +90,8 @@ export function EconomicCalendarEnginePage() {
             </div>
           </section>
           <section className="panel">
-            <div className="panel__head"><div><p className="eyebrow">PROVIDER HEALTH</p><h2>Configured providers</h2></div></div>
-            <table className="source-diagnostics">
-              <thead><tr><th>Provider</th><th>Mode</th><th>State</th><th>Last success</th><th>Last failure</th><th>Message</th></tr></thead>
-              <tbody>
-                {(providers ?? []).map((provider) => (
-                  <tr key={provider.provider_name}>
-                    <td>{provider.provider_name}</td>
-                    <td>{provider.mode}</td>
-                    <td><StateBadge state={!provider.enabled ? 'disabled' : provider.rate_limited ? 'limited' : provider.reachable ? 'healthy' : 'unavailable'} /></td>
-                    <td>{time(provider.last_success)}</td>
-                    <td>{time(provider.last_failure)}</td>
-                    <td>{provider.message || '—'}</td>
-                  </tr>
-                ))}
-                {!providers?.length && <tr><td colSpan={6}>No providers configured.</td></tr>}
-              </tbody>
-            </table>
+            <div className="panel__head"><div><p className="eyebrow">PROVIDER HEALTH</p><h2>Configured providers</h2></div><span>updates every 5s</span></div>
+            <ProviderHealthPanel providers={providers} />
           </section>
         </>
       }

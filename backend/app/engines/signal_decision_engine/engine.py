@@ -116,8 +116,14 @@ class ConservativeSignalDecisionPolicy:
         if not self.config.economic_event.enabled:
             rule("economic_event.window", RuleOutcome.NOT_APPLICABLE, RuleSeverity.INFORMATIONAL, "economic_policy_disabled")
         elif economic is None or economic.degraded:
+            # `degraded` is only ever true for a genuine data-unavailability category (provider
+            # unreachable/timeout/auth-failed/rate-limited, or no calendar data at all) — "no
+            # relevant events" and "outside the risk window" are routine, healthy states that
+            # never reach this branch. The reason code is the specific category, not a generic
+            # "unavailable" label, so explainability/diagnostics can say exactly what failed.
             fail_closed = self.config.economic_event.fail_closed_when_source_unavailable
-            rule("economic_event.window", RuleOutcome.FAILED if fail_closed else RuleOutcome.WARNING, RuleSeverity.HARD_BLOCK if fail_closed else RuleSeverity.SOFT_GATE, "economic_context_unavailable")
+            reason = economic.context_state if economic and economic.context_state else "economic_context_unavailable"
+            rule("economic_event.window", RuleOutcome.FAILED if fail_closed else RuleOutcome.WARNING, RuleSeverity.HARD_BLOCK if fail_closed else RuleSeverity.SOFT_GATE, reason)
         elif economic.phase in self.config.economic_event.hard_phases:
             rule("economic_event.window", RuleOutcome.FAILED, RuleSeverity.HARD_BLOCK, "economic_hard_block_window", economic.phase)
         elif economic.phase in self.config.economic_event.caution_phases:

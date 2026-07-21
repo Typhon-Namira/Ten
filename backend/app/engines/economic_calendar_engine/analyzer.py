@@ -5,7 +5,9 @@ from typing import Any
 
 from .config import EconomicCalendarConfig
 from .models import (
+    CalendarContextState,
     ConflictState,
+    ConnectionState,
     DegradationState,
     EconomicCalendarExplanation,
     EconomicCalendarSnapshot,
@@ -15,6 +17,7 @@ from .models import (
     EventCluster,
     EventImportance,
     FreshnessState,
+    GENUINELY_UNAVAILABLE_STATES,
     InstrumentEventContext,
     ProviderStatus,
     RevisionType,
@@ -22,6 +25,15 @@ from .models import (
     payload_hash,
     stable_id,
 )
+
+_CONNECTION_STATE_TO_CATEGORY = {
+    ConnectionState.UNREACHABLE: CalendarContextState.PROVIDER_UNREACHABLE.value,
+    ConnectionState.TIMEOUT: CalendarContextState.PROVIDER_TIMEOUT.value,
+    ConnectionState.UNAUTHORIZED: CalendarContextState.PROVIDER_AUTH_FAILED.value,
+    ConnectionState.RATE_LIMITED: CalendarContextState.PROVIDER_RATE_LIMITED.value,
+    ConnectionState.DISABLED: CalendarContextState.NO_CALENDAR_DATA.value,
+    ConnectionState.UNKNOWN: CalendarContextState.NO_CALENDAR_DATA.value,
+}
 
 
 def clamp(value: float) -> float:
@@ -147,7 +159,19 @@ def build_snapshot(
     )
     unavailable = tuple(item.provider_name for item in statuses if not item.enabled or not item.reachable)
     quality = sum(item.source_quality * item.normalization_confidence * item.data_completeness for item in visible) / len(visible) if visible else 0
+    # Degraded only if NONE of the configured providers are reachable — a working fallback (e.g.
+    # Finnhub) covering for a failed primary (FMP) must never read as degraded. When it IS
+    # degraded, the category/reason come from the highest-priority *enabled* provider's actual
+    # connection state (`statuses` is already in priority order), so the reported reason matches
+    # what actually failed rather than a generic message.
     degraded = not any(item.enabled and item.reachable for item in statuses)
+    category = "healthy"
+    reasons: tuple[str, ...] = ()
+    if degraded:
+        candidates = [item for item in statuses if item.enabled] or list(statuses)
+        primary = candidates[0] if candidates else None
+        category = _CONNECTION_STATE_TO_CATEGORY.get(primary.connection_state, CalendarContextState.NO_CALENDAR_DATA.value) if primary else CalendarContextState.NO_CALENDAR_DATA.value
+        reasons = (primary.failure_reason if primary and primary.failure_reason else "no reachable production provider",)
     return EconomicCalendarSnapshot(
         snapshot_id=stable_id("snapshot", boundary.isoformat(), start.isoformat(), end.isoformat(), *(item.event_id for item in visible)),
         configuration_version=config.version,
@@ -172,7 +196,8 @@ def build_snapshot(
         provider_status=statuses,
         degradation=DegradationState(
             is_degraded=degraded,
-            reasons=("no reachable production provider",) if degraded else (),
+            category=category,
+            reasons=reasons,
             unavailable_providers=unavailable,
             partial_results=bool(visible) and degraded,
         ),
@@ -273,6 +298,29 @@ def instrument_context(symbol: str, snapshot: EconomicCalendarSnapshot, config: 
         RiskWindowPhase.COOLDOWN: 0.3,
     }.get(phase, 0)
     risk = clamp(0.4 * importance + 0.25 * relevance + 0.2 * timing + 0.15 * cluster_score - 0.1 * conflict)
+    # The single categorical state everything downstream (signal_decision_engine, explainability,
+    # market_intelligence, diagnostics) reads instead of each re-deriving its own notion of
+    # "available." Genuine provider/data unavailability always wins over phase/relevance — a
+    # symbol can't be meaningfully "outside its risk window" if we don't actually know what the
+    # calendar looks like right now.
+    if snapshot.degradation.is_degraded:
+        # `snapshot.degradation.category` is already one of `CalendarContextState`'s genuine-
+        # failure values (set in `build_snapshot`) — "healthy" is the only non-member default,
+        # which only occurs if `is_degraded` and `category` disagree (defensive fallback only).
+        context_state = CalendarContextState(snapshot.degradation.category) if snapshot.degradation.category != "healthy" else CalendarContextState.NO_CALENDAR_DATA
+    elif snapshot.freshness in {FreshnessState.STALE, FreshnessState.CRITICAL, FreshnessState.UNKNOWN}:
+        context_state = CalendarContextState.NO_CALENDAR_DATA
+    elif phase not in {RiskWindowPhase.OUTSIDE, RiskWindowPhase.COOLDOWN, RiskWindowPhase.UNKNOWN}:
+        context_state = CalendarContextState.INSIDE_RISK_WINDOW
+    elif not relevant:
+        context_state = CalendarContextState.NO_RELEVANT_EVENTS
+    else:
+        context_state = CalendarContextState.OUTSIDE_RISK_WINDOW
+    if context_state in GENUINELY_UNAVAILABLE_STATES:
+        unavailable_reason = snapshot.degradation.reasons[0] if snapshot.degradation.reasons else f"calendar data freshness is {snapshot.freshness.value}"
+        unavailable_context: tuple[str, ...] = (unavailable_reason,)
+    else:
+        unavailable_context = ()
     return InstrumentEventContext(
         context_id=stable_id("context", symbol.upper(), snapshot.snapshot_id),
         symbol=symbol.upper(),
@@ -303,18 +351,14 @@ def instrument_context(symbol: str, snapshot: EconomicCalendarSnapshot, config: 
         cooldown_window_minutes=window.cooldown_minutes,
         direct_currency_matches=tuple(sorted(set(currencies) & {code for item in relevant for code in item.currency_codes})),
         conflicting_events=tuple(item.event_id for item in relevant if item.conflict_state != ConflictState.NONE),
-        # "No relevant event right now" is the routine, expected state most of the time (most days
-        # have no high-impact USD news) — it must NOT be conflated with genuine unavailability
-        # (the provider being unreachable, or the calendar sync being stale/never-synced), which is
-        # what fail-closed trading logic (signal_decision_engine's `economic_context_unavailable`
-        # HARD_BLOCK) actually needs to react to. Previously this used `not relevant`, which made
-        # every symbol with no imminent news permanently "unavailable" and blocked nearly every
-        # decision even with a fully healthy, live-syncing provider.
-        unavailable_context=snapshot.degradation.reasons
-        if snapshot.degradation.is_degraded
-        else (f"calendar data freshness is {snapshot.freshness.value}",)
-        if snapshot.freshness in {FreshnessState.STALE, FreshnessState.CRITICAL, FreshnessState.UNKNOWN}
-        else (),
+        # "No relevant event right now" / "outside the risk window" are routine, expected states
+        # most of the time — they must NOT be conflated with genuine unavailability (the provider
+        # being unreachable, or the calendar sync being stale/never-synced), which is what
+        # fail-closed trading logic (signal_decision_engine's economic-event rule) actually needs
+        # to react to. `context_state` (computed above) is the one place this distinction is made;
+        # `unavailable_context` is just its human-readable projection for older/display consumers.
+        context_state=context_state,
+        unavailable_context=unavailable_context,
         primary_explanation=f"Calendar context is {phase.value} with bounded risk score {risk:.3f}; it is probabilistic context, not a trading instruction.",
         limitations=("importance is provider/config context, not guaranteed market impact",),
     )
@@ -356,6 +400,11 @@ def staged_diagnostics(snapshot: EconomicCalendarSnapshot, context: InstrumentEv
         },
         "trading_context": {
             "status": "ready" if not context.unavailable_context else "unavailable",
+            # The exact categorical state (see `CalendarContextState`) — the same value
+            # signal_decision_engine and the explainability layer read, so the dashboard can
+            # distinguish e.g. "outside_risk_window" from "provider_rate_limited" instead of a
+            # collapsed ready/unavailable boolean.
+            "context_state": context.context_state.value,
             "risk_window_phase": context.risk_window_phase.value,
             "risk_score": context.risk_score,
             "reason": context.unavailable_context[0] if context.unavailable_context else None,

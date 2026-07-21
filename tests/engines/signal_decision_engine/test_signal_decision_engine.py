@@ -189,6 +189,29 @@ def test_disabled_or_fail_open_economic_policy_and_degraded_context() -> None:
     assert fail_open.evaluate(value).state == DecisionState.OBSERVE_ONLY
 
 
+def test_economic_reason_category_never_blocks_on_no_news_but_blocks_on_genuine_provider_failure() -> None:
+    """Regression test: `degraded` alone used to be the only signal this rule saw, which made "no
+    relevant events" indistinguishable from "the provider is actually down." `context_state` must
+    carry the specific reason through to the rule's `reason_code`, and routine states
+    (no_relevant_events / outside_risk_window / inside_risk_window) must never set `degraded`."""
+    policy = ConservativeSignalDecisionPolicy()
+
+    for routine_state in ("no_relevant_events", "outside_risk_window"):
+        routine = EconomicRiskReference(context_id=ECONOMIC_ID, phase="outside", risk_score=0, as_of=NOW, degraded=False, context_state=routine_state)
+        value = decision_input().model_copy(update={"economic_risk": routine})
+        decision = policy.evaluate(value)
+        assert decision.state == DecisionState.ELIGIBLE
+        economic_rule = next(item for item in decision.rules if item.rule_id == "economic_event.window")
+        assert economic_rule.outcome.value == "passed"
+
+    for failure_state in ("provider_unreachable", "provider_timeout", "provider_auth_failed", "provider_rate_limited", "no_calendar_data"):
+        failure = EconomicRiskReference(context_id=ECONOMIC_ID, phase="outside", risk_score=0, as_of=NOW, degraded=True, context_state=failure_state)
+        value = decision_input().model_copy(update={"economic_risk": failure})
+        decision = policy.evaluate(value)
+        assert decision.state == DecisionState.BLOCKED
+        assert failure_state in reason_codes(decision)
+
+
 def test_cooldown_reversal_and_hysteresis() -> None:
     policy = ConservativeSignalDecisionPolicy()
     same = history(DecisionDirection.BULLISH, DecisionState.ELIGIBLE)

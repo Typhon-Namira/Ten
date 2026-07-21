@@ -114,6 +114,11 @@ class EconomicRiskReference(DecisionModel):
     risk_score: float = Field(ge=0, le=100)
     as_of: datetime
     degraded: bool = False
+    # The economic_calendar engine's own categorical state (see `CalendarContextState`), e.g.
+    # "provider_unreachable", "no_relevant_events", "outside_risk_window" — mirrored verbatim so
+    # this rule can distinguish a genuine provider failure from "nothing relevant is happening,"
+    # instead of collapsing both into the same `degraded` boolean.
+    context_state: str = "outside_risk_window"
     event_ids: tuple[UUID, ...] = ()
 
     @field_validator("as_of")

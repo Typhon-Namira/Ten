@@ -32,6 +32,7 @@ class EconomicService:
             unavailable_context=(),
             active_relevant_events=(),
             next_relevant_event=None,
+            context_state=SimpleNamespace(value="outside_risk_window"),
         )
 
 

@@ -91,3 +91,9 @@ class EconomicCalendarProviderRecovered(Event):
 
 class EconomicCalendarProviderStale(Event):
     pass
+
+
+class EconomicCalendarProviderRequestCompleted(Event):
+    """One structured log line per provider per sync attempt — provider name, connection state,
+    HTTP status, latency, retry count, and outcome — so live logs show exactly what each provider
+    request did instead of only a pass/fail sync-level summary."""

@@ -5,8 +5,8 @@ import csv
 import json
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import ProviderCapabilities, ProviderEventObservation, ProviderMode, ProviderStatus, payload_hash, stable_id
+from .models import ConnectionState, ProviderCapabilities, ProviderEventObservation, ProviderMode, ProviderStatus, payload_hash, stable_id
 
 
 def provider_api_key(environment_name: str) -> str:
@@ -162,10 +162,13 @@ class InMemoryProvider(EconomicCalendarProvider):
     async def health(self) -> ProviderStatus:
         return ProviderStatus(
             provider_name=self.name,
+            provider_version=self.version,
             mode=self.mode,
             enabled=True,
+            api_key_configured=True,
             authenticated=True,
             reachable=True,
+            connection_state=ConnectionState.CONNECTED,
             last_success=self._last_success,
             capabilities=self.capabilities,
         )
@@ -212,17 +215,48 @@ class DisabledProvider(EconomicCalendarProvider):
     async def health(self) -> ProviderStatus:
         return ProviderStatus(
             provider_name=self.name,
+            provider_version=self.version,
             mode=self.mode,
             enabled=False,
+            connection_state=ConnectionState.DISABLED,
+            failure_reason="provider is disabled",
             message="No live provider is configured; safe degraded mode is active.",
             capabilities=self.capabilities,
         )
 
 
-class HttpEconomicCalendarProvider(EconomicCalendarProvider):
-    """Base for HTTP-backed live providers; concrete subclasses parse the vendor payload."""
+def _sanitized_body(response: httpx.Response, limit: int = 500) -> str:
+    """The raw response body, truncated and stripped of anything that looks like a credential —
+    surfaced to operators/AI explainability as `raw_error`, never logged with the API key."""
+    text = response.text
+    for needle in ("apikey", "api_key", "token", "key"):
+        # Best-effort scrub: FMP/Finnhub echo the query string in some error bodies. This is a
+        # diagnostic aid, not a security boundary — the key itself is never sent in the body.
+        if needle in text.lower():
+            text = "(response body withheld: may echo request parameters)"
+            break
+    return text[:limit]
 
-    def __init__(self, name: str, *, api_key: str, base_url: str, timeout_seconds: float = 10, version: str = "1") -> None:
+
+def _int_header(response: httpx.Response, *names: str) -> int | None:
+    for name in names:
+        value = response.headers.get(name)
+        if value is not None:
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    return None
+
+
+class HttpEconomicCalendarProvider(EconomicCalendarProvider):
+    """Base for HTTP-backed live providers. Owns one shared, retrying GET helper so every live
+    provider reports identical, comparable telemetry (latency, retries, backoff, rate limit,
+    connection state) instead of each adapter tracking its own ad-hoc subset."""
+
+    def __init__(
+        self, name: str, *, api_key: str, base_url: str, timeout_seconds: float = 10, version: str = "1", max_retries: int = 2, retry_backoff_seconds: float = 0.5
+    ) -> None:
         if not api_key:
             raise ValueError(f"{name} economic calendar provider requires an API key")
         self.name = name
@@ -235,55 +269,190 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
         )
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
         self._client = httpx.AsyncClient(timeout=timeout_seconds)
         self.last_latency_ms = 0.0
+        self._last_request: datetime | None = None
         self._last_success: datetime | None = None
         self._last_failure: datetime | None = None
-        self._last_error: str | None = None
+        self._connection_state = ConnectionState.UNKNOWN
+        self._failure_reason: str | None = None
+        self._http_status: int | None = None
+        self._retry_count = 0
+        self._backoff_until: datetime | None = None
+        self._rate_limit_remaining: int | None = None
+        self._rate_limit_limit: int | None = None
+        self._raw_error: str | None = None
 
     async def close(self) -> None:
         await self._client.aclose()
 
+    async def _get(self, path: str, params: Mapping[str, Any]) -> httpx.Response | None:
+        """GET with retry/backoff, updating every telemetry field this provider reports. Never
+        raises for an HTTP-level failure — returns `None` and leaves the failure fully described
+        in `self._failure_reason`/`self._raw_error`/`self._connection_state` for `health()`."""
+        now = datetime.now(UTC)
+        self._last_request = now
+        started = perf_counter()
+        attempt = 0
+        last_exception: Exception | None = None
+        while attempt <= self.max_retries:
+            try:
+                response = await self._client.get(f"{self.base_url}{path}", params=params)
+            except httpx.TimeoutException as exc:
+                last_exception, self._connection_state, self._failure_reason = exc, ConnectionState.TIMEOUT, "request timed out"
+            except httpx.HTTPError as exc:
+                last_exception, self._connection_state, self._failure_reason = exc, ConnectionState.UNREACHABLE, f"{type(exc).__name__}: {exc}"[:300]
+            else:
+                self.last_latency_ms = (perf_counter() - started) * 1000
+                self._http_status = response.status_code
+                self._rate_limit_remaining = _int_header(response, "x-ratelimit-remaining", "x-ratelimit-remaining-day")
+                self._rate_limit_limit = _int_header(response, "x-ratelimit-limit", "x-ratelimit-limit-day")
+                if response.status_code in (401, 403):
+                    self._connection_state, self._failure_reason = ConnectionState.UNAUTHORIZED, f"HTTP {response.status_code}: authentication failed"
+                    self._raw_error, self._last_failure, self._retry_count = _sanitized_body(response), now, attempt
+                    return None
+                if response.status_code == 429:
+                    self._connection_state, self._failure_reason = ConnectionState.RATE_LIMITED, "HTTP 429: rate limited"
+                    retry_after = response.headers.get("retry-after", "")
+                    self._backoff_until = now + timedelta(seconds=float(retry_after)) if retry_after.isdigit() else now + timedelta(seconds=60)
+                    self._raw_error, self._last_failure, self._retry_count = _sanitized_body(response), now, attempt
+                    return None
+                if response.status_code >= 400:
+                    retryable = response.status_code >= 500
+                    self._connection_state, self._failure_reason = ConnectionState.UNREACHABLE, f"HTTP {response.status_code}"
+                    self._raw_error = _sanitized_body(response)
+                    if retryable and attempt < self.max_retries:
+                        attempt += 1
+                        await asyncio.sleep(self.retry_backoff_seconds * attempt)
+                        continue
+                    self._last_failure, self._retry_count = now, attempt
+                    return None
+                self._connection_state, self._failure_reason, self._raw_error, self._backoff_until = ConnectionState.CONNECTED, None, None, None
+                self._last_success, self._retry_count = now, attempt
+                return response
+            attempt += 1
+            if attempt <= self.max_retries:
+                await asyncio.sleep(self.retry_backoff_seconds * attempt)
+        self.last_latency_ms = (perf_counter() - started) * 1000
+        self._raw_error = f"{type(last_exception).__name__}: {last_exception}"[:300] if last_exception else self._failure_reason
+        self._last_failure, self._retry_count = now, attempt
+        return None
+
     async def health(self) -> ProviderStatus:
         return ProviderStatus(
             provider_name=self.name,
+            provider_version=self.version,
+            base_url=self.base_url,
             mode=self.mode,
             enabled=True,
-            authenticated=bool(self.api_key),
-            reachable=self._last_error is None,
+            api_key_configured=bool(self.api_key),
+            authenticated=self._connection_state not in {ConnectionState.UNAUTHORIZED, ConnectionState.UNKNOWN},
+            reachable=self._connection_state == ConnectionState.CONNECTED,
+            rate_limited=self._connection_state == ConnectionState.RATE_LIMITED,
+            connection_state=self._connection_state,
+            failure_reason=self._failure_reason,
+            http_status=self._http_status,
+            last_request=self._last_request,
             last_success=self._last_success,
             last_failure=self._last_failure,
+            response_time_ms=self.last_latency_ms or None,
+            retry_count=self._retry_count,
+            backoff_until=self._backoff_until,
+            rate_limit_remaining=self._rate_limit_remaining,
+            rate_limit_limit=self._rate_limit_limit,
+            raw_error=self._raw_error,
             capabilities=self.capabilities,
-            message=self._last_error or "",
+            message=self._failure_reason or "",
         )
 
 
-class FinnhubEconomicCalendarProvider(HttpEconomicCalendarProvider):
-    """Live adapter for Finnhub's `/calendar/economic` endpoint."""
+class FinancialModelingPrepProvider(HttpEconomicCalendarProvider):
+    """Live adapter for Financial Modeling Prep's `/api/v3/economic_calendar` endpoint — TEN's
+    primary economic calendar provider."""
 
-    def __init__(self, *, api_key: str, base_url: str = "https://finnhub.io/api/v1", timeout_seconds: float = 10, version: str = "1") -> None:
-        super().__init__("finnhub", api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds, version=version)
+    def __init__(
+        self, *, api_key: str, base_url: str = "https://financialmodelingprep.com/api/v3", timeout_seconds: float = 10, version: str = "1", max_retries: int = 2, retry_backoff_seconds: float = 0.5
+    ) -> None:
+        super().__init__("financial_modeling_prep", api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds, version=version, max_retries=max_retries, retry_backoff_seconds=retry_backoff_seconds)
 
     async def fetch_events(self, request: ProviderFetchRequest) -> ProviderFetchResult:
         now = datetime.now(UTC)
-        started = perf_counter()
+        response = await self._get("/economic_calendar", {"from": request.start.date().isoformat(), "to": request.end.date().isoformat(), "apikey": self.api_key})
+        if response is None:
+            return ProviderFetchResult(observations=(), warnings=(f"fmp_request_failed:{self._connection_state.value}",))
         try:
-            response = await self._client.get(
-                f"{self.base_url}/calendar/economic",
-                params={"from": request.start.date().isoformat(), "to": request.end.date().isoformat(), "token": self.api_key},
-            )
-            response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+        except ValueError:
+            self._connection_state, self._failure_reason = ConnectionState.UNREACHABLE, "response was not valid JSON"
+            return ProviderFetchResult(observations=(), warnings=("fmp_unexpected_response_shape",))
+        if isinstance(payload, dict) and ("Error Message" in payload or "error" in payload):
+            # FMP returns HTTP 200 with an error body for some invalid-key/invalid-plan cases —
+            # a real authentication/authorization failure, not "zero events today".
+            self._connection_state = ConnectionState.UNAUTHORIZED
+            self._failure_reason = str(payload.get("Error Message") or payload.get("error"))[:300]
+            self._raw_error = self._failure_reason
             self._last_failure = now
-            self._last_error = type(exc).__name__
-            return ProviderFetchResult(observations=(), warnings=(f"finnhub_request_failed:{type(exc).__name__}",))
-        finally:
-            self.last_latency_ms = (perf_counter() - started) * 1000
+            return ProviderFetchResult(observations=(), warnings=("fmp_error_response",))
+        if not isinstance(payload, list):
+            self._connection_state, self._failure_reason = ConnectionState.UNREACHABLE, "unexpected response shape"
+            return ProviderFetchResult(observations=(), warnings=("fmp_unexpected_response_shape",))
+        values: list[ProviderEventObservation] = []
+        failures = 0
+        for index, row in enumerate(payload):
+            try:
+                item = observation_from_mapping(self.name, self.version, self._map_row(row), now, index)
+                if request.start <= item.available_at <= request.end and len(values) < request.limit:
+                    values.append(item)
+            except (TypeError, ValueError, KeyError):
+                failures += 1
+        return ProviderFetchResult(observations=tuple(values), cursor=str(len(values)), success_count=len(values), failure_count=failures)
+
+    @staticmethod
+    def _map_row(row: Mapping[str, Any]) -> dict[str, Any]:
+        event = str(row.get("event") or "").strip()
+        country = str(row.get("country") or "").strip().upper()
+        currency = str(row.get("currency") or "").strip().upper()
+        scheduled = str(row.get("date") or "").strip()
+        return {
+            "provider_event_id": stable_id("fmp-event", country, currency, event, scheduled),
+            "raw_name": event,
+            "raw_country": country or None,
+            "raw_currency": currency or None,
+            "raw_importance": row.get("impact"),
+            "raw_status": "released" if row.get("actual") not in (None, "") else "scheduled",
+            "raw_scheduled_time": scheduled or None,
+            "raw_timezone": "UTC",
+            "raw_actual": row.get("actual"),
+            "raw_forecast": row.get("estimate"),
+            "raw_previous": row.get("previous"),
+            "raw_unit": row.get("unit"),
+        }
+
+
+class FinnhubEconomicCalendarProvider(HttpEconomicCalendarProvider):
+    """Live adapter for Finnhub's `/calendar/economic` endpoint — optional fallback provider,
+    used only when Financial Modeling Prep is unavailable."""
+
+    def __init__(
+        self, *, api_key: str, base_url: str = "https://finnhub.io/api/v1", timeout_seconds: float = 10, version: str = "1", max_retries: int = 2, retry_backoff_seconds: float = 0.5
+    ) -> None:
+        super().__init__("finnhub", api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds, version=version, max_retries=max_retries, retry_backoff_seconds=retry_backoff_seconds)
+
+    async def fetch_events(self, request: ProviderFetchRequest) -> ProviderFetchResult:
+        now = datetime.now(UTC)
+        response = await self._get("/calendar/economic", {"from": request.start.date().isoformat(), "to": request.end.date().isoformat(), "token": self.api_key})
+        if response is None:
+            return ProviderFetchResult(observations=(), warnings=(f"finnhub_request_failed:{self._connection_state.value}",))
+        try:
+            payload = response.json()
+        except ValueError:
+            self._connection_state, self._failure_reason = ConnectionState.UNREACHABLE, "response was not valid JSON"
+            return ProviderFetchResult(observations=(), warnings=("finnhub_unexpected_response_shape",))
         rows = payload.get("economicCalendar") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
-            self._last_failure = now
-            self._last_error = "unexpected_response_shape"
+            self._connection_state, self._failure_reason = ConnectionState.UNREACHABLE, "unexpected response shape"
             return ProviderFetchResult(observations=(), warnings=("finnhub_unexpected_response_shape",))
         values: list[ProviderEventObservation] = []
         failures = 0
@@ -294,8 +463,6 @@ class FinnhubEconomicCalendarProvider(HttpEconomicCalendarProvider):
                     values.append(item)
             except (TypeError, ValueError, KeyError):
                 failures += 1
-        self._last_success = now
-        self._last_error = None
         return ProviderFetchResult(observations=tuple(values), cursor=str(len(values)), success_count=len(values), failure_count=failures)
 
     @staticmethod
@@ -318,13 +485,38 @@ class FinnhubEconomicCalendarProvider(HttpEconomicCalendarProvider):
         }
 
 
+_LIVE_PROVIDER_CLASSES: dict[str, Callable[..., HttpEconomicCalendarProvider]] = {
+    "financial_modeling_prep": FinancialModelingPrepProvider,
+    "fmp": FinancialModelingPrepProvider,
+    "finnhub": FinnhubEconomicCalendarProvider,
+}
+_LIVE_PROVIDER_DEFAULT_KEY_ENV = {
+    "financial_modeling_prep": "TEN_FMP_API_KEY",
+    "fmp": "TEN_FMP_API_KEY",
+    "finnhub": "TEN_FINNHUB_API_KEY",
+}
+_LIVE_PROVIDER_DEFAULT_BASE_URL = {
+    "financial_modeling_prep": "https://financialmodelingprep.com/api/v3",
+    "fmp": "https://financialmodelingprep.com/api/v3",
+    "finnhub": "https://finnhub.io/api/v1",
+}
+
+
 def build_providers(
     configs: Sequence[Any],
     *,
     import_root: Path = Path("data/economic_calendar_imports"),
     fixtures: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> tuple[EconomicCalendarProvider, ...]:
-    """Build only explicitly configured safe adapters; live mode requires a concrete adapter."""
+    """Build only explicitly configured safe adapters; live mode requires a concrete adapter.
+
+    Providers are built in the order given in `configs` — callers must pass them in priority
+    order (Financial Modeling Prep first, Finnhub as an optional fallback, then any static/disabled
+    entries), since `EconomicCalendarService` queries every returned provider on each sync and
+    `reconcile()` ranks conflicting data by that same order. A `live_provider` entry with no
+    configured API key degrades to `DisabledProvider` rather than raising, so a missing optional
+    fallback key never prevents the primary provider from starting.
+    """
     result: list[EconomicCalendarProvider] = []
     fixtures = fixtures or {}
     for config in configs:
@@ -334,10 +526,19 @@ def build_providers(
             result.append(FileImportProvider(config.name, Path(config.file_path), import_root=import_root, version=config.version))
         elif config.mode in {ProviderMode.STATIC_FIXTURE, ProviderMode.IN_MEMORY_TEST_PROVIDER} and config.enabled:
             result.append(InMemoryProvider(config.name, fixtures.get(config.name, ()), version=config.version, mode=config.mode))
-        elif config.mode == ProviderMode.LIVE_PROVIDER and config.enabled and config.name == "finnhub":
-            key = provider_api_key(config.api_key_env or "TEN_FINNHUB_API_KEY")
+        elif config.mode == ProviderMode.LIVE_PROVIDER and config.enabled and config.name in _LIVE_PROVIDER_CLASSES:
+            provider_class = _LIVE_PROVIDER_CLASSES[config.name]
+            key = provider_api_key(config.api_key_env or _LIVE_PROVIDER_DEFAULT_KEY_ENV[config.name])
             if key:
-                result.append(FinnhubEconomicCalendarProvider(api_key=key, base_url=config.base_url or "https://finnhub.io/api/v1", timeout_seconds=config.timeout_seconds, version=config.version))
+                result.append(
+                    provider_class(
+                        api_key=key,
+                        base_url=config.base_url or _LIVE_PROVIDER_DEFAULT_BASE_URL[config.name],
+                        timeout_seconds=config.timeout_seconds,
+                        version=config.version,
+                        max_retries=config.retry_count,
+                    )
+                )
             else:
                 result.append(DisabledProvider(config.name, config.version))
         else:

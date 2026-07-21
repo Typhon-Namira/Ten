@@ -16,6 +16,8 @@ from .config import EconomicCalendarConfig
 from .engine import BaselineEconomicCalendarEngine
 from .events import (
     EconomicCalendarDegraded,
+    EconomicCalendarProviderRecovered,
+    EconomicCalendarProviderRequestCompleted,
     EconomicCalendarRecoveryCompleted,
     EconomicCalendarReplayCompleted,
     EconomicCalendarSnapshotCreated,
@@ -32,6 +34,7 @@ from .events import (
     EconomicEventUpdated,
 )
 from .models import (
+    ConnectionState,
     EconomicCalendarCheckpoint,
     EconomicCalendarExplanation,
     EconomicCalendarSnapshot,
@@ -105,6 +108,11 @@ class EconomicCalendarService:
         self._published: set[UUID] = set()
         self._scheduler: asyncio.Task[None] | None = None
         self._sync_lock = asyncio.Lock()
+        # The last ACTUALLY-OBSERVED provider health, refreshed on every synchronize()/snapshot()
+        # call — `health()` reads this instead of the static configured `provider.mode`, so it can
+        # never claim "healthy" while every configured provider is genuinely unreachable.
+        self._last_provider_statuses: tuple[ProviderStatus, ...] = ()
+        self._provider_connection_state: dict[str, ConnectionState] = {}
 
     async def restore(self) -> bool:
         try:
@@ -192,12 +200,42 @@ class EconomicCalendarService:
                         observations.extend(result.observations)
                         self.metrics.events_fetched += result.success_count
                         self.metrics.parse_failures += result.failure_count
+                        # Live HTTP providers never raise for an HTTP-level failure (a bad status
+                        # or connection error becomes an empty result + a warning, so one failing
+                        # provider never aborts the whole sync loop) — `result.warnings` is the
+                        # only signal that attempt actually failed, so it must count here too or
+                        # `provider_request_failures` silently under-reports every HTTP failure.
+                        if result.warnings:
+                            self.metrics.provider_request_failures += 1
                         await self.repository.save_sync_state(
                             provider.name, {"cursor": result.cursor, "update_token": result.update_token, "updated_at": now.isoformat()}
                         )
                     except Exception:
                         self.metrics.provider_request_failures += 1
-                    statuses.append(await provider.health())
+                    status = await provider.health()
+                    statuses.append(status)
+                    await self._publish_event(
+                        EconomicCalendarProviderRequestCompleted,
+                        stable_id("provider-request", provider.name, now.isoformat(), status.last_request.isoformat() if status.last_request else "unknown"),
+                        {
+                            "provider_name": status.provider_name,
+                            "connection_state": status.connection_state.value,
+                            "http_status": status.http_status,
+                            "response_time_ms": status.response_time_ms,
+                            "retry_count": status.retry_count,
+                            "reachable": status.reachable,
+                            "failure_reason": status.failure_reason,
+                            "quality": 1.0 if status.reachable else 0.0,
+                        },
+                    )
+                    previous_state = self._provider_connection_state.get(provider.name)
+                    if previous_state is not None and previous_state != ConnectionState.CONNECTED and status.connection_state == ConnectionState.CONNECTED:
+                        await self._publish_event(
+                            EconomicCalendarProviderRecovered,
+                            stable_id("provider-recovered", provider.name, now.isoformat()),
+                            {"provider_name": status.provider_name, "previous_state": previous_state.value, "quality": 1.0},
+                        )
+                    self._provider_connection_state[provider.name] = status.connection_state
                 inserted = await self.repository.save_provider_observations(tuple(observations))
                 self.metrics.events_inserted += inserted
                 normalized = []
@@ -245,6 +283,7 @@ class EconomicCalendarService:
                     self.metrics.events_deduplicated += previous is not None and revision is None
                     await self._publish_lifecycle(previous, item, revision)
                 events = await self.repository.list_events(start, end, now, self.config.processing.maximum_batch_size)
+                self._last_provider_statuses = tuple(statuses)
                 snapshot = build_snapshot(events, now, start, end, tuple(statuses), self.config)
                 await self.repository.save_snapshot(snapshot)
                 await self._checkpoint(now, observations)
@@ -273,6 +312,7 @@ class EconomicCalendarService:
         boundary = as_of or self.clock.now()
         events = await self.repository.list_events(start, end, boundary, self.config.processing.maximum_batch_size)
         statuses = tuple([await provider.health() for provider in self.providers])
+        self._last_provider_statuses = statuses
         result = build_snapshot(events, boundary, start, end, statuses, self.config)
         await self.repository.save_snapshot(result)
         return result
@@ -468,10 +508,22 @@ class EconomicCalendarService:
         }
 
     async def provider_status(self) -> tuple[ProviderStatus, ...]:
-        return tuple([await provider.health() for provider in self.providers])
+        statuses = tuple([await provider.health() for provider in self.providers])
+        self._last_provider_statuses = statuses
+        return statuses
 
     def health(self) -> dict[str, object]:
-        degraded = not any(provider.mode.value == "live_provider" for provider in self.providers)
+        live_configured = any(provider.mode.value == "live_provider" for provider in self.providers)
+        if not live_configured:
+            degraded = True
+        elif self._last_provider_statuses:
+            # Reflects what the provider ACTUALLY did on its last attempt, not just whether one is
+            # configured — a live provider that is timing out or returning 401s must never read as
+            # "healthy" here just because `mode == live_provider`.
+            degraded = not any(item.enabled and item.reachable for item in self._last_provider_statuses)
+        else:
+            degraded = False  # configured but no attempt has completed yet; not yet proven either way
+        primary_status = self._last_provider_statuses[0] if self._last_provider_statuses else None
         return {
             "status": "degraded" if degraded else "healthy",
             "engine_name": "economic_calendar",
@@ -484,6 +536,8 @@ class EconomicCalendarService:
             "repository_mode": self.repository_mode,
             "recovery_state": self.recovery_state,
             "is_degraded": degraded,
+            "primary_provider": primary_status.provider_name if primary_status else None,
+            "primary_provider_connection_state": primary_status.connection_state.value if primary_status else "unknown",
             "last_successful_sync": self.metrics.last_successful_sync,
             "latest_snapshot_id": self.metrics.latest_snapshot_id,
             "event_statistics": {"fetched": self.metrics.events_fetched, "inserted": self.metrics.events_inserted},

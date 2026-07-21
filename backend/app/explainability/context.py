@@ -92,6 +92,12 @@ async def build_context(
         )
     ]
     economic = await _engine_fact("economic_calendar", lambda: app.state.economic_calendar_service.context(symbol, as_of=snapshot_at or now, publish=False), timestamp_field="analysis_timestamp")
+    # The context alone only says "unavailable" — the model needs the actual provider telemetry
+    # (which provider, connection state, HTTP status, failure reason) to explain WHY, instead of
+    # repeating the bare word "unavailable" the way it used to.
+    provider_statuses, _ = await safe_call(lambda: app.state.economic_calendar_service.provider_status())
+    if provider_statuses:
+        economic = economic.model_copy(update={"summary": {**economic.summary, "provider_status": [_summarize(item) for item in provider_statuses]}})
 
     if decision is None:
         decisions, decision_error = await safe_call(lambda: app.state.signal_decision_service.repository.find_recent_decisions(symbol, timeframe, now, 1))

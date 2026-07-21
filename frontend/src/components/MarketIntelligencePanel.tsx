@@ -1,6 +1,8 @@
 import type { ChartLiquidityPool, MarketIntelligence, SourceDiagnostic } from '../types'
 import { normalizeEngineState, stateFromAvailability } from '../lib/engineState'
+import { tradingContextBadge } from '../lib/economicState'
 import { StateBadge } from './StateBadge'
+import { EconomicStateBadge } from './EconomicStateBadge'
 import { BarChart, BiasArrow, Gauge, HeatmapStrip, RadarChart, RadialProgress } from './widgets/Widgets'
 
 const number = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -143,7 +145,12 @@ export function MarketIntelligencePanel({ data, liquidityPools = [] }: { data: M
             <div><StateBadge state={data.economic_status.stages ? normalizeEngineState(data.economic_status.stages.downloaded_events.status) : 'waiting'} /><span>Downloaded</span></div>
             <div><StateBadge state={data.economic_status.stages ? normalizeEngineState(data.economic_status.stages.mapped_events.status) : 'waiting'} /><span>Mapped</span></div>
             <div><StateBadge state={data.economic_status.stages ? normalizeEngineState(data.economic_status.stages.relevant_events.status) : 'waiting'} /><span>Relevant</span></div>
-            <div><StateBadge state={data.economic_status.stages ? normalizeEngineState(data.economic_status.stages.trading_context.status) : 'waiting'} /><span>Trading context</span></div>
+            <div>
+              {data.economic_status.stages
+                ? <EconomicStateBadge visual={tradingContextBadge(data.economic_status.stages.trading_context.context_state, data.economic_status.stages.trading_context.risk_window_phase)} detail={data.economic_status.stages.trading_context.reason ?? undefined} />
+                : <StateBadge state="waiting" />}
+              <span>Trading context</span>
+            </div>
           </div>
           {data.economic_status.next_relevant_event && <p className="intel__widget-sub">Next: {data.economic_status.next_relevant_event}</p>}
         </div>

@@ -212,6 +212,7 @@ class SignalDecisionService:
                 risk_score=context.risk_score * 100,
                 as_of=context.analysis_timestamp,
                 degraded=bool(context.unavailable_context),
+                context_state=context.context_state.value,
                 event_ids=event_ids,
             )
         except Exception:

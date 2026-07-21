@@ -223,6 +223,11 @@ def build_market_intelligence(
         "economic_status": {
             "available": economic_context is not None,
             "degraded": bool(getattr(economic_context, "unavailable_context", None)) if economic_context is not None else True,
+            # The exact categorical state (`CalendarContextState`) — the same value
+            # signal_decision_engine and the explainability layer read, so the dashboard can
+            # render "outside_risk_window" distinctly from "provider_rate_limited" instead of a
+            # single collapsed `degraded` boolean.
+            "context_state": (getattr(economic_context, "context_state", None) and economic_context.context_state.value) if economic_context is not None else "no_calendar_data",
             "risk_window_phase": getattr(economic_context, "risk_window_phase", None) and economic_context.risk_window_phase.value,
             "risk_score": getattr(economic_context, "risk_score", None),
             "next_relevant_event": getattr(economic_context, "next_relevant_event", None) and economic_context.next_relevant_event.display_name,

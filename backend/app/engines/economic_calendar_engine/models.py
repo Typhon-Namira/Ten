@@ -179,6 +179,48 @@ class FreshnessState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ConnectionState(StrEnum):
+    """A provider's actual, live connection outcome — the single fact every other status field
+    (reachable/authenticated/rate_limited/message) is derived from, so they can never disagree."""
+
+    CONNECTED = "connected"
+    UNREACHABLE = "unreachable"
+    TIMEOUT = "timeout"
+    UNAUTHORIZED = "unauthorized"
+    RATE_LIMITED = "rate_limited"
+    DISABLED = "disabled"
+    UNKNOWN = "unknown"
+
+
+class CalendarContextState(StrEnum):
+    """The single categorical answer to "why does the economic context look the way it does" —
+    computed once (analyzer.instrument_context) and consumed identically by signal_decision_engine,
+    the explainability layer, market_intelligence, and diagnostics, so they can never contradict
+    each other. Only the PROVIDER_* / NO_CALENDAR_DATA states represent genuine unavailability;
+    NO_RELEVANT_EVENTS / OUTSIDE_RISK_WINDOW / INSIDE_RISK_WINDOW are routine, healthy states that
+    must never degrade or block anything downstream."""
+
+    PROVIDER_UNREACHABLE = "provider_unreachable"
+    PROVIDER_TIMEOUT = "provider_timeout"
+    PROVIDER_AUTH_FAILED = "provider_auth_failed"
+    PROVIDER_RATE_LIMITED = "provider_rate_limited"
+    NO_CALENDAR_DATA = "no_calendar_data"
+    NO_RELEVANT_EVENTS = "no_relevant_events"
+    OUTSIDE_RISK_WINDOW = "outside_risk_window"
+    INSIDE_RISK_WINDOW = "inside_risk_window"
+
+
+GENUINELY_UNAVAILABLE_STATES = frozenset(
+    {
+        CalendarContextState.PROVIDER_UNREACHABLE,
+        CalendarContextState.PROVIDER_TIMEOUT,
+        CalendarContextState.PROVIDER_AUTH_FAILED,
+        CalendarContextState.PROVIDER_RATE_LIMITED,
+        CalendarContextState.NO_CALENDAR_DATA,
+    }
+)
+
+
 class ProviderCapabilities(CalendarModel):
     historical_events: bool = False
     future_events: bool = True
@@ -353,22 +395,43 @@ class EconomicEventRevision(CalendarModel):
 
 class ProviderStatus(CalendarModel):
     provider_name: str
+    provider_version: str = "unknown"
+    base_url: str | None = None
     mode: ProviderMode
     enabled: bool
+    api_key_configured: bool = False
     authenticated: bool = False
     reachable: bool = False
     stale: bool = False
     rate_limited: bool = False
+    connection_state: ConnectionState = ConnectionState.UNKNOWN
+    failure_reason: str | None = None
+    http_status: int | None = None
     last_request: datetime | None = None
     last_success: datetime | None = None
     last_failure: datetime | None = None
     last_cursor: str | None = None
+    response_time_ms: float | None = None
+    retry_count: int = 0
+    backoff_until: datetime | None = None
+    rate_limit_remaining: int | None = None
+    rate_limit_limit: int | None = None
+    daily_quota_used: int | None = None
+    daily_quota_limit: int | None = None
+    monthly_quota_used: int | None = None
+    monthly_quota_limit: int | None = None
+    # Sanitized (never contains the API key/token) — the last raw error text/body TEN actually
+    # received, so a human can see exactly what the provider said instead of just a category.
+    raw_error: str | None = None
     capabilities: ProviderCapabilities = Field(default_factory=ProviderCapabilities)
     message: str = ""
 
 
 class DegradationState(CalendarModel):
     is_degraded: bool = False
+    # "healthy" or one of the `CalendarContextState` genuine-failure values — computed once from
+    # the highest-priority provider's actual `connection_state`, never re-derived downstream.
+    category: str = "healthy"
     reasons: tuple[str, ...] = ()
     unavailable_providers: tuple[str, ...] = ()
     partial_results: bool = False
@@ -434,6 +497,10 @@ class InstrumentEventContext(CalendarModel):
     asset_class_matches: tuple[str, ...] = ()
     conflicting_events: tuple[UUID, ...] = ()
     unavailable_context: tuple[str, ...] = ()
+    # The canonical, single-source-of-truth categorical state — see `CalendarContextState`.
+    # signal_decision_engine, the explainability layer, market_intelligence, and diagnostics all
+    # read THIS field rather than each re-deriving their own notion of "is this unavailable."
+    context_state: CalendarContextState = CalendarContextState.OUTSIDE_RISK_WINDOW
     primary_explanation: str = ""
     limitations: tuple[str, ...] = ()
     probabilistic_context: bool = True

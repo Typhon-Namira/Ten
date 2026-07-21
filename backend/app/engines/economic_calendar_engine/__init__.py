@@ -2,7 +2,9 @@ from .clock import Clock, FixedClock, SystemClock
 from .config import EconomicCalendarConfig, ProviderConfig, RiskWindowConfig
 from .engine import BaselineEconomicCalendarEngine, EconomicCalendarEngine
 from .models import (
+    CalendarContextState,
     ConflictState,
+    ConnectionState,
     DegradationState,
     EconomicCalendarCheckpoint,
     EconomicCalendarExplanation,
@@ -14,6 +16,7 @@ from .models import (
     EventCluster,
     EventImportance,
     FreshnessState,
+    GENUINELY_UNAVAILABLE_STATES,
     InstrumentEventContext,
     NewsRiskResult,
     ProviderCapabilities,
@@ -33,6 +36,8 @@ from .providers import (
     DisabledProvider,
     EconomicCalendarProvider,
     FileImportProvider,
+    FinancialModelingPrepProvider,
+    FinnhubEconomicCalendarProvider,
     InMemoryProvider,
     ProviderFetchRequest,
     ProviderFetchResult,
@@ -43,8 +48,10 @@ from .service import EconomicCalendarMetrics, EconomicCalendarService
 
 __all__ = [
     "BaselineEconomicCalendarEngine",
+    "CalendarContextState",
     "Clock",
     "ConflictState",
+    "ConnectionState",
     "DegradationState",
     "DisabledProvider",
     "EconomicCalendarCheckpoint",
@@ -63,8 +70,11 @@ __all__ = [
     "EventCluster",
     "EventImportance",
     "FileImportProvider",
+    "FinancialModelingPrepProvider",
+    "FinnhubEconomicCalendarProvider",
     "FixedClock",
     "FreshnessState",
+    "GENUINELY_UNAVAILABLE_STATES",
     "InMemoryEconomicCalendarRepository",
     "InMemoryProvider",
     "InstrumentEventContext",

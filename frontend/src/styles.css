@@ -174,6 +174,36 @@ tbody tr, .source-diagnostics tr { transition: background .15s var(--ease); }
 .source-diagnostics tbody tr:hover td { background: #10131a; }
 @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(1.4); } }
 
+/* ---------- Economic Calendar state badges — every state gets its own distinct color, never
+   shared between two different meanings (see lib/economicState.ts for the mapping). ---------- */
+.econ-state { display: inline-flex; align-items: center; gap: 6px; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; padding: 4px 8px; border-radius: 20px; background: #10131a; }
+.econ-state i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; flex: 0 0 auto; }
+.econ-state--healthy { color: #59b993; }
+.econ-state--limited { color: #d99a63; }
+.econ-state--unavailable { color: #c26965; }
+.econ-state--timeout { color: #b5563f; }
+.econ-state--auth-failed { color: #c14d72; }
+.econ-state--disabled { color: #545b64; }
+.econ-state--unknown { color: #6b737d; }
+.econ-state--outside { color: #4a9bc4; }
+.econ-state--upcoming { color: #d8b767; }
+.econ-state--high-risk { color: #e08a3e; }
+.econ-state--live { color: #e0507a; }
+.econ-state--live i { animation: pulse 1.2s ease-in-out infinite; }
+.econ-state--cooldown { color: #8a6fc4; }
+
+/* ---------- Provider Health panel ---------- */
+.provider-health-grid { padding: 16px 21px; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.provider-card { border: 1px solid #20252c; border-radius: 10px; background: #101317; padding: 15px 17px; display: grid; gap: 10px; }
+.provider-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.provider-card__head h3 { margin: 0; font-size: 13px; color: #e4e8ec; text-transform: capitalize; }
+.provider-card__url { font-size: 10px; color: #6f7882; word-break: break-all; margin: -6px 0 0; }
+.provider-card__fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; }
+.provider-card__field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.provider-card__field span { font-size: 8px; text-transform: uppercase; letter-spacing: .1em; color: #6f7882; }
+.provider-card__field b { font-size: 11px; color: #cbd0d5; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-card__error { grid-column: 1/-1; background: #0d1014; border: 1px solid #2a2020; border-radius: 6px; padding: 8px 10px; font-size: 10px; color: #b98079; font-family: monospace; word-break: break-word; margin: 0; }
+
 /* ---------- AI Explainability ---------- */
 .explain-panel { padding: 18px 21px; display: grid; gap: 14px; }
 .explain-panel--empty { text-align: center; padding: 30px 21px; color: #7e8792; }
