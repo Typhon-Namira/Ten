@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import {
   Activity, BrainCircuit, CalendarClock, CandlestickChart, ChartNoAxesCombined, Clock3, Database, Droplets,
-  FileClock, Gauge, GitBranch, History, Settings2, ShieldCheck, Signal, Stethoscope, Waves, Workflow, XOctagon,
+  FileClock, Gauge, GitBranch, History, Settings2, ShieldCheck, Signal, Sparkles, Stethoscope, Waves, Workflow, XOctagon,
 } from 'lucide-react'
 import { navigate } from '../router/navigation'
 
@@ -49,6 +49,7 @@ const GROUPS: NavGroup[] = [
       { path: '/signals/decision-tree', label: 'Decision Tree', icon: GitBranch },
     ],
   },
+  { label: 'Explainability', items: [{ path: '/assistant', label: 'AI Assistant', icon: Sparkles }] },
   {
     label: 'System',
     items: [

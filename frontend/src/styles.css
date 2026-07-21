@@ -174,6 +174,60 @@ tbody tr, .source-diagnostics tr { transition: background .15s var(--ease); }
 .source-diagnostics tbody tr:hover td { background: #10131a; }
 @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(1.4); } }
 
+/* ---------- AI Explainability ---------- */
+.explain-panel { padding: 18px 21px; display: grid; gap: 14px; }
+.explain-panel--empty { text-align: center; padding: 30px 21px; color: #7e8792; }
+.explain-panel--empty svg { color: #c4a359; margin-bottom: 6px; }
+.explain-panel--empty p { font-size: 12px; line-height: 1.7; max-width: 440px; margin: 0 auto 12px; }
+.explain-panel--empty button, .explain-panel__refresh { border: 1px solid #4a3c22; background: linear-gradient(160deg, #201a0e, #14150f); color: #d8b767; padding: 9px 15px; border-radius: 8px; display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-size: 12px; font-weight: 600; transition: box-shadow .15s, transform .15s; justify-self: start; }
+.explain-panel--empty button:hover, .explain-panel__refresh:hover { box-shadow: var(--shadow-glow-gold); transform: translateY(-1px); }
+.explain-panel__error { color: #c26965; font-size: 11px; margin: 6px 0 0; }
+.explain-panel--loading { display: grid; gap: 8px; }
+.explain-score { display: grid; gap: 6px; }
+.explain-score__bar { height: 4px; border-radius: 4px; background: #1a1e24; overflow: hidden; }
+.explain-score__bar span { display: block; height: 100%; background: linear-gradient(90deg, #a4884e, #c4a359); }
+.explain-score > span { font-size: 10px; color: #737c86; text-transform: uppercase; letter-spacing: .08em; }
+.explain-panel__summary { font-size: 13px; line-height: 1.7; color: #d7dce1; margin: 0; }
+.explain-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.explain-columns__label { display: flex; align-items: center; gap: 6px; font-size: 9px; text-transform: uppercase; letter-spacing: .1em; color: #8a929b; font-weight: 700; margin: 0 0 6px; }
+.explain-columns ul, .explain-block ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+.explain-columns li, .explain-block li { font-size: 11px; line-height: 1.6; color: #aeb5bd; padding-left: 12px; position: relative; }
+.explain-columns li::before, .explain-block li::before { content: ''; position: absolute; left: 0; top: 7px; width: 4px; height: 4px; border-radius: 50%; background: #4c525c; }
+.explain-empty-item { color: #545b64 !important; font-style: italic; }
+.explain-engines { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px; }
+.explain-engines__item { background: #101317; border-radius: 7px; padding: 9px 11px; display: grid; gap: 2px; }
+.explain-engines__item b { font-size: 10px; text-transform: capitalize; color: #dfe3e7; }
+.explain-engines__item span { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: #c4a359; }
+.explain-engines__item small { font-size: 10px; color: #6f7882; line-height: 1.5; }
+.explain-block { border-top: 1px solid #1d2127; padding-top: 12px; }
+.explain-block--muted li { color: #737c86; }
+.explain-evidence { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; border-top: 1px solid #1d2127; padding-top: 12px; }
+.explain-evidence > span { font-size: 9px; text-transform: uppercase; letter-spacing: .1em; color: #6f7882; margin-right: 4px; }
+.explain-evidence code { background: #0d1014; border: 1px solid #20252c; border-radius: 5px; padding: 3px 7px; font-size: 10px; color: #9ba2ab; }
+.explain-panel__refresh { margin-top: 2px; }
+.rejection__explain { margin-top: 10px; border-top: 1px solid #1d2127; padding-top: 10px; }
+.rejection__explain .explain-panel { padding: 0; }
+
+/* ---------- AI Assistant chat ---------- */
+.assistant { display: flex; flex-direction: column; height: calc(100vh - 250px); min-height: 420px; }
+.assistant__messages { flex: 1; overflow-y: auto; padding: 8px 4px; display: grid; gap: 14px; }
+.assistant__empty { text-align: center; padding: 40px 20px; color: #7e8792; }
+.assistant__empty svg { color: #c4a359; margin-bottom: 8px; }
+.assistant__message { max-width: 720px; }
+.assistant__message--user { justify-self: end; background: #14171c; border: 1px solid #20252c; border-radius: 12px 12px 3px 12px; padding: 11px 15px; font-size: 12px; color: #d7dce1; }
+.assistant__message--assistant { justify-self: start; width: 100%; }
+.assistant__answer { background: #101317; border: 1px solid #1d2127; border-radius: 10px; }
+.assistant__answer .explain-score > span { font-size: 9px; }
+.assistant__bubble-label { display: flex; align-items: center; gap: 6px; font-size: 9px; text-transform: uppercase; letter-spacing: .1em; color: #c4a359; font-weight: 700; margin: 0 0 8px; }
+.assistant__form { display: flex; gap: 10px; padding: 14px 4px 4px; border-top: 1px solid #1d2127; margin-top: 12px; }
+.assistant__form input { flex: 1; background: #0d1014; border: 1px solid #20252c; border-radius: 9px; padding: 12px 14px; color: #edf0f2; font-size: 13px; outline: none; transition: border-color .15s; }
+.assistant__form input:focus { border-color: #4a3c22; }
+.assistant__form button { border: 1px solid #4a3c22; background: linear-gradient(160deg, #201a0e, #14150f); color: #d8b767; padding: 0 18px; border-radius: 9px; display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.assistant__form button:disabled { opacity: .5; cursor: default; }
+.assistant__suggestions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+.assistant__suggestions button { background: #10131a; border: 1px solid #20252c; color: #8a929b; font-size: 11px; padding: 7px 12px; border-radius: 20px; cursor: pointer; transition: color .15s, border-color .15s; }
+.assistant__suggestions button:hover { color: #d7dce1; border-color: #333a43; }
+
 /* ---------- Two-column workspace below the chart ---------- */
 .workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; margin-top: 16px; }
 .workspace-grid__main, .workspace-grid__rail { display: grid; gap: 16px; }

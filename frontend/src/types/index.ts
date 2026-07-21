@@ -405,6 +405,63 @@ export interface ChartOverlays {
   source_errors: Record<string, string>
 }
 
+export interface EngineInfluence {
+  engine: string
+  influence: string
+  note: string
+}
+
+export interface Explanation {
+  summary: string
+  primary_reasons: string[]
+  opposing_factors: string[]
+  engine_breakdown: EngineInfluence[]
+  required_for_change: string[]
+  caveats: string[]
+}
+
+export interface Evidence {
+  source: string
+  reference_id: string
+  timestamp: string | null
+}
+
+export interface EngineFact {
+  engine: string
+  available: boolean
+  summary: Record<string, unknown>
+  evidence: Evidence | null
+  error: string | null
+}
+
+export interface ExplainabilityScore {
+  percent: number
+  engines_available: number
+  engines_total: number
+  evidence_citations: number
+  has_ai_score: boolean
+  has_decision: boolean
+}
+
+/** Shared shape for every `/api/v1/explain/*` response — `explanation` is `null` only when
+ * OpenRouter failed or returned something invalid; `error` then explains why. Never a fabricated
+ * explanation standing in for a real one. */
+export interface ExplainResponse {
+  instrument: string
+  timeframe: string
+  generated_at: string
+  explanation: Explanation | null
+  error: string | null
+  explainability_score: ExplainabilityScore
+  evidence: Evidence[]
+  engines?: EngineFact[]
+}
+
+export interface ChatTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 export interface ReplaySessionOverview {
   replay_id: string
   request_fingerprint: string

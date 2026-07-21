@@ -1,4 +1,7 @@
 import { AlertTriangle, CheckCircle2, HelpCircle, XCircle } from 'lucide-react'
+import { AIExplanationPanel } from './AIExplanationPanel'
+import { useExplain } from '../hooks/useExplain'
+import { tenApi } from '../services/api'
 import type { DiagnosticStatus, RejectedDecision, RejectionsResponse } from '../types'
 
 const STATUS_ICON: Record<DiagnosticStatus, typeof CheckCircle2> = {
@@ -15,6 +18,7 @@ function primaryBlockers(item: RejectedDecision, limit = 3) {
 function RejectionCard({ item }: { item: RejectedDecision }) {
   const blockers = primaryBlockers(item)
   const remaining = item.diagnostics.length - blockers.length
+  const explain = useExplain(() => tenApi.explainRejection(item.decision_id))
   return (
     <details className="rejection">
       <summary>
@@ -46,6 +50,9 @@ function RejectionCard({ item }: { item: RejectedDecision }) {
             )
           })}
         </ul>
+        <div className="rejection__explain">
+          <AIExplanationPanel data={explain.data} loading={explain.loading} error={explain.error} onExplain={() => void explain.run()} actionLabel="Explain this rejection" />
+        </div>
       </div>
     </details>
   )

@@ -54,6 +54,9 @@ from backend.app.services import InMemorySignalRepository, PipelineManager, buil
 from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, IntegrationWorker, SqlAlchemyIntegrationRepository
 from backend.app.integration.activity_log import PipelineActivityLog
 from backend.app.integration.stage_tracker import PipelineStageTracker
+from backend.app.ai.openrouter_client.client import HttpOpenRouterClient
+from backend.app.ai.prompts.loader import PromptLoader
+from backend.app.explainability import ExplainabilityService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -69,6 +72,7 @@ SPA_ROUTES = frozenset(
         "/volume-profile",
         "/economic-calendar",
         "/ai-analysis",
+        "/assistant",
         "/engine-status",
         "/logs",
         "/configuration",
@@ -252,6 +256,11 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             repository_mode=decision_mode,
         )
         await app.state.signal_decision_service.start()
+        app.state.explainability_service = ExplainabilityService(
+            HttpOpenRouterClient(settings.openrouter_api_key, settings.openrouter_base_url),
+            PromptLoader(Path(__file__).resolve().parent / "explainability" / "prompts"),
+            model=settings.openrouter_model,
+        )
         integration_config = IntegrationConfig(
             enabled=settings.integration_enabled,
             live_pipeline_enabled=settings.live_pipeline_enabled,

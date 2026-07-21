@@ -12,6 +12,7 @@ import { DiagnosticsPage } from '../pages/DiagnosticsPage'
 import { SMCEnginePage } from '../pages/engines/SMCEnginePage'
 import { EconomicCalendarEnginePage } from '../pages/engines/EconomicCalendarEnginePage'
 import { SignalDecisionTreePage } from '../pages/engines/SignalDecisionTreePage'
+import { AssistantPage } from '../pages/AssistantPage'
 import { AppShell } from '../components/AppShell'
 
 const routes: Record<string, () => React.JSX.Element> = {
@@ -30,6 +31,7 @@ const routes: Record<string, () => React.JSX.Element> = {
   '/signals/rejected': RejectedSignalsPage,
   '/signals/history': SignalHistoryPage,
   '/signals/decision-tree': SignalDecisionTreePage,
+  '/assistant': AssistantPage,
   '/pipeline': PipelinePage,
   '/performance': PerformancePage,
   '/logs': LogsPage,

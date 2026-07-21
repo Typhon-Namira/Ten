@@ -1,4 +1,5 @@
 import { Activity, Clock3, History, RefreshCw, ShieldCheck, Signal as SignalIcon, Wifi, WifiOff } from 'lucide-react'
+import { AIExplanationPanel } from '../components/AIExplanationPanel'
 import { ChartWorkspace } from '../components/ChartWorkspace'
 import { EngineGrid } from '../components/EngineGrid'
 import { LiveLogPanel } from '../components/LiveLogPanel'
@@ -16,7 +17,9 @@ import { useAiScoreHistory } from '../hooks/useAiScoreHistory'
 import { useChartOverlays } from '../hooks/useChartOverlays'
 import { useDashboard } from '../hooks/useDashboard'
 import { useEventStream } from '../hooks/useEventStream'
+import { useExplain } from '../hooks/useExplain'
 import { useLiveDashboard } from '../hooks/useLiveDashboard'
+import { tenApi } from '../services/api'
 
 export function Dashboard() {
   const { selection } = useActiveSelection()
@@ -28,6 +31,7 @@ export function Dashboard() {
   // liquidity distribution widget shows real per-pool strength data instead of the single
   // `latest_price` scalar that's all `MarketIntelligence.liquidity.state` carries.
   const { data: overlays } = useChartOverlays(selection.instrument, selection.timeframe)
+  const explain = useExplain(() => tenApi.explainCurrent(selection.instrument, selection.timeframe))
   const latestReplay = replays[0]
   const ready = engines.filter((engine) => engine.state === 'ready').length
   const marketValue = market?.market_status.replaceAll('_', ' ') ?? 'UNKNOWN'
@@ -90,6 +94,7 @@ export function Dashboard() {
           {signals.length === 0 ? <PublicationDistancePanel intelligence={marketIntelligence} rejections={rejections} /> : <SignalTable signals={signals} />}
         </section>
         <section className="panel" id="rejections"><div className="panel__head"><div><p className="eyebrow">REJECTED SETUPS</p><h2>Why signals were rejected</h2></div><span>{rejections?.count ?? 0} recent</span></div><div className="panel-body"><RejectionReasonPanel data={rejections} /></div></section>
+        <section className="panel" id="explainability"><div className="panel__head"><div><p className="eyebrow">AI EXPLAINABILITY</p><h2>Explain the current state</h2></div><span>grounded in TEN only</span></div><AIExplanationPanel data={explain.data} loading={explain.loading} error={explain.error} onExplain={() => void explain.run()} /></section>
       </div>
       <div className="workspace-grid__rail">
         <section className="panel" id="confidence-trend">

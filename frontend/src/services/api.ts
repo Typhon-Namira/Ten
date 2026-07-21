@@ -1,4 +1,4 @@
-import type { ActiveSelection, AIScoreSnapshot, ChartOverlays, EngineStatus, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { ActiveSelection, AIScoreSnapshot, ChartOverlays, ChatTurn, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
 
@@ -13,6 +13,12 @@ async function request<T>(path: string): Promise<T> {
 async function requestOptional<T>(path: string): Promise<T | null> {
   const response = await fetch(`${API_BASE_URL}${path}`)
   if (response.status === 404) return null
+  if (!response.ok) throw new Error(`TEN API request failed (${response.status})`)
+  return response.json() as Promise<T>
+}
+
+async function requestJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   if (!response.ok) throw new Error(`TEN API request failed (${response.status})`)
   return response.json() as Promise<T>
 }
@@ -56,6 +62,12 @@ export const tenApi = {
   performance: (instrument: string, timeframe: string) => request<PerformanceMetrics>(`/api/v1/system/performance?${scoped(instrument, timeframe)}`),
   aiScoreHistory: (instrument: string, timeframe: string, limit = 40) => request<AIScoreSnapshot[]>(`/ai-scoring/history?${scoped(instrument, timeframe)}&limit=${limit}`),
   chartOverlays: (instrument: string, timeframe: string, limit = 300) => request<ChartOverlays>(`/api/v1/chart/overlays?${scoped(instrument, timeframe)}&limit=${limit}`),
+  // Explainability: every AI-authored answer here is prose over a context TEN itself assembled —
+  // the AI never fetches its own data, so a chat answer can never disagree with these same panels.
+  explainCurrent: (instrument: string, timeframe: string) => request<ExplainResponse>(`/api/v1/explain/current?${scoped(instrument, timeframe)}`),
+  explainDecision: (decisionId: string) => request<ExplainResponse>(`/api/v1/explain/decision/${decisionId}`),
+  explainRejection: (decisionId: string) => request<ExplainResponse>(`/api/v1/explain/rejection/${decisionId}`),
+  explainChat: (message: string, history: ChatTurn[], instrument: string, timeframe: string) => requestJson<ExplainResponse>('/api/v1/explain/chat', { message, history, instrument, timeframe }),
 }
 
 export const STREAM_URL = `${API_BASE_URL}/stream/events`
