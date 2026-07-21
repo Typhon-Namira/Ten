@@ -4,31 +4,94 @@ versions:
   schema_version: "1.0"
   normalization_version: "1.0.0"
 providers:
-  # Primary production provider. Requires TEN_FMP_API_KEY; if unset, this entry degrades to a
-  # disabled provider automatically (build_providers) rather than failing startup.
-  - name: fmp
-    mode: live_provider
+  # ---- Active provider set: public_web_sources. No API key, no paid provider, no
+  # authentication of any kind — every entry below reads an official government/institutional
+  # public webpage, RSS feed, ICS calendar, or (dol_weekly_claims) a deterministic published rule.
+  # See backend/app/engines/economic_calendar_engine/public_sources/ for each adapter.
+  - name: bls
+    mode: public_web_source
     enabled: true
     version: "1"
     timezone: UTC
     priority: 10
+    timeout_seconds: 15
+    retry_count: 2
+    requests_per_minute: 10
+    circuit_failure_threshold: 5
+  - name: bea
+    mode: public_web_source
+    enabled: true
+    version: "1"
+    timezone: UTC
+    priority: 20
+    timeout_seconds: 15
+    retry_count: 2
+    requests_per_minute: 10
+    circuit_failure_threshold: 5
+  - name: federal_reserve
+    mode: public_web_source
+    enabled: true
+    version: "1"
+    timezone: UTC
+    priority: 30
+    timeout_seconds: 15
+    retry_count: 2
+    requests_per_minute: 10
+    circuit_failure_threshold: 5
+  - name: census_bureau
+    mode: public_web_source
+    enabled: true
+    version: "1"
+    timezone: UTC
+    priority: 40
+    timeout_seconds: 15
+    retry_count: 2
+    requests_per_minute: 10
+    circuit_failure_threshold: 5
+  - name: dol_weekly_claims
+    mode: public_web_source
+    enabled: true
+    version: "1"
+    timezone: UTC
+    priority: 50
+    timeout_seconds: 15
+    retry_count: 2
+    requests_per_minute: 10
+    circuit_failure_threshold: 5
+  - name: ecb
+    mode: public_web_source
+    enabled: true
+    version: "1"
+    timezone: UTC
+    priority: 60
+    timeout_seconds: 15
+    retry_count: 2
+    requests_per_minute: 10
+    circuit_failure_threshold: 5
+  # ---- Legacy, inert adapters. Kept only for backward compatibility with anything that still
+  # imports FinancialModelingPrepProvider/FinnhubEconomicCalendarProvider — `enabled: false` means
+  # build_providers() never constructs them, so they make zero network requests, require no API
+  # key, and cannot appear as a required provider or block engine readiness. Do not set
+  # enabled: true without re-adding TEN_FMP_API_KEY/TEN_FINNHUB_API_KEY — they are not part of the
+  # active public_web_sources pipeline.
+  - name: fmp
+    mode: live_provider
+    enabled: false
+    version: "1"
+    timezone: UTC
+    priority: 900
     timeout_seconds: 10
     retry_count: 2
     requests_per_minute: 30
     circuit_failure_threshold: 5
     api_key_env: TEN_FMP_API_KEY
-    # FMP retired /api/v3 for post-2025-08-31 accounts (403 "Legacy Endpoint"); /stable is the
-    # current, supported base URL.
     base_url: https://financialmodelingprep.com/stable
-  # Optional fallback only — queried alongside FMP every sync so calendar data still arrives if
-  # FMP is down; never the primary source. Degrades to disabled automatically if TEN_FINNHUB_API_KEY
-  # is unset.
   - name: finnhub
     mode: live_provider
-    enabled: true
+    enabled: false
     version: "1"
     timezone: UTC
-    priority: 20
+    priority: 910
     timeout_seconds: 10
     retry_count: 2
     requests_per_minute: 30
@@ -40,12 +103,12 @@ providers:
     enabled: false
     version: "1"
     timezone: UTC
-    priority: 100
+    priority: 1000
     timeout_seconds: 10
     retry_count: 2
     requests_per_minute: 30
     circuit_failure_threshold: 5
-provider_priority: [fmp, finnhub, disabled]
+provider_priority: [bls, bea, federal_reserve, census_bureau, dol_weekly_claims, ecb, fmp, finnhub, disabled]
 windows:
   low: {pre_minutes: 5, imminent_minutes: 2, post_minutes: 5, cooldown_minutes: 5}
   medium: {pre_minutes: 15, imminent_minutes: 5, post_minutes: 15, cooldown_minutes: 15}
@@ -58,7 +121,15 @@ cluster_window_minutes: 30
 country_currency: {US: USD, GB: GBP, JP: JPY, CA: CAD, AU: AUD, NZ: NZD, CH: CHF, EU: EUR}
 symbol_overrides: {XAUUSD: [USD], BTCUSD: [USD], SPX: [USD], DAX: [EUR]}
 inverted_surprise_categories: [employment]
-freshness: {aging_minutes: 30, stale_minutes: 120, critical_minutes: 1440}
+# Public sources are refreshed every 6-12h (see processing.polling_interval_seconds below), not
+# every few minutes — freshness thresholds are scaled accordingly. A schedule fetched within the
+# last 12 hours is fresh; a temporary fetch failure has ample slack (up to 3 days) before the
+# calendar is treated as genuinely stale, since a still-usable last-known-good schedule must
+# survive several missed refresh cycles rather than degrading immediately.
+freshness: {aging_minutes: 720, stale_minutes: 1440, critical_minutes: 4320}
 api: {default_page_size: 50, maximum_page_size: 500, maximum_query_window_days: 366, maximum_history_window_days: 3650, maximum_observation_records: 500, maximum_revision_records: 500}
-processing: {polling_interval_seconds: 300, retention_events: 100000, retention_observations: 500000, retention_snapshots: 5000, cache_size: 1000, maximum_batch_size: 10000}
+# Calendar schedule refresh: once at startup, then every 6 hours — a rolling 7-days-back /
+# 30-days-forward window (see EconomicCalendarService._poll()). This is deliberately conservative
+# ("do not run a web search every few minutes") — public sources are polite-polled, not hammered.
+processing: {polling_interval_seconds: 21600, retention_events: 100000, retention_observations: 500000, retention_snapshots: 5000, cache_size: 1000, maximum_batch_size: 10000}
 repository_mode: memory

@@ -41,6 +41,7 @@ from .models import (
     EconomicEvent,
     EconomicEventStatus,
     EventCluster,
+    FreshnessState,
     InstrumentEventContext,
     ProviderStatus,
     RevisionType,
@@ -148,7 +149,7 @@ class EconomicCalendarService:
     async def start(self) -> None:
         if not self.initialized:
             await self.restore()
-        if self._scheduler is None and any(provider.mode.value == "live_provider" for provider in self.providers):
+        if self._scheduler is None and any(provider.mode.value in {"live_provider", "public_web_source"} for provider in self.providers):
             self._scheduler = asyncio.create_task(self._poll(), name="economic-calendar-sync")
 
     async def stop(self) -> None:
@@ -513,7 +514,7 @@ class EconomicCalendarService:
         return statuses
 
     def health(self) -> dict[str, object]:
-        live_configured = any(provider.mode.value == "live_provider" for provider in self.providers)
+        live_configured = any(provider.mode.value in {"live_provider", "public_web_source"} for provider in self.providers)
         if not live_configured:
             degraded = True
         elif self._last_provider_statuses:
@@ -546,4 +547,50 @@ class EconomicCalendarService:
             "replay_statistics": {"count": self.metrics.replay_count, "failures": self.metrics.replay_failures},
             "probabilistic_context": True,
             "trading_instruction": False,
+        }
+
+    async def layered_health(self) -> dict[str, object]:
+        """Separate process/source/parser/schedule/freshness/readiness facts — a source being
+        down is not the same fact as the engine having no usable schedule, and collapsing them
+        into one boolean is exactly the ambiguity this method exists to remove. The engine is
+        `ready` whenever ANY usable schedule exists (fresh or still-valid last-known-good), even
+        if some optional sources are currently failing."""
+        statuses = self._last_provider_statuses or await self.provider_status()
+        enabled_statuses = [item for item in statuses if item.enabled]
+        healthy_count = sum(1 for item in enabled_statuses if item.reachable and item.data_available)
+        snapshot = None
+        if self.metrics.latest_snapshot_id:
+            try:
+                snapshot = await self.repository.get_snapshot(UUID(self.metrics.latest_snapshot_id))
+            except Exception:
+                snapshot = None
+        schedule_available = bool(snapshot and snapshot.event_count > 0)
+        schedule_fresh = bool(snapshot and snapshot.freshness in {FreshnessState.FRESH, FreshnessState.AGING})
+        no_enabled_sources = not enabled_statuses
+        no_healthy_source = bool(enabled_statuses) and healthy_count == 0
+        if no_enabled_sources or (no_healthy_source and not schedule_available):
+            engine_readiness, is_degraded, degraded_reason = "unavailable", True, "no_usable_schedule"
+        elif not schedule_available:
+            engine_readiness, is_degraded, degraded_reason = "initializing", True, "no_schedule_yet"
+        elif healthy_count < len(enabled_statuses):
+            failed = len(enabled_statuses) - healthy_count
+            engine_readiness = "ready"
+            is_degraded = True
+            degraded_reason = "one_optional_source_failed" if failed == 1 else f"{failed}_optional_sources_failed"
+        elif not schedule_fresh:
+            engine_readiness, is_degraded, degraded_reason = "ready", True, "schedule_stale_but_usable"
+        else:
+            engine_readiness, is_degraded, degraded_reason = "ready", False, None
+        return {
+            "process_status": "healthy",
+            "sources_healthy": f"{healthy_count}/{len(enabled_statuses)}",
+            "schedule_available": schedule_available,
+            "schedule_fresh": schedule_fresh,
+            "engine_readiness": engine_readiness,
+            "is_degraded": is_degraded,
+            "degraded_reason": degraded_reason,
+            "source_statuses": [
+                {"name": item.provider_name, "reachable": item.reachable, "data_available": item.data_available, "connection_state": item.connection_state.value, "circuit_breaker_open": item.circuit_breaker_open}
+                for item in statuses
+            ],
         }

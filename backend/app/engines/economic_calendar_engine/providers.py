@@ -625,6 +625,18 @@ def build_providers(
                 )
             else:
                 result.append(DisabledProvider(config.name, config.version))
+        elif config.mode == ProviderMode.PUBLIC_WEB_SOURCE and config.enabled:
+            # Deferred import: `public_sources` imports this module (for `EconomicCalendarProvider`
+            # etc.), so importing it eagerly at module load time would be circular.
+            from .public_sources import PUBLIC_SOURCE_CLASSES
+
+            source_class = PUBLIC_SOURCE_CLASSES.get(config.name)
+            if source_class is None:
+                result.append(DisabledProvider(config.name, config.version))
+            elif config.base_url:
+                result.append(source_class(source_url=config.base_url, timeout_seconds=config.timeout_seconds))
+            else:
+                result.append(source_class(timeout_seconds=config.timeout_seconds))
         else:
             result.append(DisabledProvider(config.name, config.version))
     return tuple(result) or (DisabledProvider(),)

@@ -104,8 +104,12 @@ async def test_fmp_provider_never_logs_the_api_key(caplog: pytest.LogCaptureFixt
         target_logger.setLevel(original_level)
         target_logger.disabled = original_disabled
     assert seen_keys == [secret_key]  # the request itself must still carry the real key
-    assert caplog.records  # sanity: something was actually captured
-    for record in caplog.records:
+    # Only TEN's own logger is under test here — httpx's own request-line instrumentation is a
+    # separate concern (fixed at the source in backend/app/core/logging/setup.py, which sets
+    # httpx's logger to WARNING specifically because it otherwise logs full request URLs).
+    own_records = [record for record in caplog.records if record.name == target_logger.name]
+    assert own_records  # sanity: something was actually captured
+    for record in own_records:
         assert secret_key not in record.getMessage()
     await provider.close()
 
@@ -200,7 +204,13 @@ async def test_fmp_provider_maps_events_and_reports_healthy() -> None:
 
     provider = FinancialModelingPrepProvider(api_key="secret")
     _mounted(provider, handler)
-    result = await provider.fetch_events(_request())
+    # `fetch_events` stamps `available_at` with the real wall-clock `datetime.now(UTC)` (it's a
+    # "when did we fetch this" timestamp, not the event's own scheduled time), so the request
+    # window here must bracket the real current time rather than the module's fixed `NOW` —
+    # otherwise this assertion silently starts failing whenever a test run's wall-clock date drifts
+    # away from the hardcoded `NOW` constant used elsewhere in this file.
+    live_window = ProviderFetchRequest(start=datetime.now(UTC) - timedelta(days=1), end=datetime.now(UTC) + timedelta(days=1))
+    result = await provider.fetch_events(live_window)
     assert result.success_count == 2
     assert {item.raw_currency for item in result.observations} == {"USD", "EUR"}
 

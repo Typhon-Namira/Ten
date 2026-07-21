@@ -35,10 +35,26 @@ class CalendarModel(BaseModel):
 
 class ProviderMode(StrEnum):
     LIVE_PROVIDER = "live_provider"
+    #: A keyless adapter reading an official government/institutional public webpage, RSS feed, or
+    #: ICS calendar — never an authenticated API. See `public_sources/` for the concrete adapters.
+    PUBLIC_WEB_SOURCE = "public_web_source"
     FILE_IMPORT = "file_import"
     STATIC_FIXTURE = "static_fixture"
     IN_MEMORY_TEST_PROVIDER = "in_memory_test_provider"
     DISABLED = "disabled"
+
+
+class SourceType(StrEnum):
+    """What kind of thing a provider actually fetches — drives which `ProviderStatus` fields are
+    meaningful. A `KEYED_API` shows API-key/quota fields; a public source never does, because
+    those fields would be actively misleading (there is no key, no quota, no entitlement)."""
+
+    KEYED_API = "keyed_api"
+    PUBLIC_WEBPAGE = "public_webpage"
+    RSS_FEED = "rss_feed"
+    ICS_CALENDAR = "ics_calendar"
+    DETERMINISTIC_RULE = "deterministic_rule"
+    NONE = "none"
 
 
 class EconomicEventStatus(StrEnum):
@@ -310,6 +326,11 @@ class EconomicEvent(CalendarModel):
     configuration_version: str = "1.0.0"
     normalization_version: str = "1.0.0"
     canonical_name: str
+    # Deterministic slug from `public_sources.impact.canonicalize_title()` (e.g. "cpi",
+    # "fomc_rate_decision") — the dedup key and impact classification both key off this, not off
+    # free-text titles, so "CPI" from one source and "Consumer Price Index" from another are
+    # recognized as the same event type.
+    canonical_event_type: str = "unknown_event"
     display_name: str
     description: str | None = None
     category: EventCategory = EventCategory.UNKNOWN
@@ -394,6 +415,25 @@ class EconomicEvent(CalendarModel):
     def previous(self) -> float | None:
         return self.previous_value
 
+    @property
+    def schedule_available(self) -> bool:
+        """The minimum valid context for risk-window generation: identity, time, country/currency,
+        impact, source — this is true the moment a schedule entry exists, independent of whether
+        the release has actually happened yet."""
+        return self.scheduled_at_utc is not None
+
+    @property
+    def result_available(self) -> bool:
+        return self.actual_value is not None or self.actual_text is not None
+
+    @property
+    def forecast_available(self) -> bool:
+        return self.forecast_value is not None or self.forecast_text is not None
+
+    @property
+    def source_conflict(self) -> bool:
+        return self.conflict_state != ConflictState.NONE
+
 
 class EconomicEventRevision(CalendarModel):
     revision_id: UUID
@@ -462,6 +502,23 @@ class ProviderStatus(CalendarModel):
     raw_error: str | None = None
     capabilities: ProviderCapabilities = Field(default_factory=ProviderCapabilities)
     message: str = ""
+    # Public-source-specific fields. For `source_type != KEYED_API`, `api_key_configured` and the
+    # quota fields above are always False/None and must not be rendered by any UI — there is no
+    # key, so there is nothing to configure or exhaust. See `SourceType`'s docstring.
+    source_type: SourceType = SourceType.NONE
+    robots_policy_status: str = "unknown"
+    """One of "allowed", "disallowed", "unknown" — whether robots.txt permits fetching this path,
+    checked at adapter construction time; "disallowed" sources are never fetched (see
+    `HttpPublicCalendarSource`)."""
+    parser_version: str = "unknown"
+    events_parsed: int = 0
+    last_schedule_date: datetime | None = None
+    """The furthest-future scheduled event date this source's last successful fetch produced —
+    lets the dashboard show "schedule extends to <date>" instead of just "last fetch succeeded"."""
+    cache_age_seconds: float | None = None
+    circuit_breaker_open: bool = False
+    circuit_breaker_open_until: datetime | None = None
+    last_failure_category: str | None = None
 
 
 class DegradationState(CalendarModel):
@@ -500,9 +557,36 @@ class EconomicCalendarSnapshot(CalendarModel):
     provider_status: tuple[ProviderStatus, ...] = ()
     degradation: DegradationState = Field(default_factory=DegradationState)
     quality: float = Field(default=0, ge=0, le=1)
+    # `freshness` (kept for backward compatibility with every existing consumer) reflects schedule
+    # freshness specifically — the axis that gates risk-window trust. `result_freshness` and
+    # `source_fetch_freshness` are independent: a schedule fetched 2 hours ago can be perfectly
+    # fresh even if the most recent RELEASE was days ago, and vice versa.
     freshness: FreshnessState = FreshnessState.UNKNOWN
+    result_freshness: FreshnessState = FreshnessState.UNKNOWN
+    source_fetch_freshness: FreshnessState = FreshnessState.UNKNOWN
+    # True when this snapshot's schedule data came from a prior successful fetch rather than the
+    # current cycle — a temporarily failing source must not discard a still-usable schedule.
+    available_from_cached_schedule: bool = False
     probabilistic_context: bool = True
     trading_instruction: bool = False
+
+
+class RiskWindow(CalendarModel):
+    """A materialized, storable risk-window record — distinct from the ad-hoc phase computation in
+    `analyzer.instrument_context()`, which answers "what phase is symbol X in right now." This is
+    the durable, auditable "why is/was trading risk elevated" record the dashboard and
+    explainability layer cite directly."""
+
+    risk_window_id: UUID
+    event_id: UUID
+    canonical_event_type: str
+    window_start: datetime
+    window_end: datetime
+    reason: str
+    impact: EventImportance
+    source_confidence: float = Field(default=1.0, ge=0, le=1)
+    schedule_freshness: FreshnessState = FreshnessState.UNKNOWN
+    created_at: datetime
 
 
 class InstrumentEventContext(CalendarModel):

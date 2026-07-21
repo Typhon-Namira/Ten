@@ -1,3 +1,4 @@
+from .analyzer import materialize_risk_windows
 from .clock import Clock, FixedClock, SystemClock
 from .config import EconomicCalendarConfig, ProviderConfig, RiskWindowConfig
 from .engine import BaselineEconomicCalendarEngine, EconomicCalendarEngine
@@ -26,7 +27,9 @@ from .models import (
     PublicationState,
     RelevanceLevel,
     RevisionType,
+    RiskWindow,
     RiskWindowPhase,
+    SourceType,
     TimingPrecision,
     ValueType,
     payload_hash,
@@ -89,13 +92,16 @@ __all__ = [
     "PublicationState",
     "RelevanceLevel",
     "RevisionType",
+    "RiskWindow",
     "RiskWindowConfig",
     "RiskWindowPhase",
+    "SourceType",
     "SqlAlchemyEconomicCalendarRepository",
     "SystemClock",
     "TimingPrecision",
     "ValueType",
     "build_providers",
+    "materialize_risk_windows",
     "payload_hash",
     "stable_id",
 ]

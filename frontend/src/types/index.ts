@@ -438,6 +438,18 @@ export interface ProviderStatus {
   monthly_quota_limit: number | null
   raw_error: string | null
   message: string
+  /** "keyed_api" | "public_webpage" | "rss_feed" | "ics_calendar" | "deterministic_rule" | "none".
+   * For anything other than "keyed_api", the panel must never render API-key/quota fields — there
+   * is no key and no quota, so showing them would actively mislead. */
+  source_type: string
+  robots_policy_status: string
+  parser_version: string
+  events_parsed: number
+  last_schedule_date: string | null
+  cache_age_seconds: number | null
+  circuit_breaker_open: boolean
+  circuit_breaker_open_until: string | null
+  last_failure_category: string | null
 }
 
 export interface EngineInfluence {

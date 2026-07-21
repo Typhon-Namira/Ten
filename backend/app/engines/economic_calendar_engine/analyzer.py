@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .config import EconomicCalendarConfig
@@ -21,6 +21,7 @@ from .models import (
     InstrumentEventContext,
     ProviderStatus,
     RevisionType,
+    RiskWindow,
     RiskWindowPhase,
     payload_hash,
     stable_id,
@@ -136,18 +137,35 @@ def revision_between(previous: EconomicEvent | None, current: EconomicEvent, num
     )
 
 
+def _freshness_from_age_minutes(age_minutes: float, config: EconomicCalendarConfig) -> FreshnessState:
+    if age_minutes < config.freshness.aging_minutes:
+        return FreshnessState.FRESH
+    if age_minutes < config.freshness.stale_minutes:
+        return FreshnessState.AGING
+    if age_minutes < config.freshness.critical_minutes:
+        return FreshnessState.STALE
+    return FreshnessState.CRITICAL
+
+
 def freshness(now: datetime, statuses: tuple[ProviderStatus, ...], config: EconomicCalendarConfig) -> FreshnessState:
+    """Source-fetch freshness: how long ago any configured source last successfully responded —
+    this is what gates whether the *schedule itself* can be trusted (see `build_snapshot`'s
+    `source_fetch_freshness`, which is this same computation exposed under its own name)."""
     successes = [item.last_success for item in statuses if item.last_success]
     if not successes:
         return FreshnessState.UNKNOWN
-    age = (now - max(successes)).total_seconds() / 60
-    if age < config.freshness.aging_minutes:
-        return FreshnessState.FRESH
-    if age < config.freshness.stale_minutes:
-        return FreshnessState.AGING
-    if age < config.freshness.critical_minutes:
-        return FreshnessState.STALE
-    return FreshnessState.CRITICAL
+    return _freshness_from_age_minutes((now - max(successes)).total_seconds() / 60, config)
+
+
+def _result_freshness(now: datetime, events: tuple[EconomicEvent, ...], config: EconomicCalendarConfig) -> FreshnessState:
+    """Independent of source-fetch freshness: how long ago the most recent actual RESULT (not
+    just a schedule entry) became available — a schedule fetched 5 minutes ago can still have a
+    result that's a week stale if nothing has released since, and that must not read as the same
+    "freshness" as the fetch itself."""
+    released = [item.available_at for item in events if item.status in {EconomicEventStatus.RELEASED, EconomicEventStatus.REVISED, EconomicEventStatus.CORRECTED}]
+    if not released:
+        return FreshnessState.UNKNOWN
+    return _freshness_from_age_minutes((now - max(released)).total_seconds() / 60, config)
 
 
 def build_snapshot(
@@ -206,7 +224,41 @@ def build_snapshot(
         ),
         quality=clamp(quality),
         freshness=freshness(boundary, statuses, config),
+        result_freshness=_result_freshness(boundary, visible, config),
+        source_fetch_freshness=freshness(boundary, statuses, config),
+        # A degraded fetch that still has visible events means we're serving a previously
+        # persisted, still-usable schedule rather than a freshly confirmed one this cycle.
+        available_from_cached_schedule=degraded and bool(visible),
     )
+
+
+def materialize_risk_windows(events: tuple[EconomicEvent, ...], config: EconomicCalendarConfig, *, schedule_freshness: FreshnessState = FreshnessState.UNKNOWN) -> tuple[RiskWindow, ...]:
+    """Durable, citable risk-window records — one per non-cancelled scheduled event, using the
+    same per-importance pre/post windows `_phase()` already applies ad-hoc. This is what the
+    dashboard and explainability layer reference directly (`RiskWindow.risk_window_id`), rather
+    than re-deriving "when is/was this event's risk window" from scratch each time."""
+    windows: list[RiskWindow] = []
+    for item in events:
+        if item.scheduled_at_utc is None or item.is_cancelled:
+            continue
+        bounds = config.windows[item.importance.value]
+        start = item.scheduled_at_utc - timedelta(minutes=bounds.pre_minutes)
+        end = item.scheduled_at_utc + timedelta(minutes=bounds.post_minutes + bounds.cooldown_minutes)
+        windows.append(
+            RiskWindow(
+                risk_window_id=stable_id("risk-window", item.event_id, start.isoformat(), end.isoformat()),
+                event_id=item.event_id,
+                canonical_event_type=item.canonical_event_type,
+                window_start=start,
+                window_end=end,
+                reason=f"{item.display_name} ({item.importance.value} impact) scheduled {item.scheduled_at_utc.isoformat()}",
+                impact=item.importance,
+                source_confidence=item.source_quality * item.normalization_confidence,
+                schedule_freshness=schedule_freshness,
+                created_at=item.ingested_at,
+            )
+        )
+    return tuple(windows)
 
 
 def symbol_currencies(symbol: str, config: EconomicCalendarConfig) -> tuple[str, ...]:

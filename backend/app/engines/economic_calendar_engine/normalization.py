@@ -19,6 +19,7 @@ from .models import (
     ValueType,
     stable_id,
 )
+from .public_sources.impact import canonicalize_title
 
 
 @dataclass(frozen=True)
@@ -128,8 +129,14 @@ def normalize_observation(item: ProviderEventObservation, config: EconomicCalend
             else EconomicEventStatus.SCHEDULED
         )
     publication = PublicationState.FIRST_RELEASE if actual.value is not None else PublicationState.NOT_PUBLISHED
+    # Dedup key: canonical event type (not free-text title — "Consumer Price Index" from one
+    # source and "CPI" from another must collapse to the same key) + country + scheduled UTC date
+    # (the "release period"). Two sources reporting the same event on the same day always
+    # reconcile to one canonical TEN event; `reconcile()` then picks a winner by provider priority
+    # and flags `conflict_state` if the sources actually disagree on time/value.
+    canonical_event_type = canonicalize_title(item.raw_name)
     identity_time = scheduled.date().isoformat() if scheduled else "tentative"
-    event_id = stable_id("economic-event", country, currency, name, identity_time)
+    event_id = stable_id("economic-event", canonical_event_type, country, identity_time)
     unit = actual.unit or forecast.unit or previous.unit or item.raw_unit
     return EconomicEvent(
         event_id=event_id,
@@ -137,6 +144,7 @@ def normalize_observation(item: ProviderEventObservation, config: EconomicCalend
         schema_version=config.versions.schema_version,
         normalization_version=config.versions.normalization_version,
         canonical_name=name,
+        canonical_event_type=canonical_event_type,
         display_name=item.raw_name.strip(),
         category=category,
         importance=importance,
