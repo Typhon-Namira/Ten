@@ -79,8 +79,8 @@ async def test_all_read_only_routes_and_safe_validation() -> None:
 @pytest.mark.asyncio
 async def test_diagnostics_reports_five_independent_stages() -> None:
     """A synced, reachable provider with a relevant USD event scheduled must report every
-    stage healthy — proving 'degraded' isn't reported just because *some* symbol elsewhere
-    might have no relevant events, and proving each stage is genuinely independent."""
+    stage healthy — proving 'unavailable' isn't reported just because *some* symbol elsewhere
+    has no relevant events right now, and proving each stage is genuinely independent."""
     app, _ = await application()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -94,14 +94,18 @@ async def test_diagnostics_reports_five_independent_stages() -> None:
         assert body["relevant_events"]["status"] == "available"
         assert body["trading_context"]["status"] == "ready"
 
-        # An irrelevant symbol has no matching currency: relevant/trading_context degrade
-        # independently while provider_health/downloaded_events/mapped_events stay healthy —
-        # proving the five stages don't collapse into one shared boolean.
+        # An irrelevant symbol has no matching currency: `relevant_events` reports it while every
+        # other stage — including `trading_context` — stays healthy, since "no news for this
+        # symbol right now" is the routine, expected state and must never be conflated with the
+        # provider/calendar sync actually being unavailable (a real failure). Regression coverage
+        # for a bug where `trading_context` used to go "unavailable" for every symbol with no
+        # imminent news, which permanently HARD_BLOCKed decisions even with a fully healthy,
+        # live-syncing provider.
         unrelated = await client.get("/economic-calendar/diagnostics", params={"symbol": "GBPCHF"})
         unrelated_body = unrelated.json()
         assert unrelated_body["provider_health"]["status"] == "healthy"
         assert unrelated_body["relevant_events"]["status"] == "none_relevant"
-        assert unrelated_body["trading_context"]["status"] == "unavailable"
+        assert unrelated_body["trading_context"]["status"] == "ready"
         assert (await client.get(f"/economic-calendar/events/{'0' * 8}-0000-0000-0000-000000000000")).status_code == 404
         assert (await client.get("/economic-calendar/context/../../bad")).status_code in {404, 422}
         assert (await client.get("/economic-calendar/events", params={"country": "USA"})).status_code == 422

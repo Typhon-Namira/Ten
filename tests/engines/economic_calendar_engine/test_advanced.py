@@ -145,6 +145,31 @@ def test_remaining_revision_and_snapshot_branches() -> None:
     assert no_mapping.unavailable_context
 
 
+def test_no_relevant_event_is_not_reported_as_unavailable_context() -> None:
+    """Regression test: `unavailable_context` used to be set whenever a symbol simply had no
+    matching-currency event in the window (`not relevant`) — the routine, expected state most of
+    the time — which permanently HARD_BLOCKed signal_decision_engine's economic-event rule even
+    with a fully healthy, live-syncing provider. It must only reflect genuine unavailability: the
+    provider being unreachable, or the calendar sync being stale/never-synced."""
+    healthy = (ProviderStatus(provider_name="p", mode=ProviderMode.LIVE_PROVIDER, enabled=True, reachable=True, last_success=NOW),)
+    snapshot = build_snapshot((economic_event(),), NOW, NOW - timedelta(days=1), NOW + timedelta(days=1), healthy, EconomicCalendarConfig())
+    assert not snapshot.degradation.is_degraded
+    assert snapshot.freshness == FreshnessState.FRESH
+
+    irrelevant = instrument_context("EURJPY", snapshot, EconomicCalendarConfig())
+    assert irrelevant.relevance_score == 0
+    assert irrelevant.unavailable_context == ()
+
+    relevant = instrument_context("XAUUSD", snapshot, EconomicCalendarConfig())
+    assert relevant.relevance_score == 1.0
+    assert relevant.unavailable_context == ()
+
+    stale = (ProviderStatus(provider_name="p", mode=ProviderMode.LIVE_PROVIDER, enabled=True, reachable=True, last_success=NOW - timedelta(hours=3)),)
+    stale_snapshot = build_snapshot((economic_event(),), NOW, NOW - timedelta(days=1), NOW + timedelta(days=1), stale, EconomicCalendarConfig())
+    assert stale_snapshot.freshness == FreshnessState.STALE
+    assert instrument_context("XAUUSD", stale_snapshot, EconomicCalendarConfig()).unavailable_context
+
+
 @pytest.mark.asyncio
 async def test_provider_base_and_datetime_validation() -> None:
     class Concrete(EconomicCalendarProvider):

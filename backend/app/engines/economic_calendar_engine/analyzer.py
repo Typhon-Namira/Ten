@@ -303,18 +303,28 @@ def instrument_context(symbol: str, snapshot: EconomicCalendarSnapshot, config: 
         cooldown_window_minutes=window.cooldown_minutes,
         direct_currency_matches=tuple(sorted(set(currencies) & {code for item in relevant for code in item.currency_codes})),
         conflicting_events=tuple(item.event_id for item in relevant if item.conflict_state != ConflictState.NONE),
-        unavailable_context=("no relevant event mapping",) if not relevant else (),
+        # "No relevant event right now" is the routine, expected state most of the time (most days
+        # have no high-impact USD news) — it must NOT be conflated with genuine unavailability
+        # (the provider being unreachable, or the calendar sync being stale/never-synced), which is
+        # what fail-closed trading logic (signal_decision_engine's `economic_context_unavailable`
+        # HARD_BLOCK) actually needs to react to. Previously this used `not relevant`, which made
+        # every symbol with no imminent news permanently "unavailable" and blocked nearly every
+        # decision even with a fully healthy, live-syncing provider.
+        unavailable_context=snapshot.degradation.reasons
+        if snapshot.degradation.is_degraded
+        else (f"calendar data freshness is {snapshot.freshness.value}",)
+        if snapshot.freshness in {FreshnessState.STALE, FreshnessState.CRITICAL, FreshnessState.UNKNOWN}
+        else (),
         primary_explanation=f"Calendar context is {phase.value} with bounded risk score {risk:.3f}; it is probabilistic context, not a trading instruction.",
         limitations=("importance is provider/config context, not guaranteed market impact",),
     )
 
 
 def staged_diagnostics(snapshot: EconomicCalendarSnapshot, context: InstrumentEventContext) -> dict[str, Any]:
-    """Break the collapsed `degraded`/`unavailable_context` booleans into the five independent
-    stages of the calendar pipeline, so "0 relevant events right now" (routine, expected most of
-    the time) is distinguishable from "the provider is actually unreachable" (a real failure) —
-    both currently surface as the same opaque signal downstream. Purely additive/read-only: does
-    not change `degradation`/`unavailable_context`, which fail-closed trading logic still uses."""
+    """Break `degraded`/`unavailable_context` into the five independent stages of the calendar
+    pipeline for display, so "0 relevant events right now" (routine, expected most of the time) is
+    visibly distinguishable from "the provider is actually unreachable" (a real failure) — see
+    `instrument_context()` for the fix that decoupled these in `unavailable_context` itself."""
     reachable_providers = [item for item in snapshot.provider_status if item.enabled and item.reachable]
     mapped_count = snapshot.event_count - snapshot.unavailable_count
     return {
@@ -335,7 +345,10 @@ def staged_diagnostics(snapshot: EconomicCalendarSnapshot, context: InstrumentEv
             "unmapped_count": snapshot.unavailable_count,
         },
         "relevant_events": {
-            "status": "none_relevant" if context.unavailable_context else "available",
+            # `relevance_score` (not `unavailable_context`) is the correct signal here — it's
+            # purely "did any event match this symbol's currencies," independent of whether the
+            # calendar sync itself is healthy.
+            "status": "available" if context.relevance_score > 0 else "none_relevant",
             "symbol": context.symbol,
             "active_count": len(context.active_relevant_events),
             "has_previous_event": context.previous_relevant_event is not None,
