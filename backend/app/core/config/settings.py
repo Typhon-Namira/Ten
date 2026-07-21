@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     live_pipeline_enabled: bool = True
     integration_worker_enabled: bool = False
     market_data_worker_enabled: bool = False
-    market_data_provider: str = "twelve_data"
+    market_data_provider: str = "lbma_gold_price"
     market_data_symbols: Annotated[tuple[str, ...], NoDecode] = ("XAUUSD",)
     market_data_timeframes: Annotated[tuple[str, ...], NoDecode] = ("M15",)
     market_data_bootstrap_enabled: bool = True
@@ -95,7 +95,20 @@ class Settings(BaseSettings):
                 raise ValueError("production CORS cannot allow every origin")
         if set(self.api_keys.values()) - {"viewer", "operator", "admin"}:
             raise ValueError("TEN_API_KEYS roles must be viewer, operator, or admin")
-        supported_providers = {"twelve_data", "oanda", "alpha_vantage", "financial_modeling_prep"}
+        # Keyless public sources (active by default) + the disabled-by-default legacy paid/keyed
+        # and robots-blocked adapters — see backend/app/engines/market_data_engine/adapters.py.
+        supported_providers = {
+            "lbma_gold_price",
+            "kraken",
+            "okx",
+            "yahoo_finance",
+            "stooq",
+            "binance",
+            "twelve_data",
+            "oanda",
+            "alpha_vantage",
+            "financial_modeling_prep",
+        }
         if self.market_data_provider not in supported_providers:
             raise ValueError("TEN_MARKET_DATA_PROVIDER is unsupported")
         supported_timeframes = {"M1", "M5", "M15", "M30", "H1", "H4", "D1"}

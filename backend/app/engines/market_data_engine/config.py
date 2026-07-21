@@ -10,7 +10,9 @@ class ProviderConfig(BaseModel):
     enabled: bool = True
     priority: int = Field(default=100, ge=0)
     base_url: str
-    api_key_env: str
+    # `None` for keyless public-source providers (LBMA, Kraken, OKX, ...) — `build_market_data_service`
+    # only requires and reads an env var for providers that actually need one.
+    api_key_env: str | None = None
     account_id_env: str | None = None
     request_timeout_seconds: float = Field(default=15, gt=0)
     quota_per_minute: int | None = Field(default=None, ge=1)
@@ -29,6 +31,13 @@ class ValidationConfig(BaseModel):
     gap_tolerance_multiplier: float = Field(default=1.5, ge=1)
     volatility_spike_multiplier: float = Field(default=8, gt=1)
     minimum_quality_score: float = Field(default=60, ge=0, le=100)
+    # Cross-source close-price deviation thresholds used by `MarketDataValidator.compare()`.
+    # Below `cross_source_tolerance`: no anomaly. Between the two: flagged as a
+    # `PROVIDER_INCONSISTENCY` anomaly but the candle is still served. Above
+    # `cross_source_quarantine_tolerance`: the candle is dropped entirely and treated as a gap
+    # (never fabricated/interpolated) — see `MarketDataService._cross_check()`.
+    cross_source_tolerance: float = Field(default=0.01, gt=0)
+    cross_source_quarantine_tolerance: float = Field(default=0.05, gt=0)
 
 
 class MarketDataConfig(BaseModel):

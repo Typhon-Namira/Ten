@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from backend.app.core.net.robots import RobotsPolicy, evaluate_robots_policy
+
 from .exceptions import ProviderRateLimitedError, ProviderResponseError
 from .models import Candle, Timeframe
 from .providers import (
@@ -19,9 +21,14 @@ from .providers import (
     ProviderQuota,
     ProviderRequest,
 )
+from .ssrf import assert_safe_public_url
 from .symbols import provider_symbol
 
 logger = logging.getLogger(__name__)
+
+#: Identifies TEN to every public source it fetches from without a key — matches the convention
+#: already established in `economic_calendar_engine/public_sources/base.py`.
+USER_AGENT = "TEN-MarketData/1.0 (+https://github.com/; institutional market analysis; contact via repository issues)"
 
 
 def _parse_retry_after(headers: httpx.Headers) -> float | None:
@@ -68,22 +75,44 @@ def _classify_http_status(status_code: int | None) -> str:
 
 
 class HttpMarketDataProvider(MarketDataProvider):
+    #: Overridden `False` by keyless public-source adapters (LBMA, Kraken, OKX, ...) — everything
+    #: else in this shared base (retry/backoff, rate gating, latency tracking, quota tracking) is
+    #: identical whether or not a provider needs a key, so keyless adapters reuse this base class
+    #: directly rather than duplicating it.
+    requires_api_key: bool = True
+    #: Overridden `True` by every public-source adapter added in the keyless migration (LBMA,
+    #: Kraken, OKX, and the disabled-by-default Yahoo/Stooq/Binance legacy adapters). Left `False`
+    #: for the pre-existing keyed adapters so their tests' `base_url="https://example.test"`
+    #: fixtures keep working unchanged — SSRF-checking a developer-configured, already-trusted paid
+    #: API host adds little, while enforcing it retroactively would break existing test contracts
+    #: for no safety benefit.
+    enforce_domain_allowlist: bool = False
+    #: Overridden `True`/`False` per public-source adapter — `False` means "never checked, always
+    #: treated as allowed" (used by sources like LBMA that don't need the extra request), `True`
+    #: means robots.txt must be evaluated before the first real fetch (used by every adapter whose
+    #: host is known or suspected to restrict automated access).
+    check_robots: bool = False
+
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str = "",
         base_url: str,
         timeout_seconds: float = 15,
         account_id: str | None = None,
         requests_per_minute: int | None = None,
         max_rate_limit_retries: int = 2,
     ) -> None:
-        if not api_key:
+        if self.requires_api_key and not api_key:
             raise ValueError(f"{self.provider_name.value} API key is required")
+        if self.enforce_domain_allowlist:
+            assert_safe_public_url(base_url)
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.account_id = account_id
-        self._client = httpx.AsyncClient(timeout=timeout_seconds)
+        self._client = httpx.AsyncClient(timeout=timeout_seconds, headers={"User-Agent": USER_AGENT})
+        self._robots_policy: RobotsPolicy = RobotsPolicy.UNKNOWN
+        self._robots_checked = False
         # `last_latency_ms` is the true bottleneck — the raw duration of the single HTTP call that
         # actually finished last. `last_total_latency_ms` is the full wall-clock time `_get()`
         # spent including every 429 retry's backoff sleep and rate-gate queueing wait. Reporting
@@ -166,6 +195,18 @@ class HttpMarketDataProvider(MarketDataProvider):
     async def close(self) -> None:
         await self._client.aclose()
 
+    async def _ensure_robots_allowed(self, url: str) -> None:
+        """Checked once per provider instance, not on every poll — mirrors
+        `HttpPublicCalendarSource._ensure_robots_checked()` in the economic calendar engine.
+        Raises `ProviderResponseError` on an explicit `Disallow`; never bypasses it."""
+        if not self.check_robots or self._robots_checked:
+            return
+        self._robots_policy = await evaluate_robots_policy(self._client, url, user_agent=USER_AGENT)
+        self._robots_checked = True
+        if self._robots_policy is RobotsPolicy.DISALLOWED:
+            logger.warning("market_data.provider.robots_disallowed: provider=%s url=%s", self.provider_name.value, url)
+            raise ProviderResponseError(f"{self.provider_name.value} robots.txt disallows automated access to {url}")
+
     async def fetch_latest(self, symbol: str, timeframe: Timeframe) -> Candle:
         candles = await self.fetch_history(ProviderRequest(symbol=symbol, timeframe=timeframe, limit=1))
         if not candles:
@@ -182,6 +223,16 @@ def _parse_timestamp(value: str | int | float) -> datetime:
         return datetime.fromtimestamp(value, UTC)
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _period_has_closed(timestamp: datetime, timeframe: Timeframe, *, now: datetime | None = None) -> bool:
+    """No-lookahead guard shared by every public-source adapter: a candle is final only once its
+    own period has fully elapsed. None of the new keyless sources provide OANDA's explicit
+    `complete` flag reliably (OKX does via `confirm`; Kraken and LBMA provide nothing), so this
+    computed check is the one mechanism every adapter can rely on — it is deliberately applied even
+    where a source-native completion flag also exists, as a second, source-independent backstop."""
+    boundary = now or datetime.now(UTC)
+    return timestamp + timeframe.duration <= boundary
 
 
 class TwelveDataProvider(HttpMarketDataProvider):
@@ -449,6 +500,531 @@ class OandaProvider(HttpMarketDataProvider):
                 )
             )
         return candles
+
+
+class LbmaGoldPriceProvider(HttpMarketDataProvider):
+    """The London Bullion Market Association's own daily AM/PM gold price fix — the actual
+    industry benchmark the global gold market prices against. Published at
+    https://prices.lbma.org.uk with no robots.txt at all (checked empirically: an empty response,
+    not an explicit Disallow) and no authentication of any kind. This is the one source in this
+    engine that is NOT a proxy instrument — it is the official reference price itself.
+
+    LBMA publishes one AM fixing and, on most trading days, a second PM fixing — never intraday
+    ticks — so this adapter only supports `D1`. Each daily candle uses the AM fix as `open` and the
+    PM fix (when published that day) as `close`, with `high`/`low` taken as the max/min of the two
+    real observed fixes — both are genuine published values, never interpolated or fabricated. On
+    a day with only an AM fix (LBMA occasionally omits the PM fix, e.g. around some holidays), all
+    four OHLC fields equal that single fix rather than guessing a second value.
+    """
+
+    provider_name = ProviderName.LBMA_GOLD_PRICE
+    requires_api_key = False
+    enforce_domain_allowlist = True
+    check_robots = True
+    capabilities = ProviderCapabilities(
+        historical=True,
+        realtime_polling=False,  # a fixing is set once or twice per session, never polled live
+        volume=False,  # LBMA publishes no trade volume alongside the fix
+        supported_symbols=("XAUUSD",),
+        supported_timeframes=(Timeframe.D1,),
+    )
+    AM_ENDPOINT = "/json/gold_am.json"
+    PM_ENDPOINT = "/json/gold_pm.json"
+
+    async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        if request.timeframe != Timeframe.D1:
+            raise ProviderResponseError("LBMA Gold Price only publishes daily fixings")
+        await self._ensure_robots_allowed(f"{self.base_url}{self.AM_ENDPOINT}")
+        am_data = await self._get(self.AM_ENDPOINT, params={})
+        if not isinstance(am_data, list):
+            raise ProviderResponseError("LBMA gold_am.json response must be a list")
+        pm_by_date: dict[str, float] = {}
+        try:
+            pm_data = await self._get(self.PM_ENDPOINT, params={})
+            if isinstance(pm_data, list):
+                for row in pm_data:
+                    try:
+                        value = row["v"][0]
+                    except (KeyError, IndexError, TypeError):
+                        continue
+                    if value is not None:
+                        pm_by_date[row["d"]] = float(value)
+        except ProviderResponseError:
+            # The PM fix is best-effort supplementary detail — an AM-only candle (O=H=L=C) is
+            # still honest, real data, so a failed PM fetch must not fail the whole request.
+            logger.warning("LBMA PM fix fetch failed; continuing with AM-only candles: provider=%s", self.provider_name.value)
+        today = datetime.now(UTC).date()
+        candles: list[Candle] = []
+        for row in am_data:
+            try:
+                day = row["d"]
+                am_value = row["v"][0]
+            except (KeyError, IndexError, TypeError):
+                continue
+            if am_value is None:
+                continue  # LBMA marks a non-trading day (e.g. bank holiday) with a null value
+            timestamp = datetime.fromisoformat(day).replace(tzinfo=UTC)
+            if timestamp.date() >= today:
+                continue  # no-lookahead: only a fully-elapsed trading day's fix is ever final
+            if request.start and timestamp < request.start:
+                continue
+            if request.end and timestamp > request.end:
+                continue
+            am = float(am_value)
+            pm = pm_by_date.get(day)
+            candles.append(
+                Candle(
+                    timestamp=timestamp,
+                    symbol=request.symbol,
+                    timeframe=Timeframe.D1,
+                    open=am,
+                    high=max(am, pm) if pm is not None else am,
+                    low=min(am, pm) if pm is not None else am,
+                    close=pm if pm is not None else am,
+                    volume=0,
+                    provider=self.provider_name.value,
+                )
+            )
+        return sorted(candles, key=lambda candle: candle.timestamp)[-request.limit :]
+
+
+# Both PAXG (Paxos Gold, used by KrakenGoldProxyProvider) and XAUT (Tether Gold, used by
+# OkxGoldProxyProvider) are ERC-20 tokens redeemable for allocated LBMA-grade physical gold bars,
+# each 1 token = 1 fine troy ounce. Both trade on open, liquid exchange order books and closely
+# track the LBMA spot benchmark, but neither IS spot XAU/USD: exchange supply/demand can introduce
+# a small premium or discount versus the benchmark, particularly in thin liquidity. Per the
+# explicit migration brief, these are used only as supplementary, clearly-labeled proxy
+# instruments for intraday coverage and cross-source validation — never as the sole source for a
+# request. Deliberately two different token issuers on two different exchanges, so a single
+# issuer's peg anomaly or a single exchange's order-book glitch cannot look like two
+# independently-confirming sources agreeing.
+
+
+class KrakenGoldProxyProvider(HttpMarketDataProvider):
+    """Kraken's public, keyless OHLC endpoint for PAXG/USD (Paxos Gold) — a supplementary,
+    clearly-labeled gold-token proxy instrument, never the sole source (see the module-level note
+    above this class). `api.kraken.com` publishes no robots.txt at all (a 404, not an explicit
+    Disallow) — treated as allowed per TEN's robots policy (absence is not a disallowance)."""
+
+    provider_name = ProviderName.KRAKEN
+    requires_api_key = False
+    enforce_domain_allowlist = True
+    check_robots = True
+    capabilities = ProviderCapabilities(
+        historical=True,
+        realtime_polling=True,
+        volume=True,
+        supported_symbols=("XAUUSD",),
+        supported_timeframes=tuple(Timeframe),
+        maximum_history_candles=720,  # Kraken's public OHLC endpoint returns ~720 recent points
+    )
+    OHLC_ENDPOINT = "/0/public/OHLC"
+    _intervals = {
+        Timeframe.M1: 1,
+        Timeframe.M5: 5,
+        Timeframe.M15: 15,
+        Timeframe.M30: 30,
+        Timeframe.H1: 60,
+        Timeframe.H4: 240,
+        Timeframe.D1: 1440,
+    }
+
+    async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        pair = provider_symbol(self.provider_name.value, request.symbol)
+        await self._ensure_robots_allowed(f"{self.base_url}{self.OHLC_ENDPOINT}")
+        data = await self._get(self.OHLC_ENDPOINT, params={"pair": pair, "interval": self._intervals[request.timeframe]})
+        if not isinstance(data, dict):
+            raise ProviderResponseError("Kraken OHLC response must be an object")
+        errors = data.get("error")
+        if errors:
+            raise ProviderResponseError(f"Kraken error: {errors}")
+        result = data.get("result")
+        rows = result.get(pair) if isinstance(result, dict) else None
+        if not isinstance(rows, list) and isinstance(result, dict):
+            # Kraken's response key for a pair does not always echo the exact requested spelling —
+            # `result` otherwise only ever contains a `last` pagination cursor alongside it, so a
+            # single remaining series is unambiguously the one requested.
+            candidates = {key: value for key, value in result.items() if key != "last" and isinstance(value, list)}
+            if len(candidates) == 1:
+                rows = next(iter(candidates.values()))
+        if not isinstance(rows, list):
+            raise ProviderResponseError("Kraken OHLC response missing the requested pair's series")
+        now = datetime.now(UTC)
+        candles: list[Candle] = []
+        for row in rows:
+            try:
+                timestamp = datetime.fromtimestamp(float(row[0]), UTC)
+                open_, high, low, close = float(row[1]), float(row[2]), float(row[3]), float(row[4])
+                volume = float(row[6])
+            except (IndexError, TypeError, ValueError):
+                continue
+            if not _period_has_closed(timestamp, request.timeframe, now=now):
+                continue  # Kraken's own docs: the last row is always the still-forming interval
+            if request.start and timestamp < request.start:
+                continue
+            if request.end and timestamp > request.end:
+                continue
+            candles.append(
+                Candle(
+                    timestamp=timestamp,
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    open=open_,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=volume,
+                    provider=self.provider_name.value,
+                )
+            )
+        return sorted(candles, key=lambda candle: candle.timestamp)[-request.limit :]
+
+
+class OkxGoldProxyProvider(HttpMarketDataProvider):
+    """OKX's public, keyless candles endpoint for XAUT/USDT (Tether Gold) — a supplementary,
+    clearly-labeled gold-token proxy instrument, never the sole source (see the module-level note
+    above `KrakenGoldProxyProvider`). `www.okx.com/robots.txt` has no blanket disallow and
+    explicitly `Allow`s `/api/*?` query-parameterized paths — the clearest allow signal found
+    during this migration."""
+
+    provider_name = ProviderName.OKX
+    requires_api_key = False
+    enforce_domain_allowlist = True
+    check_robots = True
+    capabilities = ProviderCapabilities(
+        historical=True,
+        realtime_polling=True,
+        volume=True,
+        supported_symbols=("XAUUSD",),
+        supported_timeframes=tuple(Timeframe),
+        maximum_history_candles=300,  # OKX's public candles endpoint caps `limit` at 300 per call
+    )
+    CANDLES_ENDPOINT = "/api/v5/market/candles"
+    _bars = {
+        Timeframe.M1: "1m",
+        Timeframe.M5: "5m",
+        Timeframe.M15: "15m",
+        Timeframe.M30: "30m",
+        Timeframe.H1: "1H",
+        Timeframe.H4: "4H",
+        Timeframe.D1: "1D",
+    }
+
+    async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        inst_id = provider_symbol(self.provider_name.value, request.symbol)
+        await self._ensure_robots_allowed(f"{self.base_url}{self.CANDLES_ENDPOINT}")
+        data = await self._get(
+            self.CANDLES_ENDPOINT, params={"instId": inst_id, "bar": self._bars[request.timeframe], "limit": min(request.limit, 300)}
+        )
+        if not isinstance(data, dict) or data.get("code") != "0":
+            raise ProviderResponseError(f"OKX error: {data.get('msg') if isinstance(data, dict) else 'invalid response'}")
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            raise ProviderResponseError("OKX candles response missing data")
+        now = datetime.now(UTC)
+        candles: list[Candle] = []
+        for row in rows:
+            try:
+                timestamp = datetime.fromtimestamp(int(row[0]) / 1000, UTC)
+                open_, high, low, close, volume = float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])
+                confirmed = row[8] == "1"
+            except (IndexError, TypeError, ValueError):
+                continue
+            # `confirm` is OKX's own explicit completion flag — trusted first; the computed
+            # period-elapsed check runs as a second, source-independent backstop regardless.
+            if not confirmed or not _period_has_closed(timestamp, request.timeframe, now=now):
+                continue
+            if request.start and timestamp < request.start:
+                continue
+            if request.end and timestamp > request.end:
+                continue
+            candles.append(
+                Candle(
+                    timestamp=timestamp,
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    open=open_,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=volume,
+                    provider=self.provider_name.value,
+                )
+            )
+        # OKX returns newest-first.
+        return sorted(candles, key=lambda candle: candle.timestamp)[-request.limit :]
+
+
+class YahooFinanceProvider(HttpMarketDataProvider):
+    """Yahoo Finance's public `/v8/finance/chart` endpoint — technically keyless and returns clean
+    OHLCV JSON for `GC=F` (COMEX gold futures; Yahoo no longer serves `XAUUSD=X`/`XAU=X` spot from
+    this endpoint as of this migration — both return "No data found, symbol may be delisted").
+
+    **Permanently disabled by default and not part of the active provider set.** Both
+    `query1.finance.yahoo.com` and `query2.finance.yahoo.com` publish a robots.txt with
+    `User-agent: * / Disallow: /` — an explicit, blanket disallow of all automated access, checked
+    empirically during this migration. `check_robots=True` below means this adapter will refuse to
+    fetch and raise even if an operator manually flips `enabled: true` in config, rather than
+    silently bypassing that policy. Kept fully implemented (not a stub) in case Yahoo's robots.txt
+    policy changes in the future, or so an operator can consciously fork/override it having
+    understood the ToS implication — never enable this without re-checking robots.txt first."""
+
+    provider_name = ProviderName.YAHOO_FINANCE
+    requires_api_key = False
+    enforce_domain_allowlist = True
+    check_robots = True
+    capabilities = ProviderCapabilities(
+        historical=True,
+        realtime_polling=True,
+        volume=True,
+        supported_symbols=("XAUUSD",),
+        supported_timeframes=tuple(Timeframe),
+    )
+    CHART_ENDPOINT = "/v8/finance/chart"
+    _intervals = {
+        Timeframe.M1: "1m",
+        Timeframe.M5: "5m",
+        Timeframe.M15: "15m",
+        Timeframe.M30: "30m",
+        Timeframe.H1: "60m",
+        Timeframe.H4: "60m",  # Yahoo has no native 4h interval; H4 is aggregated from H1 below
+        Timeframe.D1: "1d",
+    }
+    _ranges = {
+        Timeframe.M1: "1d",
+        Timeframe.M5: "5d",
+        Timeframe.M15: "5d",
+        Timeframe.M30: "1mo",
+        Timeframe.H1: "1mo",
+        Timeframe.H4: "3mo",
+        Timeframe.D1: "2y",
+    }
+
+    async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        symbol = provider_symbol(self.provider_name.value, request.symbol)
+        url = f"{self.base_url}{self.CHART_ENDPOINT}/{symbol}"
+        await self._ensure_robots_allowed(url)  # always raises today — see class docstring
+        fetch_interval = "60m" if request.timeframe == Timeframe.H4 else self._intervals[request.timeframe]
+        data = await self._get(f"{self.CHART_ENDPOINT}/{symbol}", params={"interval": fetch_interval, "range": self._ranges[request.timeframe]})
+        result = data.get("chart", {}).get("result") if isinstance(data, dict) else None
+        if not result or not isinstance(result, list):
+            error = data.get("chart", {}).get("error") if isinstance(data, dict) else None
+            raise ProviderResponseError(f"Yahoo Finance chart error: {error}")
+        payload = result[0]
+        timestamps = payload.get("timestamp") or []
+        quote = (payload.get("indicators", {}).get("quote") or [{}])[0]
+        now = datetime.now(UTC)
+        base_candles: list[Candle] = []
+        for index, epoch in enumerate(timestamps):
+            try:
+                open_, high, low, close = quote["open"][index], quote["high"][index], quote["low"][index], quote["close"][index]
+                if None in (open_, high, low, close):
+                    continue  # Yahoo pads illiquid intraday minutes with nulls; never fabricate a fill
+                timestamp = datetime.fromtimestamp(epoch, UTC)
+            except (KeyError, IndexError, TypeError):
+                continue
+            source_interval = Timeframe.H1 if request.timeframe == Timeframe.H4 else request.timeframe
+            if not _period_has_closed(timestamp, source_interval, now=now):
+                continue
+            base_candles.append(
+                Candle(
+                    timestamp=timestamp,
+                    symbol=request.symbol,
+                    timeframe=source_interval,
+                    open=float(open_),
+                    high=float(high),
+                    low=float(low),
+                    close=float(close),
+                    volume=float(quote.get("volume", [0] * len(timestamps))[index] or 0),
+                    provider=self.provider_name.value,
+                )
+            )
+        base_candles.sort(key=lambda candle: candle.timestamp)
+        if request.timeframe == Timeframe.H4:
+            base_candles = _aggregate_candles(base_candles, Timeframe.H4, self.provider_name.value)
+        if request.start:
+            base_candles = [item for item in base_candles if item.timestamp >= request.start]
+        if request.end:
+            base_candles = [item for item in base_candles if item.timestamp <= request.end]
+        return base_candles[-request.limit :]
+
+
+class StooqProvider(HttpMarketDataProvider):
+    """Stooq's keyless CSV download endpoint (`/q/d/l/?s=xauusd&i=d`) for spot gold history.
+
+    **Permanently disabled by default and not part of the active provider set, for two independent
+    reasons found during this migration:** (1) `stooq.com/robots.txt` disallows all automated
+    access for every user-agent except Googlebot/Bingbot by name; (2) the endpoint itself now
+    serves a JavaScript proof-of-work "verify your browser" challenge instead of CSV data — solving
+    it would be exactly the kind of automated-access-restriction bypass this project must never do.
+    Because of (2), the CSV column format below could NOT be empirically re-verified against a live
+    response during this migration; it is written from Stooq's long-stable, widely-documented
+    `Date,Open,High,Low,Close,Volume` format used by numerous other open-source integrations, but
+    should be treated as unverified until checked against a real response. `check_robots=True`
+    means this adapter refuses to fetch even if manually enabled."""
+
+    provider_name = ProviderName.STOOQ
+    requires_api_key = False
+    enforce_domain_allowlist = True
+    check_robots = True
+    capabilities = ProviderCapabilities(
+        historical=True,
+        realtime_polling=False,
+        volume=True,
+        supported_symbols=("XAUUSD",),
+        supported_timeframes=(Timeframe.D1,),
+    )
+    DOWNLOAD_ENDPOINT = "/q/d/l/"
+
+    async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        if request.timeframe != Timeframe.D1:
+            raise ProviderResponseError("this Stooq adapter only supports daily (i=d) history")
+        symbol = provider_symbol(self.provider_name.value, request.symbol)
+        url = f"{self.base_url}{self.DOWNLOAD_ENDPOINT}?s={symbol}&i=d"
+        await self._ensure_robots_allowed(url)  # always raises today — see class docstring
+        raw = await self._get_text(self.DOWNLOAD_ENDPOINT, params={"s": symbol, "i": "d"})
+        lines = raw.strip().splitlines()
+        if len(lines) < 2:
+            raise ProviderResponseError("Stooq CSV response was empty")
+        header = [column.strip().lower() for column in lines[0].split(",")]
+        today = datetime.now(UTC).date()
+        candles: list[Candle] = []
+        for line in lines[1:]:
+            fields = dict(zip(header, line.split(","), strict=False))
+            try:
+                timestamp = datetime.fromisoformat(fields["date"]).replace(tzinfo=UTC)
+                open_, high, low, close = float(fields["open"]), float(fields["high"]), float(fields["low"]), float(fields["close"])
+            except (KeyError, ValueError):
+                continue
+            if timestamp.date() >= today:
+                continue
+            candles.append(
+                Candle(
+                    timestamp=timestamp,
+                    symbol=request.symbol,
+                    timeframe=Timeframe.D1,
+                    open=open_,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=float(fields.get("volume") or 0),
+                    provider=self.provider_name.value,
+                )
+            )
+        return sorted(candles, key=lambda candle: candle.timestamp)[-request.limit :]
+
+    async def _get_text(self, path: str, *, params: dict[str, Any]) -> str:
+        response = await self._client.get(f"{self.base_url}{path}", params=params)
+        response.raise_for_status()
+        return response.text
+
+
+class BinanceProvider(HttpMarketDataProvider):
+    """Binance's public `/api/v3/klines` endpoint for a gold-token pair (e.g. `PAXGUSDT`) — kept
+    as a second potential crypto-proxy source.
+
+    **Permanently disabled by default and not part of the active provider set.**
+    `api.binance.com/robots.txt` disallows all automated access for every user-agent, checked
+    empirically during this migration, even though the endpoint itself works and needs no key.
+    Kraken and OKX (both robots-clean) already cover the crypto-proxy cross-validation role this
+    engine needs, so Binance is not required for correctness — kept implemented for completeness
+    and in case its robots.txt policy changes. `check_robots=True` means this adapter refuses to
+    fetch even if manually enabled."""
+
+    provider_name = ProviderName.BINANCE
+    requires_api_key = False
+    enforce_domain_allowlist = True
+    check_robots = True
+    capabilities = ProviderCapabilities(
+        historical=True,
+        realtime_polling=True,
+        volume=True,
+        supported_symbols=("XAUUSD",),
+        supported_timeframes=tuple(Timeframe),
+    )
+    KLINES_ENDPOINT = "/api/v3/klines"
+    _intervals = {
+        Timeframe.M1: "1m",
+        Timeframe.M5: "5m",
+        Timeframe.M15: "15m",
+        Timeframe.M30: "30m",
+        Timeframe.H1: "1h",
+        Timeframe.H4: "4h",
+        Timeframe.D1: "1d",
+    }
+
+    async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
+        symbol = provider_symbol(self.provider_name.value, request.symbol)
+        url = f"{self.base_url}{self.KLINES_ENDPOINT}"
+        await self._ensure_robots_allowed(url)  # always raises today — see class docstring
+        data = await self._get(
+            self.KLINES_ENDPOINT, params={"symbol": symbol, "interval": self._intervals[request.timeframe], "limit": min(request.limit, 1000)}
+        )
+        if not isinstance(data, list):
+            raise ProviderResponseError("Binance klines response must be a list")
+        now = datetime.now(UTC)
+        candles: list[Candle] = []
+        for row in data:
+            try:
+                timestamp = datetime.fromtimestamp(int(row[0]) / 1000, UTC)
+                open_, high, low, close, volume = float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5])
+                close_time = datetime.fromtimestamp(int(row[6]) / 1000, UTC)
+            except (IndexError, TypeError, ValueError):
+                continue
+            if close_time > now or not _period_has_closed(timestamp, request.timeframe, now=now):
+                continue  # Binance's last kline is always the still-forming interval
+            candles.append(
+                Candle(
+                    timestamp=timestamp,
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    open=open_,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=volume,
+                    provider=self.provider_name.value,
+                )
+            )
+        return sorted(candles, key=lambda candle: candle.timestamp)[-request.limit :]
+
+
+def _aggregate_candles(source: list[Candle], target: Timeframe, provider: str) -> list[Candle]:
+    """Deterministic OHLCV aggregation of consecutive smaller candles into a larger, aligned bar —
+    e.g. four consecutive H1 candles into one H4 candle. This is arithmetic on already-real,
+    already-final candles (open of the first, close of the last, max high, min low, summed volume),
+    not interpolation or fabrication: every aggregated bar is backed entirely by genuine observed
+    data, and a bar is only emitted once all of its constituent smaller candles are present and
+    themselves already final. Used because Yahoo Finance has no native 4-hour interval; Kraken and
+    OKX are not aggregated this way since both provide native 4h bars directly."""
+    if not source:
+        return []
+    step = target.duration
+    groups: dict[datetime, list[Candle]] = {}
+    for candle in source:
+        epoch_minutes = int(candle.timestamp.timestamp() // step.total_seconds())
+        bucket_start = datetime.fromtimestamp(epoch_minutes * step.total_seconds(), UTC)
+        groups.setdefault(bucket_start, []).append(candle)
+    aggregated: list[Candle] = []
+    expected_members = int(step.total_seconds() // source[0].timeframe.duration.total_seconds())
+    for bucket_start, members in sorted(groups.items()):
+        if len(members) < expected_members:
+            continue  # an incomplete group (e.g. a still-forming or gapped bucket) is never emitted
+        ordered = sorted(members, key=lambda item: item.timestamp)
+        aggregated.append(
+            Candle(
+                timestamp=bucket_start,
+                symbol=ordered[0].symbol,
+                timeframe=target,
+                open=ordered[0].open,
+                high=max(item.high for item in ordered),
+                low=min(item.low for item in ordered),
+                close=ordered[-1].close,
+                volume=sum(item.volume for item in ordered),
+                provider=provider,
+            )
+        )
+    return aggregated
 
 
 def provider_api_key(environment_name: str) -> str:

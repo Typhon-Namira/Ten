@@ -26,6 +26,16 @@ class ProviderName(StrEnum):
     INTERACTIVE_BROKERS = "interactive_brokers"
     DXFEED = "dxfeed"
     DATABENTO = "databento"
+    # ---- Keyless public sources (see `docs/MARKET_DATA_ENGINE.md`). LBMA is the authoritative,
+    # non-proxy daily gold benchmark. Kraken/OKX are gold-token (PAXG/XAUT) proxy instruments used
+    # only for intraday coverage and cross-source validation, never as the sole source. Yahoo
+    # Finance and Stooq are kept as fully-implemented but permanently-disabled-by-default adapters
+    # because both hosts' robots.txt explicitly disallow automated access — see `adapters.py`.
+    LBMA_GOLD_PRICE = "lbma_gold_price"
+    KRAKEN = "kraken"
+    OKX = "okx"
+    YAHOO_FINANCE = "yahoo_finance"
+    STOOQ = "stooq"
 
 
 class ProviderCapabilities(BaseModel):

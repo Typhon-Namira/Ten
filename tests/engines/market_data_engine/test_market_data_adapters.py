@@ -261,7 +261,7 @@ def test_session_validation_metrics_and_sql_serialization(monkeypatch: pytest.Mo
     holiday = validator.validate([candle(datetime(2026, 12, 24, 23, 59, tzinfo=UTC)), candle(datetime(2026, 12, 26, 0, 1, tzinfo=UTC))], now=datetime(2026, 12, 26, 1, tzinfo=UTC))
     assert holiday.anomalies[0].type == AnomalyType.HOLIDAY_GAP
     peer = candle(provider="other").model_copy(update={"close": 2500.0, "high": 2501.0})
-    assert validator.compare([candle()], [peer])[0].type == AnomalyType.PROVIDER_INCONSISTENCY
+    assert validator.compare([candle()], [peer])[0][0].type == AnomalyType.PROVIDER_INCONSISTENCY
     with pytest.raises(ValueError):
         calculate_metrics([])
     values = SqlAlchemyMarketDataRepository._values(candle())

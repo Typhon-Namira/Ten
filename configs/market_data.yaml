@@ -1,14 +1,54 @@
 symbols: [XAUUSD]
 timeframes: [M1, M5, M15, M30, H1, H4, D1]
 default_lookback: 500
-preferred_provider: twelve_data
+preferred_provider: lbma_gold_price
 provider_failure_threshold: 3
 provider_recovery_successes: 3
 providers:
+  # ---- Active provider set: keyless public sources. No API key, no paid provider, no
+  # authentication of any kind. LBMA is the authoritative, non-proxy daily gold benchmark; Kraken
+  # and OKX are gold-token (PAXG/XAUT) proxy instruments used for intraday coverage and
+  # cross-source validation. See backend/app/engines/market_data_engine/adapters.py for each
+  # adapter's full reasoning and robots.txt/terms findings.
+  - name: lbma_gold_price
+    base_url: https://prices.lbma.org.uk
+    priority: 10
+  - name: kraken
+    base_url: https://api.kraken.com
+    priority: 20
+    # Kraken's public endpoints are generously rate-limited; paced conservatively regardless since
+    # this engine polls far more frequently than LBMA's once-or-twice-daily fixings.
+    quota_per_minute: 60
+  - name: okx
+    base_url: https://www.okx.com
+    priority: 30
+    quota_per_minute: 60
+  # ---- Legacy, inert adapters. `enabled: false` means build_market_data_service() never
+  # constructs them, so they make zero network requests and require no API key. Do not set
+  # enabled: true without first re-checking the robots.txt/ToS notes in adapters.py — Yahoo
+  # Finance and Stooq's hosts explicitly disallow automated access (and each adapter's
+  # `check_robots=True` will refuse to fetch even if enabled, rather than silently bypassing that).
+  - name: yahoo_finance
+    base_url: https://query1.finance.yahoo.com
+    enabled: false
+    priority: 900
+  - name: stooq
+    base_url: https://stooq.com
+    enabled: false
+    priority: 910
+  - name: binance
+    base_url: https://api.binance.com
+    enabled: false
+    priority: 920
+  # ---- Legacy, inert paid providers. Kept exactly as before but disabled by default — same
+  # pattern as FMP/Finnhub in the economic calendar migration. Re-enable by setting enabled: true
+  # AND configuring the corresponding TEN_*_API_KEY Railway variable; missing keys mean these are
+  # simply never constructed, not a degraded/error state.
   - name: twelve_data
     base_url: https://api.twelvedata.com
     api_key_env: TEN_TWELVE_DATA_API_KEY
-    priority: 10
+    enabled: false
+    priority: 940
     # Free-tier TwelveData accounts are rate-limited to 8 requests/minute. Paced
     # bootstrap/poll requests against this value instead of firing all 7 configured
     # timeframes back-to-back with no delay (the cause of the reported bootstrap 429s).
@@ -18,17 +58,20 @@ providers:
     base_url: https://api-fxpractice.oanda.com
     api_key_env: TEN_OANDA_API_KEY
     account_id_env: TEN_OANDA_ACCOUNT_ID
-    priority: 20
+    enabled: false
+    priority: 950
   - name: alpha_vantage
     base_url: https://www.alphavantage.co/query
     api_key_env: TEN_ALPHA_VANTAGE_API_KEY
-    priority: 30
+    enabled: false
+    priority: 960
   - name: financial_modeling_prep
     # FMP retired /api/v3 for post-2025-08-31 accounts (403 "Legacy Endpoint"); /stable is the
     # current, supported base URL.
     base_url: https://financialmodelingprep.com/stable
     api_key_env: TEN_FMP_API_KEY
-    priority: 40
+    enabled: false
+    priority: 970
 cache:
   memory_max_entries: 10000
   realtime_ttl_seconds: 15
@@ -40,3 +83,5 @@ validation:
   gap_tolerance_multiplier: 1.5
   volatility_spike_multiplier: 8
   minimum_quality_score: 60
+  cross_source_tolerance: 0.01
+  cross_source_quarantine_tolerance: 0.05
