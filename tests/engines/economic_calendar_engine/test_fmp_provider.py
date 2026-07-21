@@ -40,7 +40,91 @@ def test_fmp_provider_defaults_to_the_stable_api_base_url() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fmp_provider_calls_the_stable_economics_calendar_endpoint() -> None:
+async def test_fmp_provider_health_check_never_requests_the_bare_base_url() -> None:
+    """`/stable` is a base URL only — FMP 404s if it is ever requested directly. The active
+    connectivity probe must always target a real, documented, lightweight endpoint."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json=[{"symbol": "GCUSD", "price": 2400.1}])
+
+    provider = FinancialModelingPrepProvider(api_key="secret")
+    _mounted(provider, handler)
+    status = await provider.check_connectivity()
+    assert seen == ["/stable/quote-short"]
+    assert all(path not in {"", "/", "/stable", "/stable/"} for path in seen)
+    assert status.connection_state == ConnectionState.CONNECTED
+    assert status.reachable is True
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fmp_provider_classifies_http_404_as_invalid_endpoint_not_unreachable() -> None:
+    """The exact contradiction this is a regression test for: a 404 previously reported
+    `connection_state=unreachable` while `authenticated=True` — internally contradictory, since an
+    unreachable server can't have authenticated anything. A 404 proves the server responded."""
+    provider = FinancialModelingPrepProvider(api_key="secret")
+    _mounted(provider, lambda request: httpx.Response(404, text="Not Found"))
+    result = await provider.fetch_events(_request())
+    assert result.observations == ()
+
+    status = await provider.health()
+    assert status.connection_state == ConnectionState.INVALID_ENDPOINT
+    assert status.http_status == 404
+    assert status.reachable is True
+    assert status.authenticated is True
+    assert status.entitlement_valid is True
+    assert status.endpoint_valid is False
+    assert status.data_available is False
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fmp_provider_never_logs_the_api_key(caplog: pytest.LogCaptureFixture) -> None:
+    """The API key must be sent on every request but never appear in a log line."""
+    secret_key = "sk-super-secret-do-not-log-me"
+    provider = FinancialModelingPrepProvider(api_key=secret_key)
+    seen_keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_keys.append(request.url.params["apikey"])
+        return httpx.Response(401, text="Unauthorized")
+
+    _mounted(provider, handler)
+    target_logger = logging.getLogger("backend.app.engines.economic_calendar_engine.providers")
+    target_logger.addHandler(caplog.handler)
+    original_level, original_disabled = target_logger.level, target_logger.disabled
+    target_logger.setLevel(logging.DEBUG)
+    target_logger.disabled = False
+    try:
+        await provider.fetch_events(_request())
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(original_level)
+        target_logger.disabled = original_disabled
+    assert seen_keys == [secret_key]  # the request itself must still carry the real key
+    assert caplog.records  # sanity: something was actually captured
+    for record in caplog.records:
+        assert secret_key not in record.getMessage()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fmp_provider_sets_last_success_on_a_successful_response() -> None:
+    provider = FinancialModelingPrepProvider(api_key="secret")
+    _mounted(provider, lambda request: httpx.Response(200, json=[]))
+    status_before = await provider.health()
+    assert status_before.last_success is None
+    await provider.fetch_events(_request())
+    status_after = await provider.health()
+    assert status_after.last_success is not None
+    assert status_after.data_available is True
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fmp_provider_calls_the_stable_economic_calendar_endpoint() -> None:
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -51,17 +135,17 @@ async def test_fmp_provider_calls_the_stable_economics_calendar_endpoint() -> No
     provider = FinancialModelingPrepProvider(api_key="secret")
     _mounted(provider, handler)
     await provider.fetch_events(_request())
-    assert seen["path"] == "/stable/economics-calendar"
+    assert seen["path"] == "/stable/economic-calendar"
     assert seen["apikey"] == "secret"
     await provider.close()
 
 
 @pytest.mark.asyncio
-async def test_fmp_provider_logs_legacy_endpoint_403_clearly(caplog: pytest.LogCaptureFixture) -> None:
+async def test_fmp_provider_logs_legacy_endpoint_403_as_entitlement_failure_not_unreachable(caplog: pytest.LogCaptureFixture) -> None:
     """Regression test for the exact failure FMP returns on the retired /api/v3 base URL — a 403
-    with a "Legacy Endpoint" body. Must be reported as an authentication failure (not a generic
-    "unavailable"), and must be logged with the endpoint, status code, and FMP's own message —
-    never silently swallowed."""
+    with a "Legacy Endpoint" body. Credentials were accepted (401 would mean bad credentials); 403
+    means the plan doesn't entitle this endpoint — a completely different, more specific fact than
+    a generic "unauthorized"/"unavailable" label, and must be logged, never silently swallowed."""
     message = "Legacy Endpoint: Due to Legacy endpoints being no longer supported - This endpoint is only available for legacy users who have valid subscriptions prior August 31, 2025."
     provider = FinancialModelingPrepProvider(api_key="secret")
     _mounted(provider, lambda request: httpx.Response(403, text=message))
@@ -85,15 +169,19 @@ async def test_fmp_provider_logs_legacy_endpoint_403_clearly(caplog: pytest.LogC
     assert result.observations == ()
 
     status = await provider.health()
-    assert status.connection_state == ConnectionState.UNAUTHORIZED
+    assert status.connection_state == ConnectionState.FORBIDDEN
     assert status.http_status == 403
-    assert status.authenticated is False
+    assert status.reachable is True  # the server was reached and responded
+    assert status.authenticated is True  # credentials themselves were fine
+    assert status.entitlement_valid is False
+    assert status.endpoint_valid is True
 
-    assert any(record.levelname == "ERROR" and "authentication failed" in record.message for record in caplog.records)
-    logged = next(record.message for record in caplog.records if "authentication failed" in record.message)
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+    logged = next(record.message for record in caplog.records if "request failed" in record.message)
     assert "financial_modeling_prep" in logged
-    assert "/economics-calendar" in logged
+    assert "/economic-calendar" in logged
     assert "403" in logged
+    assert "forbidden" in logged
     await provider.close()
 
 
@@ -139,7 +227,9 @@ async def test_fmp_provider_reports_authentication_failure_on_401() -> None:
     status = await provider.health()
     assert status.connection_state == ConnectionState.UNAUTHORIZED
     assert status.authenticated is False
-    assert status.reachable is False
+    # A 401 proves the server WAS reached — it answered with a real HTTP response. Only a
+    # transport-level failure (timeout, connection refused) means genuinely unreachable.
+    assert status.reachable is True
     assert status.http_status == 401
     assert "authentication failed" in (status.failure_reason or "")
     await provider.close()

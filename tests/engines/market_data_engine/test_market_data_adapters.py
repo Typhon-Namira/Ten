@@ -174,16 +174,20 @@ async def test_fmp_provider_uses_stable_endpoint_with_symbol_as_query_param() ->
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     await provider.fetch_history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.H1, limit=2))
     assert seen["path"] == "/stable/historical-chart/1hour"
-    assert seen["symbol"] == "XAUUSD"
+    # FMP's commodity endpoints use COMEX futures tickers — "GCUSD" for gold, not TEN's own
+    # canonical "XAUUSD". The mapping is FMP-adapter-only; TEN's internal symbol never changes.
+    assert seen["symbol"] == "GCUSD"
     assert seen["apikey"] == "secret"
     await provider.close()
 
 
 @pytest.mark.asyncio
-async def test_fmp_provider_logs_authentication_failures_clearly(caplog: pytest.LogCaptureFixture) -> None:
+async def test_fmp_provider_logs_entitlement_failures_clearly(caplog: pytest.LogCaptureFixture) -> None:
     """Regression test for FMP's retired-endpoint 403: "Legacy Endpoint... only available for
-    legacy users who have valid subscriptions prior August 31, 2025." Must raise (never silently
-    swallow) and must log the endpoint, status code, and FMP's own message."""
+    legacy users who have valid subscriptions prior August 31, 2025." A 403 means the credentials
+    were accepted but this endpoint isn't entitled under the plan — classified as "forbidden", a
+    more specific fact than a generic "unauthorized"/"unavailable" label. Must raise (never
+    silently swallow) and must log the endpoint, status code, and FMP's own message."""
     message = "Legacy Endpoint: Due to Legacy endpoints being no longer supported."
     provider = FinancialModelingPrepProvider(api_key="bad-key", base_url="https://financialmodelingprep.com/stable")
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(403, text=message)))
@@ -205,9 +209,10 @@ async def test_fmp_provider_logs_authentication_failures_clearly(caplog: pytest.
         target_logger.removeHandler(caplog.handler)
         target_logger.setLevel(original_level)
         target_logger.disabled = original_disabled
-    logged = next(record.message for record in caplog.records if "authentication failed" in record.message)
+    logged = next(record.message for record in caplog.records if "request failed" in record.message)
     assert "/historical-chart/1hour" in logged
     assert "403" in logged
+    assert "forbidden" in logged
     assert message in logged
     await provider.close()
 

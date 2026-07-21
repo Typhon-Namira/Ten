@@ -181,13 +181,26 @@ class FreshnessState(StrEnum):
 
 class ConnectionState(StrEnum):
     """A provider's actual, live connection outcome — the single fact every other status field
-    (reachable/authenticated/rate_limited/message) is derived from, so they can never disagree."""
+    (reachable/authenticated/endpoint_valid/entitlement_valid/data_available/message) is derived
+    from, so they can never disagree. Each value answers a DIFFERENT layer of "what happened":
+    UNREACHABLE/TIMEOUT mean we never got an HTTP response at all; everything else means the
+    server responded, so `reachable` is true for all of them — a 404 proves the server was
+    reached, it does not mean the provider is "unreachable"."""
 
     CONNECTED = "connected"
     UNREACHABLE = "unreachable"
     TIMEOUT = "timeout"
     UNAUTHORIZED = "unauthorized"
+    """HTTP 401 — credentials missing or rejected outright."""
+    FORBIDDEN = "forbidden"
+    """HTTP 403 — credentials were accepted, but this endpoint/resource isn't entitled under the
+    current plan (e.g. a retired legacy endpoint, or a paid-tier-only route)."""
+    INVALID_ENDPOINT = "invalid_endpoint"
+    """HTTP 404 — the server was reached and authenticated the request path itself doesn't exist.
+    Never conflate this with UNREACHABLE: a 404 is proof of a successful connection."""
     RATE_LIMITED = "rate_limited"
+    SERVER_ERROR = "server_error"
+    """HTTP 5xx — the provider's own infrastructure failed; not a fact about our request."""
     DISABLED = "disabled"
     UNKNOWN = "unknown"
 
@@ -203,7 +216,10 @@ class CalendarContextState(StrEnum):
     PROVIDER_UNREACHABLE = "provider_unreachable"
     PROVIDER_TIMEOUT = "provider_timeout"
     PROVIDER_AUTH_FAILED = "provider_auth_failed"
+    PROVIDER_ENTITLEMENT_INVALID = "provider_entitlement_invalid"
+    PROVIDER_INVALID_ENDPOINT = "provider_invalid_endpoint"
     PROVIDER_RATE_LIMITED = "provider_rate_limited"
+    PROVIDER_ERROR = "provider_error"
     NO_CALENDAR_DATA = "no_calendar_data"
     NO_RELEVANT_EVENTS = "no_relevant_events"
     OUTSIDE_RISK_WINDOW = "outside_risk_window"
@@ -215,7 +231,10 @@ GENUINELY_UNAVAILABLE_STATES = frozenset(
         CalendarContextState.PROVIDER_UNREACHABLE,
         CalendarContextState.PROVIDER_TIMEOUT,
         CalendarContextState.PROVIDER_AUTH_FAILED,
+        CalendarContextState.PROVIDER_ENTITLEMENT_INVALID,
+        CalendarContextState.PROVIDER_INVALID_ENDPOINT,
         CalendarContextState.PROVIDER_RATE_LIMITED,
+        CalendarContextState.PROVIDER_ERROR,
         CalendarContextState.NO_CALENDAR_DATA,
     }
 )
@@ -239,6 +258,16 @@ class ProviderCapabilities(CalendarModel):
     unit: bool = True
     precision: bool = False
     source_url: bool = False
+    # Explicit per-dataset entitlement flags — a successful call to one FMP endpoint (e.g. a
+    # lightweight quote used only to verify connectivity) must never be read as proof that every
+    # other dataset is included in the current subscription plan; each is verified independently.
+    live_quote: bool = False
+    candles_1min: bool = False
+    candles_5min: bool = False
+    candles_15min: bool = False
+    candles_1hour: bool = False
+    candles_daily: bool = False
+    economic_calendar: bool = False
 
 
 class ProviderEventObservation(CalendarModel):
@@ -400,8 +429,16 @@ class ProviderStatus(CalendarModel):
     mode: ProviderMode
     enabled: bool
     api_key_configured: bool = False
-    authenticated: bool = False
+    # Each of these answers ONE independent layer of "what happened," derived solely from
+    # `connection_state` (see `ConnectionState`'s docstring) — they can never contradict each
+    # other or `connection_state` because there is exactly one source of truth for all of them.
+    # A 404 sets reachable=True, authenticated=True, endpoint_valid=False: the server was reached
+    # and the credentials were fine, only the route itself is wrong — never "unreachable".
     reachable: bool = False
+    authenticated: bool = False
+    endpoint_valid: bool = True
+    entitlement_valid: bool = True
+    data_available: bool = False
     stale: bool = False
     rate_limited: bool = False
     connection_state: ConnectionState = ConnectionState.UNKNOWN

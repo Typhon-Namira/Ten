@@ -35,6 +35,12 @@ class ProviderCapabilities(BaseModel):
     tick_data: bool = False
     spread: bool = False
     volume: bool = True
+    # `supported_timeframes` already expresses exactly which candle intervals a provider is
+    # entitled to — these two cover the concepts it doesn't: a lightweight live-quote endpoint
+    # (used for connectivity health checks, independent of any specific candle dataset) and
+    # economic-calendar data (not a candle interval at all).
+    live_quote: bool = False
+    economic_calendar: bool = False
     supported_symbols: tuple[str, ...] = ()
     supported_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
     maximum_history_candles: int | None = Field(default=None, ge=1)

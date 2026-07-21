@@ -46,6 +46,27 @@ def _http_error_detail(error: ProviderResponseError) -> tuple[int | None, str]:
     return None, str(cause) if cause else str(error)
 
 
+def _classify_http_status(status_code: int | None) -> str:
+    """A response was received in every branch here — a 404 proves the server was reached and is
+    a completely different failure than a dropped connection, so it is never labeled
+    "unreachable". `None` (no status recovered at all) means the request never got a response."""
+    if status_code is None:
+        return "unreachable"
+    if status_code == 401:
+        return "unauthorized"
+    if status_code == 403:
+        return "forbidden"
+    if status_code == 404:
+        return "invalid_endpoint"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code >= 500:
+        return "server_error"
+    if status_code >= 400:
+        return "invalid_endpoint"
+    return "reachable"
+
+
 class HttpMarketDataProvider(MarketDataProvider):
     def __init__(
         self,
@@ -274,57 +295,99 @@ class FinancialModelingPrepProvider(HttpMarketDataProvider):
     capabilities = ProviderCapabilities(
         historical=True,
         realtime_polling=True,
+        spread=False,  # no bid/ask on this feed — never fabricate a spread value from it
+        live_quote=True,
         supported_symbols=("XAUUSD",),
-        supported_timeframes=(Timeframe.M1, Timeframe.M5, Timeframe.M15, Timeframe.M30, Timeframe.H1, Timeframe.D1),
+        # Only intervals with a confirmed, documented `/stable` endpoint. 15-minute and 30-minute
+        # `historical-chart` routes were NOT independently verified against current FMP
+        # documentation — do not add them back without confirming the exact endpoint first.
+        supported_timeframes=(Timeframe.M1, Timeframe.M5, Timeframe.H1, Timeframe.D1),
     )
+    #: `/stable` is a base URL only — FMP 404s if it is ever requested directly.
+    QUOTE_ENDPOINT = "/quote-short"
+    DAILY_ENDPOINT = "/historical-price-eod/full"
     _intervals = {
         Timeframe.M1: "1min",
         Timeframe.M5: "5min",
-        Timeframe.M15: "15min",
-        Timeframe.M30: "30min",
         Timeframe.H1: "1hour",
-        Timeframe.D1: "1day",
     }
+
+    async def check_connectivity(self) -> None:
+        """Active health probe against a real, lightweight, always-available endpoint — never the
+        bare `/stable` base URL, which is not itself a resource and 404s."""
+        await self._get(self.QUOTE_ENDPOINT, params={"symbol": provider_symbol(self.provider_name.value, "XAUUSD"), "apikey": self.api_key})
 
     async def fetch_history(self, request: ProviderRequest) -> list[Candle]:
         # FMP's stable API moved the symbol out of the path and into a query parameter (the
         # legacy /api/v3 endpoint took it as a path segment) — interval stays in the path, e.g.
-        # /stable/historical-chart/1hour?symbol=XAUUSD.
-        interval = self._intervals[request.timeframe]
-        path = f"/historical-chart/{interval}"
+        # /stable/historical-chart/1hour?symbol=GCUSD. Daily data is a separate endpoint entirely
+        # (not a `historical-chart` interval) with a different response shape.
+        provider_symbol_value = provider_symbol(self.provider_name.value, request.symbol)
+        is_daily = request.timeframe == Timeframe.D1
+        path = self.DAILY_ENDPOINT if is_daily else f"/historical-chart/{self._intervals[request.timeframe]}"
+        params = {
+            "symbol": provider_symbol_value,
+            "from": request.start.date().isoformat() if request.start else None,
+            "to": request.end.date().isoformat() if request.end else None,
+            "apikey": self.api_key,
+        }
         try:
-            data = await self._get(
-                path,
-                params={
-                    "symbol": provider_symbol(self.provider_name.value, request.symbol),
-                    "from": request.start.date().isoformat() if request.start else None,
-                    "to": request.end.date().isoformat() if request.end else None,
-                    "apikey": self.api_key,
-                },
-            )
+            data = await self._get(path, params=params)
         except ProviderResponseError as exc:
             status_code, message = _http_error_detail(exc)
-            if status_code in (401, 403):
-                logger.error("Financial Modeling Prep authentication failed: endpoint=%s status=%s message=%s", path, status_code, message)
-            else:
-                logger.warning("Financial Modeling Prep request failed: endpoint=%s status=%s message=%s", path, status_code, message)
-            raise
-        if not isinstance(data, list):
-            raise ProviderResponseError("Financial Modeling Prep response must be a list")
-        candles = [
-            Candle(
-                timestamp=_parse_timestamp(row["date"]),
-                symbol=request.symbol,
-                timeframe=request.timeframe,
-                open=float(row["open"]),
-                high=float(row["high"]),
-                low=float(row["low"]),
-                close=float(row["close"]),
-                volume=float(row.get("volume") or 0),
-                provider=self.provider_name.value,
+            category = _classify_http_status(status_code)
+            level = logger.error if category in {"unauthorized", "forbidden", "invalid_endpoint"} else logger.warning
+            # Never silently fail — every failure is logged with method, sanitized URL (apikey
+            # never included), TEN's canonical symbol, the provider-specific symbol actually sent,
+            # the requested timeframe, status, classification, latency, retry count, and the
+            # provider's own message, so this is diagnosable from logs alone.
+            level(
+                "Financial Modeling Prep request failed: method=GET url=%s%s canonical_symbol=%s provider_symbol=%s timeframe=%s status=%s classification=%s "
+                "latency_ms=%.1f retry_count=%s message=%s",
+                self.base_url, path, request.symbol, provider_symbol_value, request.timeframe.value, status_code, category,
+                self.last_latency_ms, self.last_retry_count, message,
             )
-            for row in data
-        ]
+            raise
+        logger.info(
+            "Financial Modeling Prep request succeeded: method=GET url=%s%s canonical_symbol=%s provider_symbol=%s timeframe=%s latency_ms=%.1f retry_count=%s",
+            self.base_url, path, request.symbol, provider_symbol_value, request.timeframe.value, self.last_latency_ms, self.last_retry_count,
+        )
+        rows = data.get("historical") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            raise ProviderResponseError("Financial Modeling Prep response must be a list")
+        candles: list[Candle] = []
+        seen_timestamps: set[datetime] = set()
+        skipped = 0
+        for row in rows:
+            try:
+                timestamp = _parse_timestamp(row["date"])
+                open_, high, low, close = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
+            except (KeyError, TypeError, ValueError):
+                skipped += 1
+                continue
+            if timestamp in seen_timestamps:
+                continue  # duplicate row within this response — reject before it ever reaches persistence
+            seen_timestamps.add(timestamp)
+            candles.append(
+                Candle(
+                    timestamp=timestamp,
+                    # `request.symbol` is TEN's own canonical symbol ("XAUUSD") — `provider_symbol_value`
+                    # ("GCUSD") is only ever used for the outgoing request, never stored.
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    open=open_,
+                    high=high,
+                    low=low,
+                    close=close,
+                    volume=float(row.get("volume") or 0),
+                    # This feed has no real bid/ask; `spread` defaults to 0.0 on the `Candle` model
+                    # itself (not Optional), so `capabilities.spread=False` above is what tells
+                    # every downstream consumer to treat that 0.0 as "not measured", not "flat".
+                    provider=self.provider_name.value,
+                )
+            )
+        if skipped:
+            logger.warning("Financial Modeling Prep returned %s malformed row(s) that were skipped: endpoint=%s canonical_symbol=%s", skipped, path, request.symbol)
         return sorted(candles, key=lambda candle: candle.timestamp)[-request.limit :]
 
 

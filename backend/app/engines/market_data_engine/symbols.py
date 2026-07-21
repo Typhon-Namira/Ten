@@ -3,7 +3,9 @@ from .models import canonical_symbol
 _PROVIDER_SYMBOLS = {
     "twelve_data": {"XAUUSD": "XAU/USD"},
     "alpha_vantage": {"XAUUSD": "XAUUSD"},
-    "financial_modeling_prep": {"XAUUSD": "XAUUSD"},
+    # FMP's commodity endpoints use COMEX futures tickers, not FX-style pairs — "XAUUSD" 404s.
+    # This mapping is FMP-specific; TEN's internal canonical symbol is never changed.
+    "financial_modeling_prep": {"XAUUSD": "GCUSD"},
     "oanda": {"XAUUSD": "XAU_USD"},
 }
 

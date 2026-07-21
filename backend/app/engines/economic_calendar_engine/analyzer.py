@@ -30,7 +30,10 @@ _CONNECTION_STATE_TO_CATEGORY = {
     ConnectionState.UNREACHABLE: CalendarContextState.PROVIDER_UNREACHABLE.value,
     ConnectionState.TIMEOUT: CalendarContextState.PROVIDER_TIMEOUT.value,
     ConnectionState.UNAUTHORIZED: CalendarContextState.PROVIDER_AUTH_FAILED.value,
+    ConnectionState.FORBIDDEN: CalendarContextState.PROVIDER_ENTITLEMENT_INVALID.value,
+    ConnectionState.INVALID_ENDPOINT: CalendarContextState.PROVIDER_INVALID_ENDPOINT.value,
     ConnectionState.RATE_LIMITED: CalendarContextState.PROVIDER_RATE_LIMITED.value,
+    ConnectionState.SERVER_ERROR: CalendarContextState.PROVIDER_ERROR.value,
     ConnectionState.DISABLED: CalendarContextState.NO_CALENDAR_DATA.value,
     ConnectionState.UNKNOWN: CalendarContextState.NO_CALENDAR_DATA.value,
 }

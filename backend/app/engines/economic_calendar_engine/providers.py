@@ -171,6 +171,9 @@ class InMemoryProvider(EconomicCalendarProvider):
             api_key_configured=True,
             authenticated=True,
             reachable=True,
+            endpoint_valid=True,
+            entitlement_valid=True,
+            data_available=True,
             connection_state=ConnectionState.CONNECTED,
             last_success=self._last_success,
             capabilities=self.capabilities,
@@ -252,6 +255,36 @@ def _int_header(response: httpx.Response, *names: str) -> int | None:
     return None
 
 
+def _classify_status(status_code: int) -> ConnectionState:
+    """Maps an HTTP status to the specific layer that failed. A response was received in every
+    branch here except by the caller's exception handlers — so every one of these implies
+    `reachable=True`. Never collapse this into a single "unreachable" bucket: a 404 proves the
+    server was reached and is a completely different problem than a dropped connection."""
+    if status_code == 401:
+        return ConnectionState.UNAUTHORIZED
+    if status_code == 403:
+        return ConnectionState.FORBIDDEN
+    if status_code == 404:
+        return ConnectionState.INVALID_ENDPOINT
+    if status_code == 429:
+        return ConnectionState.RATE_LIMITED
+    if status_code >= 500:
+        return ConnectionState.SERVER_ERROR
+    if status_code >= 400:
+        return ConnectionState.INVALID_ENDPOINT
+    return ConnectionState.CONNECTED
+
+
+_FAILURE_MESSAGES = {
+    ConnectionState.UNAUTHORIZED: "authentication failed — API key missing or rejected",
+    ConnectionState.FORBIDDEN: "entitlement failed — credentials valid but this endpoint/plan is not permitted",
+    ConnectionState.INVALID_ENDPOINT: "endpoint not found — the request path does not exist on this API",
+    ConnectionState.RATE_LIMITED: "rate limited",
+    ConnectionState.SERVER_ERROR: "provider server error",
+}
+_ERROR_LEVEL_STATES = frozenset({ConnectionState.UNAUTHORIZED, ConnectionState.FORBIDDEN, ConnectionState.INVALID_ENDPOINT})
+
+
 class HttpEconomicCalendarProvider(EconomicCalendarProvider):
     """Base for HTTP-backed live providers. Owns one shared, retrying GET helper so every live
     provider reports identical, comparable telemetry (latency, retries, backoff, rate limit,
@@ -294,9 +327,13 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
     async def _get(self, path: str, params: Mapping[str, Any]) -> httpx.Response | None:
         """GET with retry/backoff, updating every telemetry field this provider reports. Never
         raises for an HTTP-level failure — returns `None` and leaves the failure fully described
-        in `self._failure_reason`/`self._raw_error`/`self._connection_state` for `health()`."""
+        in `self._failure_reason`/`self._raw_error`/`self._connection_state` for `health()`.
+
+        Every attempt is logged (method, sanitized URL, status, latency, retry count) — the API
+        key is a query parameter on some providers, so the logged URL always has it redacted."""
         now = datetime.now(UTC)
         self._last_request = now
+        sanitized_url = f"{self.base_url}{path}"  # query string deliberately omitted: never risk logging apikey
         started = perf_counter()
         attempt = 0
         last_exception: Exception | None = None
@@ -312,45 +349,54 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
                 self._http_status = response.status_code
                 self._rate_limit_remaining = _int_header(response, "x-ratelimit-remaining", "x-ratelimit-remaining-day")
                 self._rate_limit_limit = _int_header(response, "x-ratelimit-limit", "x-ratelimit-limit-day")
-                if response.status_code in (401, 403):
-                    self._connection_state, self._failure_reason = ConnectionState.UNAUTHORIZED, f"HTTP {response.status_code}: authentication failed"
-                    self._raw_error, self._last_failure, self._retry_count = _sanitized_body(response), now, attempt
-                    # Never silently fail an auth error — log provider, endpoint (no query string,
-                    # so the API key is never written to logs), status code, and the provider's own
-                    # error message so this is diagnosable from logs alone.
-                    logger.error("economic_calendar provider authentication failed: provider=%s endpoint=%s status=%s message=%s", self.name, path, response.status_code, self._raw_error)
-                    return None
-                if response.status_code == 429:
-                    self._connection_state, self._failure_reason = ConnectionState.RATE_LIMITED, "HTTP 429: rate limited"
+                state = _classify_status(response.status_code)
+                if state == ConnectionState.CONNECTED:
+                    self._connection_state, self._failure_reason, self._raw_error, self._backoff_until = ConnectionState.CONNECTED, None, None, None
+                    self._last_success, self._retry_count = now, attempt
+                    logger.info(
+                        "economic_calendar provider request succeeded: method=GET provider=%s url=%s status=%s latency_ms=%.1f retry_count=%s",
+                        self.name, sanitized_url, response.status_code, self.last_latency_ms, attempt,
+                    )
+                    return response
+                self._connection_state = state
+                self._raw_error = _sanitized_body(response)
+                self._failure_reason = f"HTTP {response.status_code}: {_FAILURE_MESSAGES.get(state, 'request failed')}"
+                if state == ConnectionState.RATE_LIMITED:
                     retry_after = response.headers.get("retry-after", "")
                     self._backoff_until = now + timedelta(seconds=float(retry_after)) if retry_after.isdigit() else now + timedelta(seconds=60)
-                    self._raw_error, self._last_failure, self._retry_count = _sanitized_body(response), now, attempt
-                    logger.warning("economic_calendar provider rate limited: provider=%s endpoint=%s status=%s backoff_until=%s", self.name, path, response.status_code, self._backoff_until)
-                    return None
-                if response.status_code >= 400:
-                    retryable = response.status_code >= 500
-                    self._connection_state, self._failure_reason = ConnectionState.UNREACHABLE, f"HTTP {response.status_code}"
-                    self._raw_error = _sanitized_body(response)
-                    if retryable and attempt < self.max_retries:
-                        attempt += 1
-                        await asyncio.sleep(self.retry_backoff_seconds * attempt)
-                        continue
-                    self._last_failure, self._retry_count = now, attempt
-                    logger.warning("economic_calendar provider request failed: provider=%s endpoint=%s status=%s message=%s", self.name, path, response.status_code, self._raw_error)
-                    return None
-                self._connection_state, self._failure_reason, self._raw_error, self._backoff_until = ConnectionState.CONNECTED, None, None, None
-                self._last_success, self._retry_count = now, attempt
-                return response
+                retryable = state == ConnectionState.SERVER_ERROR
+                if retryable and attempt < self.max_retries:
+                    attempt += 1
+                    await asyncio.sleep(self.retry_backoff_seconds * attempt)
+                    continue
+                self._last_failure, self._retry_count = now, attempt
+                level = logging.ERROR if state in _ERROR_LEVEL_STATES else logging.WARNING
+                # Never silently fail — every failure is logged with method, sanitized URL,
+                # status, connection-state classification, latency, retry count, and the
+                # provider's own (sanitized) error message, so this is diagnosable from logs
+                # alone without needing to reproduce the failure.
+                logger.log(
+                    level,
+                    "economic_calendar provider request failed: method=GET provider=%s url=%s status=%s connection_state=%s latency_ms=%.1f retry_count=%s message=%s",
+                    self.name, sanitized_url, response.status_code, state.value, self.last_latency_ms, attempt, self._raw_error,
+                )
+                return None
             attempt += 1
             if attempt <= self.max_retries:
                 await asyncio.sleep(self.retry_backoff_seconds * attempt)
         self.last_latency_ms = (perf_counter() - started) * 1000
         self._raw_error = f"{type(last_exception).__name__}: {last_exception}"[:300] if last_exception else self._failure_reason
-        logger.warning("economic_calendar provider unreachable: provider=%s endpoint=%s connection_state=%s message=%s", self.name, path, self._connection_state.value, self._raw_error)
         self._last_failure, self._retry_count = now, attempt
+        logger.warning(
+            "economic_calendar provider unreachable: method=GET provider=%s url=%s connection_state=%s latency_ms=%.1f retry_count=%s message=%s",
+            self.name, sanitized_url, self._connection_state.value, self.last_latency_ms, attempt, self._raw_error,
+        )
         return None
 
     async def health(self) -> ProviderStatus:
+        # Every response — success or failure — proves the server was reached; only a transport-
+        # level exception (never got a response at all) means genuinely unreachable.
+        reachable = self._connection_state not in {ConnectionState.UNREACHABLE, ConnectionState.TIMEOUT, ConnectionState.UNKNOWN, ConnectionState.DISABLED}
         return ProviderStatus(
             provider_name=self.name,
             provider_version=self.version,
@@ -358,8 +404,11 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
             mode=self.mode,
             enabled=True,
             api_key_configured=bool(self.api_key),
-            authenticated=self._connection_state not in {ConnectionState.UNAUTHORIZED, ConnectionState.UNKNOWN},
-            reachable=self._connection_state == ConnectionState.CONNECTED,
+            authenticated=self._connection_state not in {ConnectionState.UNAUTHORIZED, ConnectionState.UNKNOWN, ConnectionState.DISABLED},
+            reachable=reachable,
+            endpoint_valid=self._connection_state != ConnectionState.INVALID_ENDPOINT,
+            entitlement_valid=self._connection_state != ConnectionState.FORBIDDEN,
+            data_available=self._connection_state == ConnectionState.CONNECTED,
             rate_limited=self._connection_state == ConnectionState.RATE_LIMITED,
             connection_state=self._connection_state,
             failure_reason=self._failure_reason,
@@ -379,21 +428,39 @@ class HttpEconomicCalendarProvider(EconomicCalendarProvider):
 
 
 class FinancialModelingPrepProvider(HttpEconomicCalendarProvider):
-    """Live adapter for Financial Modeling Prep's stable `/stable/economics-calendar` endpoint —
+    """Live adapter for Financial Modeling Prep's stable `/stable/economic-calendar` endpoint —
     TEN's primary economic calendar provider.
 
     FMP retired its legacy `/api/v3/*` endpoints for accounts created/authorized after 2025-08-31
     (they now return `403 Forbidden` with a "Legacy Endpoint" error body) — every request here
-    must go through the `/stable` base URL instead."""
+    must go through the `/stable` base URL instead. `/stable` is a base URL only: it is never a
+    valid request target by itself (FMP 404s), so every method here goes through one of the
+    concrete endpoint constants below."""
+
+    #: `/stable` is a base URL only — FMP returns 404 if it is ever requested directly. Every
+    #: caller must go through a concrete endpoint constant below.
+    QUOTE_ENDPOINT = "/quote-short"
+    #: Symbol used purely to verify connectivity/authentication — cheap, always-available on every
+    #: FMP plan tier, and unrelated to whichever domain endpoint (calendar vs candles) is actually
+    #: in use, so a health probe never depends on entitlement for a specific dataset.
+    HEALTH_CHECK_SYMBOL = "GCUSD"
+    CALENDAR_ENDPOINT = "/economic-calendar"
 
     def __init__(
         self, *, api_key: str, base_url: str = "https://financialmodelingprep.com/stable", timeout_seconds: float = 10, version: str = "1", max_retries: int = 2, retry_backoff_seconds: float = 0.5
     ) -> None:
         super().__init__("financial_modeling_prep", api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds, version=version, max_retries=max_retries, retry_backoff_seconds=retry_backoff_seconds)
+        self.capabilities = self.capabilities.model_copy(update={"economic_calendar": True, "live_quote": True})
+
+    async def check_connectivity(self) -> ProviderStatus:
+        """Active health probe: a real, lightweight, always-available endpoint — never the bare
+        `/stable` base URL, which FMP 404s on since it is not itself a resource."""
+        await self._get(self.QUOTE_ENDPOINT, {"symbol": self.HEALTH_CHECK_SYMBOL, "apikey": self.api_key})
+        return await self.health()
 
     async def fetch_events(self, request: ProviderFetchRequest) -> ProviderFetchResult:
         now = datetime.now(UTC)
-        endpoint = "/economics-calendar"
+        endpoint = self.CALENDAR_ENDPOINT
         response = await self._get(endpoint, {"from": request.start.date().isoformat(), "to": request.end.date().isoformat(), "apikey": self.api_key})
         if response is None:
             return ProviderFetchResult(observations=(), warnings=(f"fmp_request_failed:{self._connection_state.value}",))
