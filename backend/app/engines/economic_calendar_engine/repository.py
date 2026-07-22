@@ -11,6 +11,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from backend.app.storage.batching import bounded_insert_chunks
 from backend.app.storage.models import (
     EconomicCalendarCheckpointRecord,
     EconomicCalendarContextRecord,
@@ -244,7 +245,8 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository, ScopedSes
             for item in values
         ]
         try:
-            await self.session.execute(insert(EconomicCalendarObservationRecord).values(rows).on_conflict_do_nothing(index_elements=["id"]))
+            for chunk in bounded_insert_chunks(rows):
+                await self.session.execute(insert(EconomicCalendarObservationRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
             await self.session.commit()
         except Exception:
             await self.session.rollback()

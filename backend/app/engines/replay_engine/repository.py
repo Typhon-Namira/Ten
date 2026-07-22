@@ -9,6 +9,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from backend.app.storage.batching import bounded_insert_chunks
 from backend.app.storage.models import ReplayCheckpointRecord, ReplayOutputRecord, ReplaySessionRecord, ReplayTraceRecordModel, ReplayTransitionRecord
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
@@ -314,7 +315,8 @@ class SqlAlchemyReplayRepository(ReplayRepository, ScopedSessionRepository):
             return
         values = [{"replay_id": item.replay_id, "sequence": item.sequence, "virtual_time": item.virtual_time, "event_id": item.event_id, "event_type": item.event_type, "payload": item.model_dump(mode="json")} for item in records]
         try:
-            await self.session.execute(insert(ReplayTraceRecordModel).values(values).on_conflict_do_nothing(index_elements=["replay_id", "sequence"]))
+            for chunk in bounded_insert_chunks(values):
+                await self.session.execute(insert(ReplayTraceRecordModel).values(list(chunk)).on_conflict_do_nothing(index_elements=["replay_id", "sequence"]))
             await self.session.commit()
         except Exception:
             await self.session.rollback()
@@ -331,7 +333,8 @@ class SqlAlchemyReplayRepository(ReplayRepository, ScopedSessionRepository):
             return
         values = [{"id": item.output_id, "replay_id": item.replay_id, "output_type": item.output_type, "source_engine": item.source_engine, "as_of": item.as_of, "fingerprint": item.fingerprint, "payload": item.model_dump(mode="json")} for item in outputs]
         try:
-            await self.session.execute(insert(ReplayOutputRecord).values(values).on_conflict_do_nothing(index_elements=["id"]))
+            for chunk in bounded_insert_chunks(values):
+                await self.session.execute(insert(ReplayOutputRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
             await self.session.commit()
         except Exception:
             await self.session.rollback()
