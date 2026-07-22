@@ -127,6 +127,70 @@ def test_envelope_semantic_identity_and_mode_isolation() -> None:
         CanonicalEventEnvelope.model_validate(raw)
 
 
+def test_event_id_is_stable_across_repeated_polls_of_the_same_candle() -> None:
+    """Regression test for the "market data healthy, SMC-onward chain runs constantly but nothing
+    ever progresses" investigation: `event_id` used to be derived from `payload_hash` (a hash of
+    the WHOLE payload, including `ingestion_time` — stamped fresh via `datetime.now(UTC)` on every
+    single fetch). Two polls of the exact same already-closed candle, seconds apart, therefore
+    produced two different `event_id`s, so `repository.processed(event_id)` could never recognize
+    the second poll as a duplicate — `process()` re-ran the entire SMC-onward chain from scratch
+    on every single poll of an already-processed candle, forever, each time re-triggering a fresh
+    `MarketDataService.history()` call (and its full anomaly-validation pass) too. `event_id` must
+    depend only on the candle's own identity (provider, instrument, timeframe, open time,
+    revision) — not on when any particular fetch happened to observe it."""
+    value = candle()
+    polled_a_moment_apart = value.model_copy(update={"ingestion_timestamp": value.ingestion_timestamp + timedelta(seconds=4)})
+    first = CanonicalEventEnvelope.final_candle(value, uuid4(), NOW)
+    second = CanonicalEventEnvelope.final_candle(polled_a_moment_apart, uuid4(), NOW + timedelta(seconds=4))
+    assert first.event_id == second.event_id
+    assert first.idempotency_key == second.idempotency_key
+    # `payload_hash` itself must still faithfully reflect each envelope's own payload — only its
+    # role as an INPUT to `event_id` was the bug, not the field's own correctness.
+    assert first.payload_hash == canonical_hash(first.payload)
+    assert second.payload_hash == canonical_hash(second.payload)
+    assert first.payload_hash != second.payload_hash  # the payloads genuinely differ (ingestion_time)
+
+    # A genuinely different candle (different open time, or a different provider) must NOT collide.
+    later = value.model_copy(update={"timestamp": value.timestamp + value.timeframe.duration})
+    different_provider = value.model_copy(update={"provider": "a-different-provider"})
+    later_envelope = CanonicalEventEnvelope.final_candle(later, uuid4(), NOW + timedelta(minutes=15))
+    provider_envelope = CanonicalEventEnvelope.final_candle(different_provider, uuid4(), NOW)
+    assert later_envelope.event_id != first.event_id
+    assert provider_envelope.event_id != first.event_id
+
+
+@pytest.mark.asyncio
+async def test_repeated_polls_of_the_same_candle_never_create_duplicate_snapshots() -> None:
+    """End-to-end companion to the `event_id` stability test above, through the real event-bus ->
+    enqueue -> outbox-drain path (not the direct `CanonicalEventEnvelope` construction) — two
+    `NewCandle` publications for the exact same underlying candle, seconds apart, must result in
+    exactly one processed event and one snapshot, not two."""
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    config = IntegrationConfig(worker={"enabled": True, "embedded_api_worker": False})
+    analysis = FakeAnalysis()
+    coordinator = FullSystemIntegrationService(
+        event_bus=bus, repository=repository, config=config, market_data=FakeMarketData(candle()), smc=analysis, liquidity=analysis,
+        volume_profile=analysis, institutional_flow=analysis, market_regime=analysis, economic_calendar=analysis, ai_scoring=FakeScore(),
+        signal_decision=FakeDecision(), repository_mode="postgresql", clock=lambda: NOW,
+    )
+    await coordinator.start()
+    value = candle()
+    first_poll = NewCandle(correlation_id=uuid4(), source="market_data", payload=value.model_dump(mode="json"))
+    second_poll = NewCandle(
+        correlation_id=uuid4(),
+        source="market_data",
+        payload=value.model_copy(update={"ingestion_timestamp": value.ingestion_timestamp + timedelta(seconds=4)}).model_dump(mode="json"),
+    )
+    await bus.publish(first_poll)
+    await coordinator.process_outbox_once()
+    await bus.publish(second_poll)
+    processed_second = await coordinator.process_outbox_once()
+    assert processed_second == 0  # nothing new to do — the second poll was correctly recognized as a duplicate
+    assert repository.metrics()["events"] == 1
+    assert repository.metrics()["snapshots"] == 1
+    await coordinator.stop()
+
+
 def test_graph_is_exact_and_rejects_cycles() -> None:
     config = IntegrationConfig()
     assert len(config.graph) == 10

@@ -190,7 +190,16 @@ class CanonicalEventEnvelope(IntegrationModel):
         source_event_id = canonical_hash(
             {"provider": candle.provider, "symbol": payload.canonical_instrument, "timeframe": payload.timeframe, "open_time": payload.open_time.isoformat(), "revision": payload.revision}
         )
-        event_id = canonical_hash({"type": "market.candle.closed", "source_event_id": source_event_id, "payload_hash": payload_hash, "schema": "1.0"})
+        # Deliberately derived from `source_event_id` alone, NOT `payload_hash` — `payload_hash`
+        # is a hash of the WHOLE payload, which includes `ingestion_time`, a field stamped fresh
+        # (`datetime.now(UTC)`) on every single fetch, live or replayed. Folding it into `event_id`
+        # meant two polls of the exact same already-closed candle, seconds apart, produced two
+        # different `event_id`s — `repository.processed(event_id)` could never recognize the second
+        # poll as a duplicate, so `process()` re-ran the entire SMC-onward chain from scratch on
+        # every single poll of an already-processed candle, forever. `source_event_id` already
+        # captures everything that makes a candle a *new* event (provider, instrument, timeframe,
+        # open time, revision) — a later poll of the same bar must hash to the same `event_id`.
+        event_id = canonical_hash({"type": "market.candle.closed", "source_event_id": source_event_id, "schema": "1.0"})
         trace_id = semantic_uuid("trace", event_id)
         quality = DataQualityStatus.VALID if candle.quality_score >= 80 else DataQualityStatus.SUSPECT if candle.quality_score >= 50 else DataQualityStatus.REJECTED
         return cls(

@@ -1,6 +1,7 @@
 """Single-source-of-truth facade for historical, realtime, replay, and state queries."""
 
 import logging
+from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,10 +85,23 @@ class MarketDataService:
                     report = self.validator.validate(recovered)
             if cross_check_anomalies:
                 report = report.model_copy(update={"anomalies": [*report.anomalies, *cross_check_anomalies]})
-            for anomaly in report.anomalies:
-                logger.warning("market_data_anomaly", extra={"anomaly": anomaly.model_dump(mode="json"), "symbol": symbol, "timeframe": timeframe.value})
-                if anomaly.missing_count:
-                    await self.event_bus.publish(GapDetected(correlation_id=uuid4(), source="market_data", payload=anomaly.model_dump(mode="json")))
+            if report.anomalies:
+                # One aggregated WARNING per `history()` call, never one line per anomaly — a
+                # large backfill (hundreds to thousands of candles) can legitimately surface many
+                # anomalies in one pass, and logging each individually is exactly what flooded
+                # production logs badly enough that Railway's own platform-level log-rate-limiter
+                # started dropping messages outright (426 dropped in one reported burst), silently
+                # eating whatever real error might have logged alongside them. Full per-anomaly
+                # detail is still available, just at DEBUG instead of WARNING.
+                counts = Counter(anomaly.type.value for anomaly in report.anomalies)
+                logger.warning(
+                    "market_data_anomaly_batch",
+                    extra={"symbol": symbol, "timeframe": timeframe.value, "anomaly_count": len(report.anomalies), "by_type": dict(counts)},
+                )
+                for anomaly in report.anomalies:
+                    logger.debug("market_data_anomaly", extra={"anomaly": anomaly.model_dump(mode="json"), "symbol": symbol, "timeframe": timeframe.value})
+                    if anomaly.missing_count:
+                        await self.event_bus.publish(GapDetected(correlation_id=uuid4(), source="market_data", payload=anomaly.model_dump(mode="json")))
             await self.repository.upsert_historical(report.candles)
             await self.cache.set(key, report.candles, self.config.cache.historical_ttl_seconds)
             self.sync_status = SyncStatus.COMPLETE if report.valid else SyncStatus.PARTIAL

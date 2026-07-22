@@ -6,6 +6,7 @@ network call.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -31,7 +32,7 @@ from backend.app.engines.market_data_engine.providers import InMemoryMarketDataP
 from backend.app.engines.market_data_engine.service import MarketDataService, build_market_data_service
 from backend.app.engines.market_data_engine.ssrf import assert_safe_public_url
 from backend.app.engines.market_data_engine.symbols import provider_symbol
-from backend.app.engines.market_data_engine.validation import MarketDataValidator
+from backend.app.engines.market_data_engine.validation import AnomalyType, MarketDataValidator
 from backend.app.events import InMemoryEventBus
 
 NOW = datetime(2026, 7, 21, 18, tzinfo=UTC)
@@ -474,6 +475,93 @@ async def test_quarantined_candle_is_removed_and_never_fabricated_back_in() -> N
     result = await service.history("XAUUSD", Timeframe.H1, start=good_timestamp - timedelta(minutes=1), end=bad_timestamp + timedelta(minutes=1), refresh=True)
     assert all(item.timestamp != bad_timestamp or item.close != 2222.4 for item in result)
     assert published  # the quarantine surfaced as a GapDetected event, not a silent drop
+
+
+# ---------------------------------------------------------------------------
+# Clock-drift recency window — a bulk historical backfill must not be flagged as "drift", and the
+# per-anomaly log flood this used to cause (one WARNING per candle) must be a single aggregate.
+# ---------------------------------------------------------------------------
+
+
+def test_clock_drift_is_skipped_for_historical_backfilled_candles() -> None:
+    """Regression test: a bulk `history()` backfill legitimately ingests old candles long after
+    they closed (that is the entire point of a backfill) — flagging every one of them as "clock
+    drift" is a false signal, not a real anomaly, and at backfill scale (hundreds of candles per
+    call) it used to flood the logs with one WARNING per candle badly enough that Railway's own
+    platform log-rate-limiter started silently dropping messages, including whatever real error
+    might have been logging alongside them."""
+    validator = MarketDataValidator(ValidationConfig(clock_drift_tolerance_seconds=30, clock_drift_recency_window_seconds=3600))
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    old_candle = Candle(
+        timestamp=now - timedelta(days=7), timeframe=Timeframe.M15, open=4000, high=4005, low=3995, close=4002, provider="kraken",
+        ingestion_timestamp=now,  # ingested "now", 7 days after it closed — a normal backfill
+    )
+    report = validator.validate([old_candle], now=now)
+    assert report.anomalies == []
+
+
+def test_clock_drift_is_still_flagged_for_a_genuinely_recent_candle() -> None:
+    """The recency window must not blanket-disable the check — a candle that closed recently but
+    was ingested suspiciously late (suggesting a real clock/feed problem) is still a real signal."""
+    validator = MarketDataValidator(ValidationConfig(clock_drift_tolerance_seconds=30, clock_drift_recency_window_seconds=3600))
+    now = datetime(2026, 7, 22, 12, tzinfo=UTC)
+    recent_but_delayed = Candle(
+        timestamp=now - timedelta(minutes=5), timeframe=Timeframe.M15, open=4000, high=4005, low=3995, close=4002, provider="kraken",
+        ingestion_timestamp=now,  # ~300s drift, well outside a 30s tolerance, and well within the 1h recency window
+    )
+    report = validator.validate([recent_but_delayed], now=now)
+    assert len(report.anomalies) == 1
+    assert report.anomalies[0].type == AnomalyType.CLOCK_DRIFT
+
+
+@pytest.mark.asyncio
+async def test_anomaly_batch_is_logged_once_not_per_anomaly(caplog: pytest.LogCaptureFixture) -> None:
+    """Regression test for the log-flood incident itself: many candles that each individually
+    trigger an anomaly must produce exactly one aggregated WARNING for the whole `history()` call,
+    not one WARNING per anomalous candle."""
+    # `service.history()` calls `validate()` without an injectable clock, so — unlike the two
+    # tests above — this must anchor to the real wall clock, not a fixed constant.
+    now = datetime.now(UTC)
+    # 15 candles, each ingested "now" but timestamped recently enough to fall inside the default
+    # clock-drift recency window — each one individually triggers a CLOCK_DRIFT anomaly.
+    candles = [
+        Candle(
+            timestamp=now - timedelta(minutes=15 * (15 - index)), timeframe=Timeframe.M15, open=4000 + index, high=4005 + index, low=3995 + index,
+            close=4002 + index, provider="memory", ingestion_timestamp=now,
+        )
+        for index in range(15)
+    ]
+    registry = ProviderRegistry()
+    registry.register(InMemoryMarketDataProvider(candles))
+    manager = ProviderManager(registry, preferred="memory")
+    service = MarketDataService(manager, config=MarketDataConfig())
+
+    target_logger = logging.getLogger("backend.app.engines.market_data_engine.service")
+    target_logger.addHandler(caplog.handler)
+    original_level, original_disabled, original_propagate = target_logger.level, target_logger.disabled, target_logger.propagate
+    target_logger.setLevel(logging.DEBUG)
+    target_logger.disabled = False
+    # Disable propagation to root while capturing: pytest's `caplog` fixture also attaches its own
+    # handler to the root logger, and unlike a couple of other test files in this suite,
+    # `create_app()` (which strips root handlers via `configure_logging()`) has not necessarily run
+    # earlier in this session — so without this, the same record can reach `caplog.handler` twice
+    # (once directly, once via propagation to root), double-counting every log line.
+    target_logger.propagate = False
+    try:
+        result = await service.history("XAUUSD", Timeframe.M15, end=now, limit=100, refresh=True)
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(original_level)
+        target_logger.disabled = original_disabled
+        target_logger.propagate = original_propagate
+    assert result
+    own_records = [record for record in caplog.records if record.name == target_logger.name]
+    warning_records = [record for record in own_records if record.levelname == "WARNING" and record.msg == "market_data_anomaly_batch"]
+    assert len(warning_records) == 1  # one aggregate WARNING for the whole call, never one per anomaly
+    assert warning_records[0].anomaly_count >= 1
+    debug_records = [record for record in own_records if record.levelname == "DEBUG" and record.msg == "market_data_anomaly"]
+    assert len(debug_records) == warning_records[0].anomaly_count  # full per-anomaly detail still available, just quieter
+    await service.close()
 
 
 # ---------------------------------------------------------------------------

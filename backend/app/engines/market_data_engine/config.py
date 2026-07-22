@@ -28,6 +28,14 @@ class CacheConfig(BaseModel):
 class ValidationConfig(BaseModel):
     future_tolerance_seconds: int = Field(default=5, ge=0)
     clock_drift_tolerance_seconds: int = Field(default=30, ge=0)
+    # `clock_drift` is only meaningful for a candle that was just ingested close to when it
+    # closed — e.g. a live poll picking up the latest bar. A bulk historical fetch (bootstrap, or
+    # a large `history()` backfill) legitimately ingests candles hours or days after they closed;
+    # flagging every one of those as "drift" is a false signal, not a real anomaly, and at backfill
+    # scale (hundreds/thousands of candles per call) floods the logs with warnings that mean
+    # nothing. A candle older than this window (measured from its own timestamp to "now") is
+    # treated as historical/backfilled and exempt from the drift check entirely.
+    clock_drift_recency_window_seconds: int = Field(default=3600, ge=1)
     gap_tolerance_multiplier: float = Field(default=1.5, ge=1)
     volatility_spike_multiplier: float = Field(default=8, gt=1)
     minimum_quality_score: float = Field(default=60, ge=0, le=100)

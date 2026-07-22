@@ -60,9 +60,11 @@ class MarketDataValidator:
             seen.add(key)
             if candle.timestamp > current + timedelta(seconds=self.config.future_tolerance_seconds):
                 raise MarketDataValidationError(f"future candle at {candle.timestamp.isoformat()}")
-            drift = abs((candle.ingestion_timestamp - candle.timestamp).total_seconds())
-            if drift > self.config.clock_drift_tolerance_seconds:
-                anomalies.append(DataAnomaly(type=AnomalyType.CLOCK_DRIFT, timestamp=candle.timestamp, severity=1, detail=f"ingestion clock drift {drift:.3f}s"))
+            candle_age = (current - candle.timestamp).total_seconds()
+            if candle_age <= self.config.clock_drift_recency_window_seconds:
+                drift = abs((candle.ingestion_timestamp - candle.timestamp).total_seconds())
+                if drift > self.config.clock_drift_tolerance_seconds:
+                    anomalies.append(DataAnomaly(type=AnomalyType.CLOCK_DRIFT, timestamp=candle.timestamp, severity=1, detail=f"ingestion clock drift {drift:.3f}s"))
             if previous is not None:
                 if candle.timestamp <= previous.timestamp:
                     raise MarketDataValidationError(f"non-monotonic candle at {candle.timestamp.isoformat()}")
