@@ -47,9 +47,13 @@ class IntegrationWorker:
             logger.info("worker.heartbeat", extra={"worker": "integration"})
             try:
                 processed = await self.service.process_outbox_once()
-                self.last_success_at = datetime.now(UTC)
-                self.last_error = None
-                self.consecutive_failures = 0
+                if self.service.last_batch_failures:
+                    self.last_error = "IntegrationBatchItemFailed"
+                    self.consecutive_failures += self.service.last_batch_failures
+                else:
+                    self.last_success_at = datetime.now(UTC)
+                    self.last_error = None
+                    self.consecutive_failures = 0
             except Exception as exc:
                 processed = 0
                 self.last_error = type(exc).__name__
@@ -70,12 +74,16 @@ class IntegrationWorker:
 
     def status(self, enabled: bool) -> dict[str, object]:
         running = self._task is not None and not self._task.done()
+        backlog = self.service.repository.metrics().get("outbox_backlog", 0)
+        progressing = running and not self.last_error and (not backlog or self.last_success_at is not None)
         return {
             "enabled": enabled,
             "running": running,
             # True only when this worker is configured on but its task is not actually running —
             # the exact "looks enabled, silently did nothing" state that used to report healthy.
             "crashed": enabled and not running,
+            "progressing": progressing,
+            "stalled": enabled and running and not progressing,
             "last_heartbeat_at": self.last_heartbeat_at,
             "last_success_at": self.last_success_at,
             "last_error": self.last_error,

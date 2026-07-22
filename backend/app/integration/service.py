@@ -51,6 +51,12 @@ class FullSystemIntegrationService:
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self.started = False
         self.failures = 0
+        self.last_batch_failures = 0
+        self.last_cycle_started_at: datetime | None = None
+        self.last_cycle_completed_at: datetime | None = None
+        self.last_cycle_failed_at: datetime | None = None
+        self.last_decision_persisted_at: datetime | None = None
+        self.last_signal_published_at: datetime | None = None
 
     async def start(self) -> None:
         if self._unsubscribe is None:
@@ -75,12 +81,14 @@ class FullSystemIntegrationService:
 
     async def process_outbox_once(self) -> int:
         items = await self.repository.pending(self.clock(), self.config.limits.outbox_batch_size)
+        self.last_batch_failures = 0
         for item in items:
             try:
                 await self.process(item.envelope)
                 await self.repository.complete(item.outbox_id, self.clock())
             except Exception as exc:
                 self.failures += 1
+                self.last_batch_failures += 1
                 await self.repository.fail(item.outbox_id, type(exc).__name__)
         return len(items)
 
@@ -129,7 +137,19 @@ class FullSystemIntegrationService:
         assert timeframe_name is not None
         timeframe = Timeframe(timeframe_name)
         boundary = envelope.available_at
-        logger.info("snapshot.started", extra={"symbol": symbol, "timeframe": timeframe.value, "mode": envelope.mode.value, "candle_timestamp": boundary.isoformat()})
+        self.last_cycle_started_at = self.clock()
+        log_context = {
+            "correlation_id": str(envelope.correlation_id),
+            "cycle_id": str(envelope.trace_id),
+            "candle_id": envelope.event_id,
+            "symbol": symbol,
+            "canonical_instrument": symbol,
+            "timeframe": timeframe.value,
+            "canonical_timeframe": timeframe.value,
+            "mode": envelope.mode.value,
+            "candle_timestamp": boundary.isoformat(),
+        }
+        logger.info("snapshot.started", extra=log_context)
         tracker = self.stage_tracker
         correlation = envelope.correlation_id
         if tracker is not None:
@@ -193,33 +213,61 @@ class FullSystemIntegrationService:
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation"), "success")
                 decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=decision_mode))
+                self.last_decision_persisted_at = self.clock()
+                logger.info(
+                    "decision.persist.completed",
+                    extra={**log_context, "snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "decision_status": decision.state.value},
+                )
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("scenario_decision",), "success")
                     tracker.complete(symbol, timeframe.value, boundary)
         except Exception as exc:
+            self.last_cycle_failed_at = self.clock()
             if tracker is not None:
                 tracker.fail_in_flight(symbol, timeframe.value, boundary, exc=exc)
+            logger.exception(
+                "snapshot.failed",
+                extra={**log_context, "failure_class": type(exc).__name__, "duration_ms": (perf_counter() - started) * 1000},
+            )
+            try:
+                await self._trace(envelope, TraceStatus.FAILED, "full_system", (envelope.event_id,), (), started)
+            except Exception:
+                logger.exception("snapshot.failure_trace_failed", extra=log_context)
             raise
-        if missing:
-            logger.warning("snapshot.incomplete", extra={"snapshot_id": str(snapshot.snapshot_id), "symbol": symbol, "timeframe": timeframe.value, "missing": missing})
+        try:
+            if missing:
+                await self.repository.mark_processed(envelope.event_id)
+                await self._trace(envelope, TraceStatus.BLOCKED, "snapshot_barrier", (envelope.event_id,), (str(snapshot.snapshot_id),), started)
+                self.last_cycle_completed_at = self.clock()
+                logger.warning("snapshot.completed_degraded", extra={**log_context, "snapshot_id": str(snapshot.snapshot_id), "missing": missing, "duration_ms": (perf_counter() - started) * 1000})
+                return None
+            logger.info("signal_decision.completed", extra={"snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "state": decision.state.value, "mode": envelope.mode.value})
+            blocker_codes = tuple(item.reason_code for item in decision.blockers)
+            warning_codes = tuple(item.reason_code for item in decision.warnings)
+            semantic = canonical_hash({"snapshot": snapshot.semantic_hash, "score": score.metadata.input_fingerprint, "decision": decision.input_fingerprint, "policies": (score.policy_version, decision.decision_policy_version)})
+            if not publish_signal or decision.state.value != DecisionState.ELIGIBLE.value:
+                await self.repository.mark_processed(envelope.event_id)
+                await self._trace(envelope, TraceStatus.COMPLETED, "full_system", (envelope.event_id,), (str(snapshot.snapshot_id), str(score.snapshot_id), str(decision.decision_id)), started)
+                self.last_cycle_completed_at = self.clock()
+                logger.info("snapshot.completed", extra={**log_context, "snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "decision_status": decision.state.value, "scenario_published": False, "duration_ms": (perf_counter() - started) * 1000})
+                return None
+            signal = OperationalSignal(operational_signal_id=semantic_uuid("signal", semantic), semantic_hash=semantic, decision_id=decision.decision_id, ai_score_id=score.snapshot_id, snapshot_id=snapshot.snapshot_id, trace_id=envelope.trace_id, market_event_id=envelope.event_id, instrument=symbol, timeframe=timeframe.value, mode=envelope.mode, direction=decision.direction.value, state=decision.state.value, confidence=decision.confidence_score, effective_at=decision.as_of, expires_at=decision.valid_until, data_quality_status=envelope.data_quality_status, provider_provenance=(envelope.source_name,), evidence=tuple(evidence), blockers=blocker_codes, warnings=warning_codes, ai_scoring_policy_version=score.policy_version, signal_decision_policy_version=decision.decision_policy_version, created_at=self.clock())
+            signal = await self.repository.save_signal(signal)
+            self.last_signal_published_at = self.clock()
+            logger.info("scenario.published", extra={"snapshot_id": str(snapshot.snapshot_id), "signal_id": str(signal.operational_signal_id), "symbol": symbol, "timeframe": timeframe.value})
             await self.repository.mark_processed(envelope.event_id)
-            await self._trace(envelope, TraceStatus.BLOCKED, "snapshot_barrier", (envelope.event_id,), (str(snapshot.snapshot_id),), started)
-            return None
-        logger.info("signal_decision.completed", extra={"snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "state": decision.state.value, "mode": envelope.mode.value})
-        blocker_codes = tuple(item.reason_code for item in decision.blockers)
-        warning_codes = tuple(item.reason_code for item in decision.warnings)
-        semantic = canonical_hash({"snapshot": snapshot.semantic_hash, "score": score.metadata.input_fingerprint, "decision": decision.input_fingerprint, "policies": (score.policy_version, decision.decision_policy_version)})
-        if not publish_signal or decision.state.value != DecisionState.ELIGIBLE.value:
-            await self.repository.mark_processed(envelope.event_id)
-            await self._trace(envelope, TraceStatus.COMPLETED, "full_system", (envelope.event_id,), (str(snapshot.snapshot_id), str(score.snapshot_id), str(decision.decision_id)), started)
-            logger.info("snapshot.completed", extra={"snapshot_id": str(snapshot.snapshot_id), "symbol": symbol, "timeframe": timeframe.value, "scenario_published": False, "duration_ms": (perf_counter() - started) * 1000})
-            return None
-        signal = OperationalSignal(operational_signal_id=semantic_uuid("signal", semantic), semantic_hash=semantic, decision_id=decision.decision_id, ai_score_id=score.snapshot_id, snapshot_id=snapshot.snapshot_id, trace_id=envelope.trace_id, market_event_id=envelope.event_id, instrument=symbol, timeframe=timeframe.value, mode=envelope.mode, direction=decision.direction.value, state=decision.state.value, confidence=decision.confidence_score, effective_at=decision.as_of, expires_at=decision.valid_until, data_quality_status=envelope.data_quality_status, provider_provenance=(envelope.source_name,), evidence=tuple(evidence), blockers=blocker_codes, warnings=warning_codes, ai_scoring_policy_version=score.policy_version, signal_decision_policy_version=decision.decision_policy_version, created_at=self.clock())
-        signal = await self.repository.save_signal(signal)
-        logger.info("scenario.published", extra={"snapshot_id": str(snapshot.snapshot_id), "signal_id": str(signal.operational_signal_id), "symbol": symbol, "timeframe": timeframe.value})
-        await self.repository.mark_processed(envelope.event_id)
-        await self._trace(envelope, TraceStatus.COMPLETED, "full_system", (envelope.event_id,), (str(snapshot.snapshot_id), str(score.snapshot_id), str(decision.decision_id), str(signal.operational_signal_id)), started)
-        return signal
+            await self._trace(envelope, TraceStatus.COMPLETED, "full_system", (envelope.event_id,), (str(snapshot.snapshot_id), str(score.snapshot_id), str(decision.decision_id), str(signal.operational_signal_id)), started)
+            self.last_cycle_completed_at = self.clock()
+            logger.info("snapshot.completed", extra={**log_context, "snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "signal_id": str(signal.operational_signal_id), "decision_status": decision.state.value, "scenario_published": True, "duration_ms": (perf_counter() - started) * 1000})
+            return signal
+        except Exception as exc:
+            self.last_cycle_failed_at = self.clock()
+            logger.exception("snapshot.failed", extra={**log_context, "failure_class": type(exc).__name__, "duration_ms": (perf_counter() - started) * 1000})
+            try:
+                await self._trace(envelope, TraceStatus.FAILED, "full_system", (envelope.event_id,), (), started)
+            except Exception:
+                logger.exception("snapshot.failure_trace_failed", extra=log_context)
+            raise
 
     async def _trace(self, envelope: CanonicalEventEnvelope, status: TraceStatus, consumer: str, inputs: tuple[str, ...], outputs: tuple[str, ...], started: float | None = None) -> None:
         duration = (perf_counter() - started) * 1000 if started is not None else 0.0
@@ -233,4 +281,19 @@ class FullSystemIntegrationService:
 
     def health(self) -> dict[str, object]:
         state = "healthy" if self.started and self.repository_mode != "memory" else "degraded" if self.started else "unavailable"
-        return {"status": state, "ready": self.started and self.repository_mode != "memory", "repository_mode": self.repository_mode, "worker": "embedded" if self.config.worker.embedded_api_worker else "external", "failures": self.failures, **self.repository.metrics()}
+        if state == "healthy" and self.last_batch_failures:
+            state = "degraded"
+        return {
+            "status": state,
+            "ready": self.started and self.repository_mode != "memory" and self.last_batch_failures == 0,
+            "repository_mode": self.repository_mode,
+            "worker": "embedded" if self.config.worker.embedded_api_worker else "external",
+            "failures": self.failures,
+            "last_batch_failures": self.last_batch_failures,
+            "last_cycle_started": self.last_cycle_started_at,
+            "last_cycle_completed": self.last_cycle_completed_at,
+            "last_cycle_failed": self.last_cycle_failed_at,
+            "last_decision_persisted": self.last_decision_persisted_at,
+            "last_signal_published": self.last_signal_published_at,
+            **self.repository.metrics(),
+        }
