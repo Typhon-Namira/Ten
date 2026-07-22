@@ -42,11 +42,33 @@ class MarketDataWorker:
         self.consecutive_failures = 0
         self.processing_state = "disabled" if not enabled else "idle"
         self.loaded_candles = 0
+        # Distinct from `last_error` (a single poll/bootstrap failure the loop already recovered
+        # from) — this is set only if the task itself terminated with an exception the loop could
+        # not absorb, e.g. a bug outside the per-iteration try/except below. `status()`/`system.py`
+        # must be able to tell "the loop is alive and merely had a bad poll" apart from "the loop
+        # is dead and nothing will ever run again" — conflating the two is what let a dead worker
+        # report as healthy.
+        self.last_fatal_error: str | None = None
 
     def start(self) -> None:
         if self.enabled and (self._task is None or self._task.done()):
             self._stop.clear()
             self._task = asyncio.create_task(self.run(), name="ten-market-data-worker")
+            self._task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task[None]) -> None:
+        """Belt-and-suspenders visibility on top of `run()`'s own try/except below: if the task
+        ever ends with an exception anyway (a bug in future code, or a `BaseException` the loop
+        deliberately doesn't swallow, e.g. cancellation), this guarantees it is logged loudly
+        instead of silently vanishing as an unretrieved `asyncio.Task` exception — the exact
+        failure mode `asyncio.create_task(...)` invites when nothing ever awaits or inspects the
+        task it returns."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self.last_fatal_error = f"{type(exc).__name__}: {exc}"
+            logger.critical("market_data.worker.task_died", exc_info=exc, extra={"worker": "market_data", "error_type": type(exc).__name__})
 
     async def stop(self) -> None:
         self._stop.set()
@@ -57,20 +79,43 @@ class MarketDataWorker:
 
     async def run(self) -> None:
         if self.bootstrap_enabled:
-            await self._bootstrap()
+            try:
+                await self._bootstrap()
+            except Exception as exc:
+                # `_bootstrap()`'s own per-(symbol, timeframe) loop already isolates individual
+                # failures; this only fires if something outside that boundary breaks. Bootstrap
+                # failing must never prevent the recurring poll loop below from ever starting.
+                logger.exception("market_data.bootstrap.crashed", extra={"worker": "market_data", "error_type": type(exc).__name__})
         while not self._stop.is_set():
-            self.last_heartbeat_at = datetime.now(UTC)
-            schedule = self.service.sessions.status_at(self.last_heartbeat_at)
-            logger.info("worker.heartbeat", extra={"worker": "market_data", "processing_state": self.processing_state})
-            if not schedule.market_open:
-                self.processing_state = "market_closed"
-                market_status = getattr(schedule, "market_status", "closed")
-                logger.info("market_data.poll.skipped_market_closed", extra={"market_status": getattr(market_status, "value", market_status)})
-            else:
-                self.processing_state = "polling"
-                for symbol in self.symbols:
-                    for timeframe in self.timeframes:
-                        await self._poll(symbol, timeframe)
+            try:
+                self.last_heartbeat_at = datetime.now(UTC)
+                schedule = self.service.sessions.status_at(self.last_heartbeat_at)
+                logger.info("worker.heartbeat", extra={"worker": "market_data", "processing_state": self.processing_state})
+                if not schedule.market_open:
+                    self.processing_state = "market_closed"
+                    market_status = getattr(schedule, "market_status", "closed")
+                    logger.info("market_data.poll.skipped_market_closed", extra={"market_status": getattr(market_status, "value", market_status)})
+                else:
+                    self.processing_state = "polling"
+                    for symbol in self.symbols:
+                        for timeframe in self.timeframes:
+                            await self._poll(symbol, timeframe)
+            except Exception as exc:
+                # `_poll()` below already catches its own exceptions (a single provider failure
+                # must not stop other (symbol, timeframe) pairs from being polled) — reaching this
+                # branch means something OUTSIDE that per-poll boundary broke instead, e.g.
+                # `sessions.status_at()`. Before this fix, that exception propagated straight out of
+                # `run()`, silently ending the `asyncio.Task` this loop runs on forever: nothing
+                # awaits or inspects that task (see `start()`), so the failure was invisible, the
+                # worker never polled again, `NewCandle` never fired again, and
+                # `status()["enabled"]` kept reporting `True` since it only reflects static config,
+                # not whether the loop is still alive. This closes one concrete, demonstrated way a
+                # dead worker could silently masquerade as healthy — see `_on_task_done` and
+                # `system.py`'s `operational_state` computation for the other two layers of the
+                # same fix.
+                self.consecutive_failures += 1
+                self.last_error = type(exc).__name__
+                logger.exception("market_data.worker.iteration_failed", extra={"worker": "market_data", "error_type": self.last_error})
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
             except TimeoutError:
@@ -123,9 +168,13 @@ class MarketDataWorker:
         return {
             "enabled": self.enabled,
             "running": running,
+            # True only when this worker is configured on but its task is not actually running —
+            # the exact "looks enabled, silently did nothing" state that used to report healthy.
+            "crashed": self.enabled and not running,
             "last_heartbeat_at": self.last_heartbeat_at,
             "last_success_at": self.last_success_at,
             "last_error": self.last_error,
+            "last_fatal_error": self.last_fatal_error,
             "consecutive_failures": self.consecutive_failures,
             "processing_state": self.processing_state,
             "loaded_candles": self.loaded_candles,

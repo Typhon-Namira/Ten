@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -85,3 +86,104 @@ async def test_disabled_worker_never_starts() -> None:
     worker.start()
     assert worker.status()["processing_state"] == "disabled"
     assert worker.status()["running"] is False
+
+
+class _FlakySessionsMarketService(StubMarketService):
+    """Raises from `sessions.status_at()` (a call outside `_poll()`'s own try/except) on the
+    first N invocations, then behaves normally — reproduces the exact failure surface found during
+    the "market data healthy but SMC-onward chain silent for hours" investigation: an exception
+    thrown from inside `MarketDataWorker.run()`'s loop body, but outside any per-poll boundary."""
+
+    def __init__(self, failures_before_recovery: int) -> None:
+        super().__init__()
+        self._remaining_failures = failures_before_recovery
+        self.status_at_calls = 0
+
+        def status_at(_: object) -> SimpleNamespace:
+            self.status_at_calls += 1
+            if self._remaining_failures > 0:
+                self._remaining_failures -= 1
+                raise RuntimeError("simulated failure outside the per-poll boundary")
+            return SimpleNamespace(market_open=False)
+
+        self.sessions = SimpleNamespace(status_at=status_at)
+
+
+@pytest.mark.asyncio
+async def test_worker_survives_an_exception_outside_the_per_poll_boundary_and_keeps_running() -> None:
+    """Regression test: before this fix, an exception raised anywhere in `run()`'s loop body other
+    than inside `_poll()` (e.g. `sessions.status_at()`) propagated straight out of the coroutine,
+    silently ending the `asyncio.Task` forever — `status()["enabled"]` stayed `True` but nothing
+    ever polled again. The loop must now catch it, record it, and keep going."""
+    service = _FlakySessionsMarketService(failures_before_recovery=2)
+    worker = MarketDataWorker(
+        service,  # type: ignore[arg-type]
+        enabled=True,
+        symbols=("XAUUSD",),
+        timeframes=(Timeframe.M15,),
+        bootstrap_enabled=False,
+        bootstrap_candles=500,
+        poll_seconds=0.01,
+    )
+    worker.start()
+    for _ in range(500):
+        if service.status_at_calls >= 4:
+            break
+        await asyncio.sleep(0.01)  # real time must pass for `poll_seconds`' wait_for to elapse
+    assert service.status_at_calls >= 4  # the loop kept iterating past the injected failures
+    assert worker.status()["running"] is True  # the task is still alive, not dead
+    assert worker.status()["crashed"] is False
+    assert worker.status()["last_error"] == "RuntimeError"
+    assert worker.status()["consecutive_failures"] >= 1
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_task_death_is_surfaced_via_status_and_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """If `run()` ever dies anyway (a `BaseException` the loop deliberately does not swallow, or a
+    future bug that reintroduces an unguarded path), `status()["crashed"]` must become visible and
+    the death must be logged at a level that would appear in the live log stream — not vanish as an
+    unretrieved `asyncio.Task` exception."""
+    worker = MarketDataWorker(
+        StubMarketService(),  # type: ignore[arg-type]
+        enabled=True,
+        symbols=("XAUUSD",),
+        timeframes=(Timeframe.M15,),
+        bootstrap_enabled=False,
+        bootstrap_candles=500,
+        poll_seconds=60,
+    )
+
+    async def _dies_immediately() -> None:
+        raise RuntimeError("simulated unrecoverable worker crash")
+
+    worker.run = _dies_immediately  # type: ignore[method-assign]
+    # `create_app()` (exercised by other tests in the full suite) reconfigures logging via
+    # `configure_logging()`'s `logging.basicConfig(force=True)`, which strips pytest's caplog
+    # handler off the root logger for the rest of the process — so relying on root propagation
+    # here is order-dependent. Attach caplog's handler directly to the specific logger under test,
+    # matching the pattern already established in test_fmp_provider.py.
+    target_logger = logging.getLogger("backend.app.engines.market_data_engine.worker")
+    target_logger.addHandler(caplog.handler)
+    original_level, original_disabled = target_logger.level, target_logger.disabled
+    target_logger.setLevel(logging.CRITICAL)
+    target_logger.disabled = False
+    try:
+        worker.start()
+        for _ in range(500):
+            # Wait for the done-callback specifically, not just `task.done()` — the callback runs
+            # via `call_soon` slightly after the task itself finishes, and it's what sets
+            # `last_fatal_error`.
+            if worker.status()["last_fatal_error"] is not None:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(original_level)
+        target_logger.disabled = original_disabled
+    status = worker.status()
+    assert status["crashed"] is True
+    assert status["running"] is False
+    assert status["last_fatal_error"] and "RuntimeError" in status["last_fatal_error"]
+    own_records = [record for record in caplog.records if record.name == target_logger.name]
+    assert any(record.levelname == "CRITICAL" and "task_died" in record.message for record in own_records)

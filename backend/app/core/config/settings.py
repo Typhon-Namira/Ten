@@ -36,7 +36,13 @@ class Settings(BaseSettings):
     market_data_bootstrap_enabled: bool = True
     market_data_bootstrap_candles: int = Field(default=2500, ge=50, le=5000)
     market_data_poll_seconds: float = Field(default=60, ge=5, le=3600)
-    max_candle_staleness_seconds: int = Field(default=900, ge=60, le=604800)
+    # Must exceed the largest configured timeframe's own bar duration with real margin: a freshly
+    # discovered "latest closed" candle is, by construction (no-lookahead), always somewhere
+    # between 0 and just-under-one-bar-duration old (see `market_data_engine.adapters._period_has_closed`).
+    # A tolerance equal to (or tighter than) that duration — e.g. 900s for M15 — leaves no room for
+    # normal poll-cycle timing/jitter and will intermittently mark genuinely fresh data as stale.
+    # Default here is 2x the default M15 timeframe's 900s duration.
+    max_candle_staleness_seconds: int = Field(default=1800, ge=60, le=604800)
     replay_worker_enabled: bool = False
     public_read_access: bool = True
     api_keys: dict[str, str] = Field(default_factory=dict)

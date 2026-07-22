@@ -20,11 +20,26 @@ class IntegrationWorker:
         self.last_success_at: datetime | None = None
         self.last_error: str | None = None
         self.consecutive_failures = 0
+        # Set only if the task itself terminated with an exception `run()`'s own try/except could
+        # not absorb — see `MarketDataWorker.last_fatal_error` for the full rationale. `run()`
+        # below is already resilient to any per-cycle `Exception`, so this is primarily a backstop
+        # against future changes reintroducing an unguarded path, and against a genuine
+        # `BaseException` the loop deliberately does not swallow.
+        self.last_fatal_error: str | None = None
 
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._stop.clear()
             self._task = asyncio.create_task(self.run(), name="ten-integration-worker")
+            self._task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self.last_fatal_error = f"{type(exc).__name__}: {exc}"
+            logger.critical("integration.worker.task_died", exc_info=exc, extra={"worker": "integration", "error_type": type(exc).__name__})
 
     async def run(self) -> None:
         while not self._stop.is_set():
@@ -54,11 +69,16 @@ class IntegrationWorker:
             self._task = None
 
     def status(self, enabled: bool) -> dict[str, object]:
+        running = self._task is not None and not self._task.done()
         return {
             "enabled": enabled,
-            "running": self._task is not None and not self._task.done(),
+            "running": running,
+            # True only when this worker is configured on but its task is not actually running —
+            # the exact "looks enabled, silently did nothing" state that used to report healthy.
+            "crashed": enabled and not running,
             "last_heartbeat_at": self.last_heartbeat_at,
             "last_success_at": self.last_success_at,
             "last_error": self.last_error,
+            "last_fatal_error": self.last_fatal_error,
             "consecutive_failures": self.consecutive_failures,
         }

@@ -80,6 +80,41 @@ async def test_blocked_market_event_persists_decision_without_false_signal() -> 
     await coordinator.stop()
 
 
+@pytest.mark.asyncio
+async def test_new_candle_event_reaches_smc_through_the_exact_production_wiring_shape() -> None:
+    """Regression test for the "market data healthy but SMC-onward chain silent" investigation.
+
+    `main.py` hardcodes `embedded_api_worker=False` in production — a published `NewCandle` only
+    gets enqueued by `_on_candle`; nothing processes it until something else calls
+    `process_outbox_once()` (in production, `IntegrationWorker`'s poll loop). Every other test in
+    this file uses `embedded_api_worker=True`, which processes inline and would not have caught a
+    bug specific to the enqueue-then-drain-later path production actually uses. This test
+    reproduces that exact shape: publish on the real event bus, assert nothing has run yet, then
+    drain the outbox exactly as `IntegrationWorker.run()` does, and assert SMC (via the snapshot
+    it feeds into) actually ran and produced a result — not silence.
+    """
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    config = IntegrationConfig(worker={"enabled": True, "embedded_api_worker": False})
+    analysis = FakeAnalysis()
+    coordinator = FullSystemIntegrationService(
+        event_bus=bus, repository=repository, config=config, market_data=FakeMarketData(candle()), smc=analysis, liquidity=analysis,
+        volume_profile=analysis, institutional_flow=analysis, market_regime=analysis, economic_calendar=analysis, ai_scoring=FakeScore(),
+        signal_decision=FakeDecision(), repository_mode="postgresql", clock=lambda: NOW,
+    )
+    await coordinator.start()
+    event = NewCandle(correlation_id=uuid4(), source="market_data", payload=candle().model_dump(mode="json"))
+    await bus.publish(event)
+    # Enqueued, but nothing has processed it yet — exactly the production shape.
+    assert repository.metrics()["snapshots"] == 0
+    assert repository.metrics()["outbox_backlog"] == 1
+    processed = await coordinator.process_outbox_once()
+    assert processed == 1
+    assert repository.metrics()["snapshots"] == 1  # SMC-onward genuinely ran, not silence
+    assert repository.metrics()["outbox_backlog"] == 0
+    assert coordinator.failures == 0
+    await coordinator.stop()
+
+
 def test_envelope_semantic_identity_and_mode_isolation() -> None:
     value = candle()
     first = CanonicalEventEnvelope.final_candle(value, uuid4(), NOW)

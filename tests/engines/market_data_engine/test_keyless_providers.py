@@ -107,38 +107,54 @@ def test_legacy_paid_providers_are_disabled_by_default_but_still_constructible(m
 # LBMA Gold Price — successful fetch/parse, malformed/empty response, network failure isolation.
 # ---------------------------------------------------------------------------
 
-_LBMA_AM_FIXTURE = [
-    {"d": "2026-07-16", "v": [4030.95, 2984.11, 3516.6]},
-    {"d": "2026-07-17", "v": [3998.8, 2974.31, 3494.95]},
-    {"d": "2026-07-18", "v": [None, None, None]},  # non-trading day
-    {"d": "2026-07-20", "v": [4014.8, 2983, 3512.15]},
-    {"d": "2026-07-21", "v": [4020.0, 2990, 3520.0]},  # "today" relative to NOW — must be excluded
-]
-_LBMA_PM_FIXTURE = [
-    {"d": "2026-07-16", "v": [3993.55, 2960.0, 3490.0]},
-    {"d": "2026-07-17", "v": [3995.35, 2965.0, 3492.0]},
-    # 2026-07-20 PM fix intentionally absent — AM-only day
-]
+# Dates are computed relative to the real wall clock at test-run time, not hardcoded — the
+# adapter's own no-lookahead check compares against `datetime.now(UTC).date()`, so a fixed date
+# string for "today" would silently start failing as soon as real time moved past it (this bit a
+# sibling test in the economic calendar suite the same way earlier in this session).
+_LBMA_TODAY = datetime.now(UTC).date()
+_LBMA_DAY_4, _LBMA_DAY_3, _LBMA_DAY_2, _LBMA_DAY_1 = (
+    (_LBMA_TODAY - timedelta(days=offset)).isoformat() for offset in (4, 3, 2, 1)
+)
+
+
+def _lbma_am_fixture() -> list[dict]:
+    return [
+        {"d": _LBMA_DAY_4, "v": [4030.95, 2984.11, 3516.6]},
+        {"d": _LBMA_DAY_3, "v": [3998.8, 2974.31, 3494.95]},
+        {"d": _LBMA_DAY_2, "v": [None, None, None]},  # non-trading day
+        {"d": _LBMA_DAY_1, "v": [4014.8, 2983, 3512.15]},
+        {"d": _LBMA_TODAY.isoformat(), "v": [4020.0, 2990, 3520.0]},  # "today" — must be excluded
+    ]
+
+
+def _lbma_pm_fixture() -> list[dict]:
+    return [
+        {"d": _LBMA_DAY_4, "v": [3993.55, 2960.0, 3490.0]},
+        {"d": _LBMA_DAY_3, "v": [3995.35, 2965.0, 3492.0]},
+        # _LBMA_DAY_1's PM fix intentionally absent — AM-only day
+    ]
 
 
 @pytest.mark.asyncio
 async def test_lbma_fetch_succeeds_and_combines_am_pm_fixes() -> None:
+    am_fixture, pm_fixture = _lbma_am_fixture(), _lbma_pm_fixture()
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/json/gold_am.json":
-            return httpx.Response(200, json=_LBMA_AM_FIXTURE)
+            return httpx.Response(200, json=am_fixture)
         if request.url.path == "/json/gold_pm.json":
-            return httpx.Response(200, json=_LBMA_PM_FIXTURE)
+            return httpx.Response(200, json=pm_fixture)
         return httpx.Response(404)
 
     provider = LbmaGoldPriceProvider(base_url="https://prices.lbma.org.uk")
     _mounted(provider, handler)
     candles = await provider.fetch_history(ProviderRequest(symbol="XAUUSD", timeframe=Timeframe.D1, limit=10))
     by_date = {item.timestamp.date().isoformat(): item for item in candles}
-    assert set(by_date) == {"2026-07-16", "2026-07-17", "2026-07-20"}  # holiday + "today" excluded
-    both = by_date["2026-07-16"]
+    assert set(by_date) == {_LBMA_DAY_4, _LBMA_DAY_3, _LBMA_DAY_1}  # holiday + "today" excluded
+    both = by_date[_LBMA_DAY_4]
     assert both.open == 4030.95 and both.close == 3993.55
     assert both.high == max(4030.95, 3993.55) and both.low == min(4030.95, 3993.55)
-    am_only = by_date["2026-07-20"]
+    am_only = by_date[_LBMA_DAY_1]
     assert am_only.open == am_only.high == am_only.low == am_only.close == 4014.8
     assert all(item.volume == 0 for item in candles)
     await provider.close()
@@ -164,9 +180,11 @@ async def test_lbma_empty_response_returns_no_candles() -> None:
 
 @pytest.mark.asyncio
 async def test_lbma_pm_fetch_failure_falls_back_to_am_only_candles() -> None:
+    am_fixture = _lbma_am_fixture()
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/json/gold_am.json":
-            return httpx.Response(200, json=_LBMA_AM_FIXTURE)
+            return httpx.Response(200, json=am_fixture)
         return httpx.Response(500)  # PM endpoint is down
 
     provider = LbmaGoldPriceProvider(base_url="https://prices.lbma.org.uk")

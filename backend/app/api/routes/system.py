@@ -61,9 +61,23 @@ async def diagnostics(request: Request) -> dict[str, object]:
     market_worker = app.state.market_data_worker.status()
     integration_worker = app.state.integration_worker.status(settings.integration_worker_enabled)
     history_initialized = candle_count >= settings.market_data_bootstrap_candles
-    candle_fresh = candle is not None and (now - candle.timestamp).total_seconds() <= settings.max_candle_staleness_seconds
+    # Measured from the candle's CLOSE time, matching the integration layer's own freshness gate
+    # (`FullSystemIntegrationService.process()`'s `age = clock() - envelope.payload.close_time`).
+    # Measuring from open time (the previous formula) understated a candle's real age by a full
+    # bar duration — for M15 that's 900 extra seconds of apparent freshness, enough to mask this
+    # dashboard ever reporting `STALE_MARKET_DATA` while the integration layer was already
+    # silently blocking the same candle as stale internally.
+    candle_age_seconds = max(0, (now - (candle.timestamp + candle.timeframe.duration)).total_seconds()) if candle else None
+    candle_fresh = candle_age_seconds is not None and candle_age_seconds <= settings.max_candle_staleness_seconds
     if not database_healthy:
         operational_state = "DEGRADED_DATABASE"
+    elif market_worker["crashed"] or integration_worker["crashed"]:
+        # Distinct from "disabled": the worker is configured on but its background task is not
+        # actually running (crashed, or never started) — a real outage that `enabled` alone could
+        # never reveal, since `enabled` only reflects static config. This is what let a genuinely
+        # dead worker report "Healthy" indefinitely: `NewCandle` stops firing (or the outbox stops
+        # draining) with zero visible signal anywhere else in this response.
+        operational_state = "DEGRADED_WORKER_DEAD"
     elif not market_worker["enabled"] or not integration_worker["enabled"]:
         operational_state = "DEGRADED_WORKER_DISABLED"
     elif provider_stats is None and candle is None:
@@ -103,8 +117,9 @@ async def diagnostics(request: Request) -> dict[str, object]:
             "timeframe": timeframe.value,
             **schedule.model_dump(mode="json"),
             "latest_candle_at": candle.timestamp if candle else None,
-            "latest_candle_age_seconds": max(0, (now - candle.timestamp).total_seconds()) if candle else None,
-            "freshness": "absent" if candle is None else "fresh" if (now - candle.timestamp).total_seconds() <= settings.max_candle_staleness_seconds else "stale",
+            # Measured from close time, not open time — see the comment above `candle_age_seconds`.
+            "latest_candle_age_seconds": candle_age_seconds,
+            "freshness": "absent" if candle is None else "fresh" if candle_fresh else "stale",
         },
         "history": {"candle_count": candle_count, "required_candle_count": settings.market_data_bootstrap_candles, "initialized": history_initialized},
         "workers": {

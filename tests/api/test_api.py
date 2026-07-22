@@ -58,6 +58,29 @@ def test_health_and_status_endpoints() -> None:
     assert "database_url" not in str(payload).lower()
 
 
+def test_diagnostics_reports_a_dead_worker_as_degraded_not_healthy() -> None:
+    """Regression test for the "market data healthy but SMC-onward chain silent for hours"
+    investigation: `operational_state` used to only check `worker["enabled"]` (static config), so
+    a worker that was configured on but whose background task had died — crashed, or never
+    actually started — reported no differently than a genuinely healthy one. Simulated here by
+    marking the worker enabled with no live task, exactly the state a crashed
+    `asyncio.create_task(...)` (never awaited, exception never retrieved) leaves behind."""
+    with TestClient(create_app()) as client:
+        client.app.state.market_data_worker.enabled = True
+        client.app.state.market_data_worker._task = None
+        response = client.get("/api/v1/system/diagnostics")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workers"]["market_data_worker"]["enabled"] is True
+    assert body["workers"]["market_data_worker"]["running"] is False
+    # This is the field that used to not exist at all: `enabled=True` alone (the old check) cannot
+    # distinguish a genuinely dead worker from a healthy one, which is exactly how this stayed
+    # invisible. `operational_state` isn't asserted here — this test environment has no real
+    # Postgres, so `DEGRADED_DATABASE` (an earlier, unrelated branch in the same if/elif chain)
+    # already dominates; that ordering is simple, readable code and doesn't need its own test.
+    assert body["workers"]["market_data_worker"]["crashed"] is True
+
+
 def test_dashboard_endpoints_default_to_the_configured_primary_timeframe_not_a_hardcoded_m15() -> None:
     """Regression test: `/market-intelligence`, `/pipeline/stages/latest`, `/performance`, and
     `/market/status` used to default their instrument/timeframe query params to hardcoded

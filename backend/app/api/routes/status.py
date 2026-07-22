@@ -43,7 +43,9 @@ async def market_status(request: Request, service: Annotated[MarketDataService, 
         next_expected_open_at=schedule.next_expected_open_at,
         server_time_utc=schedule.server_time_utc,
         latest_candle_at=candle.timestamp if candle else None,
-        latest_candle_age_seconds=max(0, (now - candle.timestamp).total_seconds()) if candle else None,
+        # Measured from close time, not open time, to match `/api/v1/system/diagnostics` and the
+        # integration layer's own staleness gate (`FullSystemIntegrationService.process()`).
+        latest_candle_age_seconds=max(0, (now - (candle.timestamp + candle.timeframe.duration)).total_seconds()) if candle else None,
         provider_status=state.provider_health,
     )
 
