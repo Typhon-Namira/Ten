@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from backend.app.storage.batching import bounded_insert_chunks
 from backend.app.storage.models import SignalDecisionReasonRecord, SignalDecisionRecord, SignalDecisionRuleRecord
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
@@ -193,9 +194,11 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
                 for index, item in enumerate(values)
             ]
             if rules:
-                await self.session.execute(insert(SignalDecisionRuleRecord).values(rules).on_conflict_do_nothing(index_elements=["id"]))
+                for chunk in bounded_insert_chunks(rules):
+                    await self.session.execute(insert(SignalDecisionRuleRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
             if reasons:
-                await self.session.execute(insert(SignalDecisionReasonRecord).values(reasons).on_conflict_do_nothing(index_elements=["id"]))
+                for chunk in bounded_insert_chunks(reasons):
+                    await self.session.execute(insert(SignalDecisionReasonRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
             await self.session.commit()
             return await self.find_by_fingerprint(decision.input_fingerprint, decision.mode) or decision
         except Exception as exc:

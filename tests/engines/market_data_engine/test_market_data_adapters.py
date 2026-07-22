@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from backend.app.engines.market_data_engine.adapters import (
     AlphaVantageProvider,
@@ -292,6 +293,18 @@ async def test_gap_recovery_and_sql_write_paths(tmp_path: Path) -> None:
     await repository.append_realtime(first)
     assert session.execute.await_count == 2
     assert session.commit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_historical_upsert_chunks_parameter_heavy_batches_atomically() -> None:
+    candles = [candle(NOW + timedelta(minutes=index)) for index in range(2_600)]
+    session = AsyncMock()
+    repository = SqlAlchemyMarketDataRepository(FakeSessionFactory(session))
+    assert await repository.upsert_historical(candles) == 2_600
+    assert session.execute.await_count == 3
+    assert all(len(call.args[0].compile(dialect=postgresql.dialect()).params) <= 30_000 for call in session.execute.await_args_list)
+    session.commit.assert_awaited_once()
+    session.rollback.assert_not_awaited()
 
 
 @pytest.mark.asyncio

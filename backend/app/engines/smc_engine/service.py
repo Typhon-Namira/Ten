@@ -67,7 +67,7 @@ class SMCService:
             external = await self.liquidity_reader.evidence(snapshot.symbol, snapshot.timeframe, snapshot.analysis_timestamp)
             supplied = tuple(StructureLiquidityReference(id=stable_id("external-liquidity", snapshot.symbol, snapshot.timeframe, item.id, item.available_at.isoformat()), symbol=snapshot.symbol, timeframe=snapshot.timeframe, reference_type=LiquidityReferenceType.EXTERNAL_SWEEP, direction=StructureDirection.NEUTRAL, price=item.price, timestamp=item.occurred_at, available_at=item.available_at, external_sweep_id=item.id, confidence_score=item.confidence_score, evidence=(Evidence(code="dedicated_liquidity_engine", description="sweep metadata supplied through the read-only liquidity contract", value=item.event_type),), algorithm_version=snapshot.engine_version) for item in external if item.available_at <= snapshot.analysis_timestamp)
             snapshot = snapshot.model_copy(update={"id": stable_id("snapshot-liquidity", snapshot.symbol, snapshot.timeframe, snapshot.id, *(item.id for item in supplied)), "liquidity_references": (*snapshot.liquidity_references, *supplied)})
-        await self.repository.save(snapshot)
+        await self.repository.save(snapshot, correlation_id=correlation_id)
         self._record(snapshot, len(normalized), (perf_counter() - started) * 1000)
         await self._publish(snapshot, correlation_id or uuid4())
         return snapshot
@@ -139,7 +139,14 @@ class SMCService:
         return {"W1": direction(weekly), "MN1": direction(monthly)}
 
     def health(self) -> dict[str, object]:
-        return {"status": "healthy", "engine_version": self.analyzer.version, "configuration_version": self.config.version, "checked_at": datetime.now(UTC)}
+        persistence_metrics = getattr(self.repository, "metrics", None)
+        return {
+            "status": "healthy",
+            "engine_version": self.analyzer.version,
+            "configuration_version": self.config.version,
+            "persistence": persistence_metrics.snapshot() if persistence_metrics is not None else None,
+            "checked_at": datetime.now(UTC),
+        }
 
     def _record(self, snapshot: SMCAnalysisSnapshot, candle_count: int, latency: float) -> None:
         self.metrics.analyses += 1

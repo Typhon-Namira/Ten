@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from backend.app.storage.batching import bounded_insert_chunks
 from backend.app.storage.models import AIScoreComponentRecord, AIScoreConflictRecord, AIScoreSnapshotRecord
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
@@ -162,9 +163,11 @@ class SqlAlchemyAIScoringRepository(AIScoringRepository, ScopedSessionRepository
                 for item in snapshot.conflicts
             ]
             if component_rows:
-                await self.session.execute(insert(AIScoreComponentRecord).values(component_rows).on_conflict_do_nothing(index_elements=["id"]))
+                for chunk in bounded_insert_chunks(component_rows):
+                    await self.session.execute(insert(AIScoreComponentRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
             if conflict_rows:
-                await self.session.execute(insert(AIScoreConflictRecord).values(conflict_rows).on_conflict_do_nothing(index_elements=["id"]))
+                for chunk in bounded_insert_chunks(conflict_rows):
+                    await self.session.execute(insert(AIScoreConflictRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
             await self.session.commit()
             return await self.find_by_fingerprint(snapshot.metadata.input_fingerprint, snapshot.mode) or snapshot
         except Exception as exc:

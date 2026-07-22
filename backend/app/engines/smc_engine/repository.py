@@ -2,7 +2,11 @@
 
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
+import logging
+from time import perf_counter
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -11,14 +15,30 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
 from backend.app.storage.models import SMCAnalysisSnapshotRecord, SMCCheckpointRecord, SMCObjectRecord
+from backend.app.storage.batching import DEFAULT_BIND_PARAMETER_BUDGET, bounded_insert_chunks, maximum_rows_per_insert
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import SMCAnalysisSnapshot, stable_id
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SMCPersistenceMetrics:
+    attempted_objects: int = 0
+    inserted_objects: int = 0
+    skipped_objects: int = 0
+    chunk_count: int = 0
+    duration_ms: float = 0.0
+    failures: int = 0
+
+    def snapshot(self) -> dict[str, int | float]:
+        return dict(vars(self))
+
 
 class SMCRepository(ABC):
     @abstractmethod
-    async def save(self, snapshot: SMCAnalysisSnapshot) -> None:
+    async def save(self, snapshot: SMCAnalysisSnapshot, *, correlation_id: UUID | None = None) -> None:
         """Persist an immutable versioned analysis snapshot."""
 
     @abstractmethod
@@ -40,7 +60,7 @@ class InMemorySMCRepository(SMCRepository):
         self._ids: set[object] = set()
         self._lock = asyncio.Lock()
 
-    async def save(self, snapshot: SMCAnalysisSnapshot) -> None:
+    async def save(self, snapshot: SMCAnalysisSnapshot, *, correlation_id: UUID | None = None) -> None:
         async with self._lock:
             if snapshot.id in self._ids:
                 return
@@ -75,21 +95,59 @@ class SqlAlchemySMCRepository(SMCRepository, ScopedSessionRepository):
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         ScopedSessionRepository.__init__(self, session_factory)
+        self.metrics = SMCPersistenceMetrics()
 
     @scoped_session
-    async def save(self, snapshot: SMCAnalysisSnapshot) -> None:
+    async def save(self, snapshot: SMCAnalysisSnapshot, *, correlation_id: UUID | None = None) -> None:
         values = {"id": snapshot.id, "symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "analysis_timestamp": snapshot.analysis_timestamp, "market_data_boundary": snapshot.market_data_boundary, "status": snapshot.status.value, "processing_mode": snapshot.processing_mode.value, "engine_version": snapshot.engine_version, "configuration_version": snapshot.configuration_version, "payload": snapshot.model_dump(mode="json"), "created_at": snapshot.created_at}
+        started = perf_counter()
+        objects = sorted(self._objects(snapshot), key=lambda item: (item["analytical_timestamp"], item["object_type"], str(item["id"])))
+        chunks = bounded_insert_chunks(objects)
+        parameters_per_row = len(objects[0]) if objects else 0
+        rows_per_chunk = maximum_rows_per_insert(parameters_per_row) if parameters_per_row else 0
+        attempted = len(objects)
+        inserted = 0
+        context = {
+            "correlation_id": str(correlation_id) if correlation_id else None,
+            "cycle_id": str(snapshot.id),
+            "instrument": canonical_symbol(snapshot.symbol),
+            "timeframe": snapshot.timeframe.value,
+            "total_objects": attempted,
+            "total_chunks": len(chunks),
+            "parameters_per_row": parameters_per_row,
+            "bind_parameter_budget": DEFAULT_BIND_PARAMETER_BUDGET,
+            "rows_per_chunk": rows_per_chunk,
+        }
+        logger.info("smc.persistence.started", extra=context)
         try:
             await self.session.execute(insert(SMCAnalysisSnapshotRecord).values(values).on_conflict_do_nothing(index_elements=["id"]))
-            objects = self._objects(snapshot)
-            if objects:
-                await self.session.execute(insert(SMCObjectRecord).values(objects).on_conflict_do_nothing(index_elements=["id"]))
+            for chunk_index, chunk in enumerate(chunks, start=1):
+                chunk_context = {**context, "chunk_index": chunk_index, "chunk_size": len(chunk)}
+                chunk_inserted = 0
+                logger.info("smc.persistence.chunk.started", extra=chunk_context)
+                try:
+                    chunk_ids = [item["id"] for item in chunk]
+                    existing_ids = set((await self.session.scalars(select(SMCObjectRecord.id).where(SMCObjectRecord.id.in_(chunk_ids)))).all())
+                    pending = [item for item in chunk if item["id"] not in existing_ids]
+                    if pending:
+                        result = await self.session.execute(insert(SMCObjectRecord).values(pending).on_conflict_do_nothing(index_elements=["id"]))
+                        rowcount = getattr(result, "rowcount", None)
+                        chunk_inserted = rowcount if isinstance(rowcount, int) and rowcount >= 0 else len(pending)
+                        inserted += chunk_inserted
+                except Exception as exc:
+                    logger.exception("smc.persistence.chunk.failed", extra={**chunk_context, "exception_type": type(exc).__name__})
+                    raise
+                logger.info("smc.persistence.chunk.completed", extra={**chunk_context, "inserted_objects": chunk_inserted, "skipped_objects": len(chunk) - chunk_inserted, "duration_ms": (perf_counter() - started) * 1000})
             checkpoint = {"symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "configuration_version": snapshot.configuration_version, "snapshot_id": snapshot.id, "last_processed_candle": snapshot.analysis_timestamp, "state_payload": snapshot.model_dump(mode="json"), "updated_at": snapshot.created_at}
             statement = insert(SMCCheckpointRecord).values(checkpoint)
             await self.session.execute(statement.on_conflict_do_update(index_elements=["symbol", "timeframe", "configuration_version"], set_={name: getattr(statement.excluded, name) for name in ("snapshot_id", "last_processed_candle", "state_payload", "updated_at")}))
             await self.session.commit()
-        except Exception:
+            self.metrics = SMCPersistenceMetrics(attempted_objects=attempted, inserted_objects=inserted, skipped_objects=max(0, attempted - inserted), chunk_count=len(chunks), duration_ms=(perf_counter() - started) * 1000, failures=self.metrics.failures)
+            logger.info("smc.persistence.completed", extra={**context, **self.metrics.snapshot()})
+        except Exception as exc:
             await self.session.rollback()
+            self.metrics = SMCPersistenceMetrics(attempted_objects=attempted, inserted_objects=0, skipped_objects=0, chunk_count=len(chunks), duration_ms=(perf_counter() - started) * 1000, failures=self.metrics.failures + 1)
+            logger.exception("smc.persistence.failed", extra={**context, "duration_ms": self.metrics.duration_ms, "exception_type": type(exc).__name__})
             raise
 
     @scoped_session

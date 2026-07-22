@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from tests.conftest import FakeSessionFactory
@@ -15,6 +16,7 @@ from backend.app.engines.smc_engine import (
     InMemorySMCRepository,
     ProcessingMode,
     SMCConfig,
+    SMCAnalysisSnapshot,
     SMCService,
     SqlAlchemySMCRepository,
     ConfirmationState,
@@ -27,6 +29,7 @@ from backend.app.engines.smc_engine import (
 )
 from backend.app.engines.smc_engine.context import CandleContext
 from backend.app.engines.smc_engine.exceptions import InvalidSMCInput
+from backend.app.storage.batching import DEFAULT_OPERATIONAL_ROW_CAP, maximum_rows_per_insert
 from backend.app.engines.smc_engine.structure import StructureAnalyzer
 from backend.app.engines.smc_engine.swing import SwingDetector
 from backend.app.events import InMemoryEventBus
@@ -177,10 +180,19 @@ class _Scalars:
 class _Session:
     def __init__(self, payload: dict[str, object] | None = None) -> None:
         self.payload = payload
-        self.execute = AsyncMock()
+        self.execute = AsyncMock(side_effect=self._execute)
         self.commit = AsyncMock()
+        self.rollback = AsyncMock()
+
+    @staticmethod
+    async def _execute(statement: object) -> object:
+        multi_values = getattr(statement, "_multi_values", ())
+        rowcount = len(multi_values[0]) if multi_values else 1
+        return SimpleNamespace(rowcount=rowcount)
 
     async def scalars(self, _statement: object) -> _Scalars:
+        if "smc_objects.id" in str(_statement):
+            return _Scalars(None)
         return _Scalars(SimpleNamespace(payload=self.payload, state_payload=self.payload) if self.payload else None)
 
 
@@ -196,3 +208,135 @@ async def test_sql_repository_conflict_safe_write_and_reads(candles: list[Candle
     assert await repository.checkpoints() == (snapshot,)
     empty = SqlAlchemySMCRepository(cast(Any, FakeSessionFactory(_Session())))
     assert await empty.latest("XAU/USD", Timeframe.M15) is None
+
+
+def _large_snapshot(
+    candles: list[Candle],
+    object_count: int,
+    *,
+    timeframe: Timeframe = Timeframe.M15,
+) -> SMCAnalysisSnapshot:
+    candles = [candle.model_copy(update={"timeframe": timeframe}) for candle in candles]
+    snapshot = BaselineSMCAnalyzer().analyze_snapshot(candles)
+    template = _swing(CandleContext.build(candles, SMCConfig()), 1, True, 2)
+    swings = tuple(template.model_copy(update={"id": uuid4()}) for _ in range(object_count))
+    return snapshot.model_copy(
+        update={
+            "swings": swings,
+            "structure_legs": (),
+            "structure_events": (),
+            "displacements": (),
+            "zones": (),
+            "liquidity_references": (),
+            "dealing_ranges": (),
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("object_count", "expected_chunks"),
+    ((DEFAULT_OPERATIONAL_ROW_CAP - 1, 1), (DEFAULT_OPERATIONAL_ROW_CAP, 1), (DEFAULT_OPERATIONAL_ROW_CAP + 1, 2), (3_693, 4)),
+)
+async def test_sql_repository_chunks_large_object_inserts_within_bind_budget(candles: list[Candle], object_count: int, expected_chunks: int) -> None:
+    snapshot = _large_snapshot(candles, object_count)
+    session = _Session()
+    repository = SqlAlchemySMCRepository(cast(Any, FakeSessionFactory(session)))
+    parameters_per_row = len(repository._objects(snapshot)[0])
+
+    await repository.save(snapshot, correlation_id=uuid4())
+
+    object_statements = [call.args[0] for call in session.execute.await_args_list[1:-1]]
+    assert len(object_statements) == expected_chunks
+    assert parameters_per_row == 13
+    assert maximum_rows_per_insert(parameters_per_row) == DEFAULT_OPERATIONAL_ROW_CAP
+    assert all(len(statement.compile(dialect=postgresql.dialect()).params) <= 30_000 for statement in object_statements)
+    assert all("ON CONFLICT (id) DO NOTHING" in str(statement.compile(dialect=postgresql.dialect())) for statement in object_statements)
+    assert session.execute.await_count == expected_chunks + 2
+    assert session.commit.await_count == 1
+    assert session.rollback.await_count == 0
+    assert repository.metrics.attempted_objects == object_count
+    assert repository.metrics.inserted_objects == object_count
+    assert repository.metrics.skipped_objects == 0
+    assert repository.metrics.chunk_count == expected_chunks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeframe", (Timeframe.M1, Timeframe.M15))
+async def test_sql_repository_large_save_continues_for_live_timeframes(candles: list[Candle], timeframe: Timeframe) -> None:
+    snapshot = _large_snapshot(candles, DEFAULT_OPERATIONAL_ROW_CAP + 1, timeframe=timeframe)
+    session = _Session()
+    repository = SqlAlchemySMCRepository(cast(Any, FakeSessionFactory(session)))
+
+    await repository.save(snapshot, correlation_id=uuid4())
+
+    assert session.execute.await_count == 4
+    session.commit.assert_awaited_once()
+    session.rollback.assert_not_awaited()
+    assert repository.metrics.inserted_objects == DEFAULT_OPERATIONAL_ROW_CAP + 1
+
+
+@pytest.mark.asyncio
+async def test_sql_repository_orders_chunks_stably_and_rolls_back_atomically(candles: list[Candle]) -> None:
+    snapshot = _large_snapshot(candles, DEFAULT_OPERATIONAL_ROW_CAP + 1)
+    session = _Session()
+    repository = SqlAlchemySMCRepository(cast(Any, FakeSessionFactory(session)))
+    successful_execute = session._execute
+    calls = 0
+
+    async def fail_second_chunk(statement: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("second chunk failed")
+        return await successful_execute(statement)
+
+    session.execute.side_effect = fail_second_chunk
+    with pytest.raises(RuntimeError, match="second chunk failed"):
+        await repository.save(snapshot)
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+    assert repository.metrics.failures == 1
+
+    session.execute.reset_mock()
+    session.commit.reset_mock()
+    session.rollback.reset_mock()
+    session.execute.side_effect = successful_execute
+    await repository.save(snapshot)
+    object_statements = [call.args[0] for call in session.execute.await_args_list[1:-1]]
+    persisted_ids = []
+    for statement in object_statements:
+        params = statement.compile(dialect=postgresql.dialect()).params
+        persisted_ids.extend(value for key, value in params.items() if key.startswith("id_m"))
+    expected_ids = [item["id"] for item in sorted(repository._objects(snapshot), key=lambda item: (item["analytical_timestamp"], item["object_type"], str(item["id"])))]
+    assert persisted_ids == expected_ids
+    session.commit.assert_awaited_once()
+    session.rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sql_repository_empty_object_list_skips_bulk_insert(candles: list[Candle]) -> None:
+    snapshot = _large_snapshot(candles, 0)
+    session = _Session()
+    repository = SqlAlchemySMCRepository(cast(Any, FakeSessionFactory(session)))
+    await repository.save(snapshot)
+    assert session.execute.await_count == 2
+    assert repository.metrics.attempted_objects == 0
+    assert repository.metrics.chunk_count == 0
+
+
+@pytest.mark.asyncio
+async def test_sql_repository_skips_existing_deterministic_object_ids(candles: list[Candle]) -> None:
+    snapshot = _large_snapshot(candles, 10)
+    session = _Session()
+    repository = SqlAlchemySMCRepository(cast(Any, FakeSessionFactory(session)))
+    existing_ids = [item["id"] for item in repository._objects(snapshot)]
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: existing_ids))
+
+    await repository.save(snapshot)
+
+    assert session.execute.await_count == 2  # snapshot and checkpoint; no object insert
+    assert repository.metrics.attempted_objects == 10
+    assert repository.metrics.inserted_objects == 0
+    assert repository.metrics.skipped_objects == 10
+    session.commit.assert_awaited_once()

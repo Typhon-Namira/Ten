@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import HistoricalCandleRecord, RealtimeCandleRecord
+from backend.app.storage.batching import bounded_insert_chunks
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import Candle, Timeframe, canonical_symbol
@@ -92,13 +93,14 @@ class SqlAlchemyMarketDataRepository(MarketDataRepository, ScopedSessionReposito
         if not candles:
             return 0
         values = [self._values(item) for item in candles]
-        statement = insert(HistoricalCandleRecord).values(values)
-        statement = statement.on_conflict_do_update(
-            index_elements=["symbol", "timeframe", "timestamp"],
-            set_={name: getattr(statement.excluded, name) for name in ("open", "high", "low", "close", "volume", "spread", "provider", "quality_score", "quality_level", "ingestion_timestamp")},
-        )
         try:
-            await self.session.execute(statement)
+            for chunk in bounded_insert_chunks(values):
+                statement = insert(HistoricalCandleRecord).values(list(chunk))
+                statement = statement.on_conflict_do_update(
+                    index_elements=["symbol", "timeframe", "timestamp"],
+                    set_={name: getattr(statement.excluded, name) for name in ("open", "high", "low", "close", "volume", "spread", "provider", "quality_score", "quality_level", "ingestion_timestamp")},
+                )
+                await self.session.execute(statement)
             await self.session.commit()
         except Exception:
             await self.session.rollback()

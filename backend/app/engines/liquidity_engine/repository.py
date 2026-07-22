@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
+from backend.app.storage.batching import bounded_insert_chunks
 from backend.app.storage.models import LiquidityCheckpointRecord, LiquidityObjectRecord, LiquiditySnapshotRecord
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
@@ -118,7 +119,8 @@ class SqlAlchemyLiquidityRepository(LiquidityRepository, ScopedSessionRepository
                     )
                 )
         if objects:
-            await self.session.execute(insert(LiquidityObjectRecord).values(objects).on_conflict_do_nothing(index_elements=["id"]))
+            for chunk in bounded_insert_chunks(objects):
+                await self.session.execute(insert(LiquidityObjectRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
         digest = sha256(snapshot.model_dump_json().encode()).hexdigest()
         statement = insert(LiquidityCheckpointRecord).values(
             symbol=canonical_symbol(snapshot.symbol),

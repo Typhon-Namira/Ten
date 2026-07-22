@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
+from backend.app.storage.batching import bounded_insert_chunks
 from backend.app.storage.models import MarketRegimeCheckpointRecord, MarketRegimeEvidenceRecord, MarketRegimeSnapshotRecord, MarketRegimeTransitionRecord
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
@@ -209,7 +210,8 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository, ScopedSessionRepo
         ]
         if rows:
             try:
-                await self.session.execute(insert(MarketRegimeEvidenceRecord).values(rows).on_conflict_do_nothing(index_elements=["id"]))
+                for chunk in bounded_insert_chunks(rows):
+                    await self.session.execute(insert(MarketRegimeEvidenceRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
                 await self.session.commit()
             except Exception:
                 await self.session.rollback()
