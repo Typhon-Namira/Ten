@@ -53,7 +53,7 @@ AI score responses are analytical, non-executing context. Confidence measures ev
 
 `GET /signal-decisions/health`, `/config`, and `/metrics` expose safe operational state. `POST /signal-decisions/evaluate` requires a trusted `ai_score_snapshot_id`; arbitrary raw score injection is not accepted. `POST /signal-decisions/replay` additionally requires a timezone-aware `as_of` and suppresses live events/features by default.
 
-`GET /signal-decisions/latest` returns only a currently active, non-expired decision. `/history`, `/{decision_id}`, `/{decision_id}/rules`, and `/{decision_id}/explanation` expose bounded immutable history and structured reasoning. Valid blocked and insufficient decisions return HTTP 200 because they are successful policy evaluations. Missing trusted snapshots return 404; validation and policy errors return 422.
+`GET /signal-decisions/latest` returns the newest persisted analytical decision for the requested instrument/timeframe, including blocked, insufficient, invalid, or expired outcomes. It is intentionally distinct from `GET /integration/signals/latest`, which returns only a published eligible scenario and may validly return 404. `/history`, `/{decision_id}`, `/{decision_id}/rules`, and `/{decision_id}/explanation` expose bounded immutable history and structured reasoning. Valid blocked and insufficient decisions return HTTP 200 because they are successful policy evaluations. Missing trusted snapshots return 404; validation and policy errors return 422.
 
 Responses contain analytical direction, state, eligibility metadata, validity, blockers, warnings, policy versions, and an explicit safety notice. They contain no execution, order, position-size, entry, stop-loss, or take-profit fields.
 

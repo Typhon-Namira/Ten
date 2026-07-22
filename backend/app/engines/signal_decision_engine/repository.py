@@ -30,6 +30,9 @@ class SignalDecisionRepository(ABC):
     async def get_active_decision(self, instrument: str, timeframe: str, at: datetime, direction: DecisionDirection | None = None, state: DecisionState | None = None) -> SignalDecision | None: ...
 
     @abstractmethod
+    async def get_latest_decision(self, instrument: str, timeframe: str, direction: DecisionDirection | None = None, state: DecisionState | None = None) -> SignalDecision | None: ...
+
+    @abstractmethod
     async def list_decisions(
         self,
         instrument: str,
@@ -80,6 +83,10 @@ class InMemorySignalDecisionRepository(SignalDecisionRepository):
     async def get_active_decision(self, instrument: str, timeframe: str, at: datetime, direction: DecisionDirection | None = None, state: DecisionState | None = None) -> SignalDecision | None:
         values = await self.list_decisions(instrument, timeframe, end=at, direction=direction, state=state, limit=100)
         return next((item for item in values if item.valid_from <= at < item.valid_until), None)
+
+    async def get_latest_decision(self, instrument: str, timeframe: str, direction: DecisionDirection | None = None, state: DecisionState | None = None) -> SignalDecision | None:
+        values = await self.list_decisions(instrument, timeframe, direction=direction, state=state, limit=1)
+        return values[0] if values else None
 
     async def list_decisions(
         self,
@@ -219,6 +226,16 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
         if state:
             query = query.where(SignalDecisionRecord.state == state.value)
         record = (await self.session.scalars(query.order_by(SignalDecisionRecord.as_of.desc()).limit(1))).first()
+        return SignalDecision.model_validate(record.payload) if record else None
+
+    @scoped_session
+    async def get_latest_decision(self, instrument: str, timeframe: str, direction: DecisionDirection | None = None, state: DecisionState | None = None) -> SignalDecision | None:
+        query = select(SignalDecisionRecord).where(SignalDecisionRecord.instrument == instrument, SignalDecisionRecord.timeframe == timeframe)
+        if direction:
+            query = query.where(SignalDecisionRecord.direction == direction.value)
+        if state:
+            query = query.where(SignalDecisionRecord.state == state.value)
+        record = (await self.session.scalars(query.order_by(SignalDecisionRecord.as_of.desc(), SignalDecisionRecord.id.desc()).limit(1))).first()
         return SignalDecision.model_validate(record.payload) if record else None
 
     @scoped_session

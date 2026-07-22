@@ -53,6 +53,11 @@ class FakeEligibleDecision(FakeDecision):
         return SimpleNamespace(decision_id=uuid4(), input_fingerprint="c" * 64, direction=SimpleNamespace(value="bullish"), state=SimpleNamespace(value="eligible"), confidence_score=82.0, as_of=NOW, valid_until=NOW + timedelta(minutes=15), blockers=(), warnings=(), decision_policy_version="1.0.0")
 
 
+class FailingDecision(FakeDecision):
+    async def evaluate(self, request: object) -> object:
+        raise RuntimeError("decision persistence failed")
+
+
 NOW = datetime(2026, 7, 19, 12, 30, tzinfo=UTC)
 
 
@@ -282,6 +287,45 @@ async def test_market_data_failure_finalizes_the_stage_tracker_cycle_instead_of_
     assert stages["candle_received"] == "success"
     assert stages["smc_analysis"] == "failed"
     assert stages["liquidity_analysis"] == "skipped"
+    trace = await repository.trace(envelope.trace_id)
+    assert len(trace) == 1
+    assert trace[0].status.value == "failed"
+
+
+@pytest.mark.asyncio
+async def test_failed_outbox_item_degrades_health_and_remains_retryable() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    coordinator.market_data = FailingHistoryMarketData(candle())
+    await coordinator.start()
+    await bus.publish(NewCandle(correlation_id=uuid4(), source="market_data", payload=candle().model_dump(mode="json")))
+
+    assert await coordinator.process_outbox_once() == 1
+    assert coordinator.last_batch_failures == 1
+    assert coordinator.health()["status"] == "degraded"
+    assert coordinator.health()["ready"] is False
+    assert repository.metrics()["outbox_backlog"] == 1
+    await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_ai_score_success_followed_by_decision_failure_is_terminal_and_traceable() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    tracker = PipelineStageTracker()
+    coordinator = service(bus, repository)
+    coordinator.stage_tracker = tracker
+    coordinator.signal_decision = FailingDecision()
+    envelope = CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW)
+
+    with pytest.raises(RuntimeError, match="decision persistence failed"):
+        await coordinator.process(envelope)
+
+    cycle = tracker.latest("XAUUSD", "M15")
+    assert cycle is not None and cycle["complete"] is True
+    stages = {item["key"]: item["status"] for item in cycle["stages"]}
+    assert stages["ai_scoring"] == "success"
+    assert stages["scenario_decision"] == "failed"
+    assert (await repository.trace(envelope.trace_id))[0].status.value == "failed"
 
 
 @pytest.mark.asyncio

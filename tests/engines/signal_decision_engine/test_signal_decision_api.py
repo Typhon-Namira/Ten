@@ -5,6 +5,7 @@ import pytest
 from fastapi import FastAPI
 
 from backend.app.api.routes.signal_decisions import router
+from backend.app.engines.ai_scoring_engine import FixedClock
 from backend.app.engines.signal_decision_engine import DecisionRequest
 from tests.engines.signal_decision_engine.test_signal_decision_engine import NOW
 from tests.engines.signal_decision_engine.test_signal_decision_service import build_service
@@ -23,6 +24,10 @@ async def test_api_contract_health_history_replay_and_safety() -> None:
         latest = await client.get("/signal-decisions/latest")
         assert latest.status_code == 200
         assert latest.json()["state"] == "eligible"
+        service.clock = FixedClock(stored.valid_until + timedelta(seconds=1))
+        expired_latest = await client.get("/signal-decisions/latest")
+        assert expired_latest.status_code == 200
+        assert expired_latest.json()["decision_id"] == str(stored.decision_id)
         assert "order_side" not in latest.text
         assert "position_size" not in latest.text
         assert (await client.get("/signal-decisions/history")).status_code == 200

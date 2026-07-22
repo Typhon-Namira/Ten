@@ -85,10 +85,11 @@ async def test_sql_reads_active_filters_history_and_pruning() -> None:
     assert await repository.get_decision(value.decision_id) == value
     assert await repository.get_decision(value.decision_id) is None
 
-    db.scalars.side_effect = [Scalars([record]), Scalars([]), Scalars([record]), Scalars([record]), Scalars([record]), Scalars([]), Scalars([value.decision_id])]
+    db.scalars.side_effect = [Scalars([record]), Scalars([]), Scalars([record]), Scalars([record]), Scalars([record]), Scalars([record]), Scalars([]), Scalars([value.decision_id])]
     assert await repository.find_by_fingerprint(value.input_fingerprint, DecisionMode.LIVE) == value
     assert await repository.find_by_fingerprint("missing", DecisionMode.LIVE) is None
     assert await repository.get_active_decision("XAUUSD", "M15", NOW, value.direction, DecisionState.ELIGIBLE) == value
+    assert await repository.get_latest_decision("XAUUSD", "M15", value.direction, DecisionState.ELIGIBLE) == value
     listed = await repository.list_decisions(
         "XAUUSD",
         "M15",

@@ -74,10 +74,13 @@ async def latest(
     direction: DecisionDirection | None = None,
     state: DecisionState | None = None,
 ) -> SignalDecision:
-    value = await service.repository.get_active_decision(instrument.upper(), timeframe, service.clock.now(), direction, state)
+    value = await service.repository.get_latest_decision(instrument.upper(), timeframe, direction, state)
     if value is None:
-        raise HTTPException(404, "active Signal Decision not found")
-    return value
+        raise HTTPException(404, "Signal Decision not found")
+    # A latest analytical decision remains observable after its publication/validity window.
+    # Lifecycle projection (for example ACTIVE -> EXPIRED) belongs to the service; repository
+    # selection must not silently turn "latest" into "latest currently active".
+    return await service.get_decision(value.decision_id) or value
 
 
 @router.get("/history", response_model=list[SignalDecision])

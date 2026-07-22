@@ -104,6 +104,7 @@ async def test_service_persists_publishes_and_suppresses_duplicate() -> None:
     assert snapshot.features["signal_decision"]["trade_execution"] is False
     assert await repository.get_decision(first.decision_id) == first
     assert await repository.get_active_decision("XAUUSD", "M15", NOW) == first
+    assert await repository.get_latest_decision("XAUUSD", "M15") == first
     assert await service.get_decision(uuid4()) is None
     service.clock = FixedClock(first.valid_until)
     expired = await service.get_decision(first.decision_id)
@@ -140,6 +141,7 @@ async def test_missing_snapshot_policy_selection_context_failure_and_cleanup() -
     blocked = await service.evaluate(DecisionRequest(ai_score_snapshot_id=score.snapshot_id))
     assert blocked.state == DecisionState.BLOCKED
     assert await repository.get_active_decision("XAUUSD", "M15", blocked.valid_until) is None
+    assert await repository.get_latest_decision("XAUUSD", "M15") == blocked
     assert await service.cleanup() == 0
     assert service.metrics.expiration_runs_total == 1
 
