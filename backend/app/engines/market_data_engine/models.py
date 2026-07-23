@@ -91,7 +91,7 @@ class RealtimeStatus(StrEnum):
 
 
 def canonical_symbol(value: str) -> str:
-    normalized = value.upper().replace("/", "").replace("-", "").replace("_", "")
+    normalized = value.strip().upper().replace("/", "").replace("-", "").replace("_", "")
     if not normalized or not normalized.isalnum():
         raise ValueError("symbol must contain letters or numbers")
     return normalized

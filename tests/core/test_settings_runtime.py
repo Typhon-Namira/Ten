@@ -1,6 +1,8 @@
 import pytest
 
 from backend.app.core.config.settings import Settings
+from backend.app.core.feature_flags import FeatureFlag
+from backend.app.services import build_engine_registry
 
 
 def test_market_data_provider_defaults_to_the_keyless_public_source() -> None:
@@ -70,3 +72,22 @@ def test_railway_postgresql_url_uses_asyncpg(monkeypatch) -> None:
     assert settings.database_url == (
         "postgresql+asyncpg://postgres:secret@postgres.railway.internal:5432/railway"
     )
+
+
+def test_ai_feature_flag_environment_overrides_are_explicit_and_independent() -> None:
+    settings = Settings(
+        _env_file=None,
+        ai_centric_shadow_mode=True,
+        ai_signal_proposals=True,
+        ai_signal_monitoring=True,
+        ai_signal_publication=False,
+        ai_signal_adjustments=False,
+        market_data_worker_enabled=False,
+    )
+    flags = build_engine_registry(settings=settings).context.feature_flags
+
+    assert flags.is_enabled(FeatureFlag.AI_CENTRIC_SHADOW_MODE) is True
+    assert flags.is_enabled(FeatureFlag.AI_SIGNAL_PROPOSALS) is True
+    assert flags.is_enabled(FeatureFlag.AI_SIGNAL_MONITORING) is True
+    assert flags.is_enabled(FeatureFlag.AI_SIGNAL_PUBLICATION) is False
+    assert flags.is_enabled(FeatureFlag.AI_SIGNAL_ADJUSTMENTS) is False

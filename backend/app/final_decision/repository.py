@@ -40,11 +40,13 @@ class FinalDecisionRepository(Protocol):
     async def save_publication(self, value: PublishedAnalyticalSignal) -> PublishedAnalyticalSignal: ...
     async def publication_for_signal(self, signal_id: object) -> PublishedAnalyticalSignal | None: ...
     async def latest_action(self, signal_id: object | None = None) -> FinalSystemAction | None: ...
+    async def action_for_state(self, market_state_id: object) -> FinalSystemAction | None: ...
     async def action_history(self, signal_id: object) -> tuple[FinalSystemAction, ...]: ...
     async def save_usage(self, value: LLMUsageMetric) -> LLMUsageMetric: ...
     async def usage_for_date(self, usage_date: str) -> tuple[LLMUsageMetric, ...]: ...
     async def save_outcome(self, value: DetailedSignalOutcome) -> DetailedSignalOutcome: ...
     async def outcomes(self) -> tuple[DetailedSignalOutcome, ...]: ...
+    async def outcome_for_signal(self, signal_id: object) -> DetailedSignalOutcome | None: ...
     async def save_performance_report(self, value: PerformanceReport) -> PerformanceReport: ...
     async def latest_performance_report(self) -> PerformanceReport | None: ...
     async def save_readiness_report(self, value: ProductionReadinessReport) -> ProductionReadinessReport: ...
@@ -98,6 +100,10 @@ class InMemoryFinalDecisionRepository:
             values = [item for item in values if item.managed_signal_id == signal_id]
         return max(values, key=lambda item: item.created_at, default=None)
 
+    async def action_for_state(self, market_state_id: object) -> FinalSystemAction | None:
+        values = [item for item in self.actions.values() if item.market_state_id == market_state_id]
+        return max(values, key=lambda item: (item.created_at, str(item.final_action_id)), default=None)
+
     async def action_history(self, signal_id: object) -> tuple[FinalSystemAction, ...]:
         values = [item for item in self.actions.values() if item.managed_signal_id == signal_id]
         return tuple(sorted(values, key=lambda item: item.created_at))
@@ -117,6 +123,9 @@ class InMemoryFinalDecisionRepository:
 
     async def outcomes(self) -> tuple[DetailedSignalOutcome, ...]:
         return tuple(self.signal_outcomes.values())
+
+    async def outcome_for_signal(self, signal_id: object) -> DetailedSignalOutcome | None:
+        return self.signal_outcomes.get(signal_id)
 
     async def save_performance_report(self, value: PerformanceReport) -> PerformanceReport:
         self.performance_reports[value.report_id] = value
@@ -235,6 +244,17 @@ class SqlAlchemyFinalDecisionRepository(ScopedSessionRepository):
         return FinalSystemAction.model_validate(record.payload) if record else None
 
     @scoped_session
+    async def action_for_state(self, market_state_id: object) -> FinalSystemAction | None:
+        query = (
+            select(FinalSystemActionRecord)
+            .where(FinalSystemActionRecord.market_state_id == market_state_id)
+            .order_by(FinalSystemActionRecord.created_at.desc(), FinalSystemActionRecord.final_action_id.desc())
+            .limit(1)
+        )
+        record = (await self.session.scalars(query)).first()
+        return FinalSystemAction.model_validate(record.payload) if record else None
+
+    @scoped_session
     async def action_history(self, signal_id: object) -> tuple[FinalSystemAction, ...]:
         records = (await self.session.scalars(select(FinalSystemActionRecord).where(FinalSystemActionRecord.managed_signal_id == signal_id).order_by(FinalSystemActionRecord.created_at))).all()
         return tuple(FinalSystemAction.model_validate(record.payload) for record in records)
@@ -277,6 +297,17 @@ class SqlAlchemyFinalDecisionRepository(ScopedSessionRepository):
     async def outcomes(self) -> tuple[DetailedSignalOutcome, ...]:
         records = (await self.session.scalars(select(DetailedSignalOutcomeRecord))).all()
         return tuple(DetailedSignalOutcome.model_validate(record.payload) for record in records)
+
+    @scoped_session
+    async def outcome_for_signal(self, signal_id: object) -> DetailedSignalOutcome | None:
+        record = (
+            await self.session.scalars(
+                select(DetailedSignalOutcomeRecord)
+                .where(DetailedSignalOutcomeRecord.signal_id == signal_id)
+                .limit(1)
+            )
+        ).first()
+        return DetailedSignalOutcome.model_validate(record.payload) if record else None
 
     async def _save_report(self, record_type: type, values: dict[str, object], key: str) -> None:
         await self.session.execute(insert(record_type).values(**values).on_conflict_do_nothing(index_elements=[key]))

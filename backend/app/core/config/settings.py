@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     log_health_unchanged: bool = False
     public_read_access: bool = True
     api_keys: dict[str, str] = Field(default_factory=dict)
+    # Optional runtime overrides for the AI-centric feature flags. ``None`` deliberately
+    # preserves the checked-in YAML default so development, tests, and existing deployments
+    # remain unchanged unless an operator explicitly enables a capability.
+    ai_centric_shadow_mode: bool | None = None
+    ai_signal_proposals: bool | None = None
+    ai_signal_monitoring: bool | None = None
+    ai_signal_publication: bool | None = None
+    ai_signal_adjustments: bool | None = None
 
     @field_validator("database_url", mode="before")
     @classmethod

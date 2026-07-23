@@ -39,6 +39,7 @@ class QuantForecastRepository(Protocol):
     async def save_features(self, value: QuantFeatureVector) -> QuantFeatureVector: ...
     async def save_result(self, value: QuantForecastResult) -> QuantForecastResult: ...
     async def latest_result(self, instrument: str) -> QuantForecastResult | None: ...
+    async def result_for_state(self, market_state_id: UUID) -> QuantForecastResult | None: ...
     async def save_outcome(self, value: ForecastOutcome) -> ForecastOutcome: ...
     async def outcomes_for_result(self, result_id: UUID) -> tuple[ForecastOutcome, ...]: ...
     async def save_calibration(self, value: CalibrationReport) -> CalibrationReport: ...
@@ -85,6 +86,11 @@ class InMemoryQuantForecastRepository:
         async with self._lock:
             values = [value for value in self.results.values() if value.instrument == instrument]
         return max(values, key=lambda value: (value.point_in_time, str(value.result_id)), default=None)
+
+    async def result_for_state(self, market_state_id: UUID) -> QuantForecastResult | None:
+        async with self._lock:
+            values = [value for value in self.results.values() if value.market_state_id == market_state_id]
+        return max(values, key=lambda value: (value.generated_at, str(value.result_id)), default=None)
 
     async def save_outcome(self, value: ForecastOutcome) -> ForecastOutcome:
         async with self._lock:
@@ -245,6 +251,20 @@ class SqlAlchemyQuantForecastRepository(ScopedSessionRepository):
             select(QuantForecastResultRecord)
             .where(QuantForecastResultRecord.instrument == instrument)
             .order_by(QuantForecastResultRecord.point_in_time.desc())
+            .limit(1)
+        )
+        record = (await self.session.scalars(query)).first()
+        return QuantForecastResult.model_validate(record.payload) if record else None
+
+    @scoped_session
+    async def result_for_state(self, market_state_id: UUID) -> QuantForecastResult | None:
+        query = (
+            select(QuantForecastResultRecord)
+            .where(QuantForecastResultRecord.market_state_id == market_state_id)
+            .order_by(
+                QuantForecastResultRecord.generated_at.desc(),
+                QuantForecastResultRecord.result_id.desc(),
+            )
             .limit(1)
         )
         record = (await self.session.scalars(query)).first()

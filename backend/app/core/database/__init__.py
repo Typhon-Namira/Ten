@@ -1,6 +1,7 @@
 from .base import Base
 from .schema import SCHEMA_HEAD_REVISION, prepare_database_schema
 from .url import normalize_async_database_url
+from typing import Any
 
 __all__ = [
     "Base",
@@ -12,7 +13,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     if name in {"build_session_factory", "get_session"}:
         from .session import build_session_factory, get_session
 

@@ -40,11 +40,11 @@ def _entry(key: str, status: str, detail: str, *, observed: Any = None, threshol
     return {"key": key, "label": CATEGORY_LABELS[key], "status": status, "detail": detail, "observed_value": observed, "threshold": threshold}
 
 
-def _rule_entries(decision: SignalDecision, category: RuleCategory) -> list:
+def _rule_entries(decision: SignalDecision, category: RuleCategory) -> list[Any]:
     return [item for item in decision.rules if item.category == category]
 
 
-def _component(score: AIScoreSnapshot | None, source_engine: str):
+def _component(score: AIScoreSnapshot | None, source_engine: str) -> Any:
     if score is None:
         return None
     return next((item for item in score.components if item.source_engine == source_engine), None)

@@ -143,7 +143,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         app.state.settings = settings
         configs = YamlConfigRepository()
         app.state.signal_repository = InMemorySignalRepository()
-        app.state.engine_registry = build_engine_registry(configs=configs)
+        app.state.engine_registry = build_engine_registry(settings=settings, configs=configs)
         app.state.pipeline_manager = PipelineManager.from_yaml(
             app.state.engine_registry,
             configs,

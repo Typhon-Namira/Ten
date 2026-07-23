@@ -1,11 +1,18 @@
-import type { ActiveSelection, AIReasoningDashboard, AIScoreSnapshot, ChartOverlays, ChatTurn, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { ActiveSelection, AIReasoningDashboard, AIScoreSnapshot, ChartOverlays, ChatTurn, DashboardAggregate, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
 
 async function request<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`)
   if (!response.ok) {
-    throw new Error(`TEN API request failed (${response.status})`)
+    let detail = response.statusText || 'request_failed'
+    try {
+      const body = await response.json() as { detail?: string; reason?: string }
+      detail = body.reason ?? body.detail ?? detail
+    } catch {
+      // The status code and correlation-aware backend logs remain authoritative.
+    }
+    throw new Error(`TEN API request failed (${response.status}): ${detail}`)
   }
   return response.json() as Promise<T>
 }
@@ -21,6 +28,23 @@ async function requestJson<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   if (!response.ok) throw new Error(`TEN API request failed (${response.status})`)
   return response.json() as Promise<T>
+}
+
+function isDashboardAggregate(value: unknown): value is DashboardAggregate {
+  if (value == null || typeof value !== 'object') return false
+  const candidate = value as Partial<DashboardAggregate>
+  const stages = candidate.stages
+  return (
+    typeof candidate.status === 'string'
+    && typeof candidate.instrument === 'string'
+    && stages != null
+    && typeof stages === 'object'
+    && stages.market_state != null
+    && stages.quant_forecast != null
+    && stages.ai_reasoning != null
+    && stages.final_action != null
+    && candidate.reasoning != null
+  )
 }
 
 /** `instrument`/`timeframe` must always come from `tenApi.selection()` (see useActiveSelection) —
@@ -66,6 +90,13 @@ export const tenApi = {
   latestQuantCalibration: () => requestOptional<QuantCalibrationReport>('/api/v1/quant-forecasts/calibration/latest'),
   quantForecastOutcomes: (resultId: string) => request<QuantForecastOutcome[]>(`/api/v1/quant-forecasts/${encodeURIComponent(resultId)}/outcomes`),
   latestAIReasoning: (instrument: string) => request<AIReasoningDashboard>(`/api/v1/ai-reasoning/latest?instrument=${encodeURIComponent(instrument)}`),
+  dashboardLatest: async (instrument: string) => {
+    const value = await request<unknown>(`/api/v1/dashboard/latest?instrument=${encodeURIComponent(instrument)}`)
+    if (!isDashboardAggregate(value)) {
+      throw new Error('TEN dashboard response schema mismatch')
+    }
+    return value
+  },
   // Explainability: every AI-authored answer here is prose over a context TEN itself assembled —
   // the AI never fetches its own data, so a chat answer can never disagree with these same panels.
   explainCurrent: (instrument: string, timeframe: string) => request<ExplainResponse>(`/api/v1/explain/current?${scoped(instrument, timeframe)}`),

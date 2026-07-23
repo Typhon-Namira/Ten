@@ -629,6 +629,8 @@ export interface AIMarketForecast {
   uncertainty: number | null
   setup_readiness: string | null
   reasoning_summary: string | null
+  failure_state: string | null
+  fallback_state: string | null
   generated_at: string
   shadow_only: true
   awaiting_guardrail_validation: true
@@ -737,6 +739,62 @@ export interface AIReasoningDashboard {
       daily_token_allowance: number
       llm_concurrency_limit: number
     }
+  }
+}
+
+export type DashboardDataStatus =
+  | 'available'
+  | 'complete'
+  | 'degraded'
+  | 'partial'
+  | 'pending'
+  | 'failed'
+  | 'not_available'
+  | 'not_evaluated'
+
+export interface DashboardStage<T = unknown> {
+  status: DashboardDataStatus
+  reason: string
+  record_id: string | null
+  timestamp: string | null
+  error_code: string | null
+  retryable: boolean
+  data: T | null
+}
+
+export interface DashboardAggregate {
+  status: 'complete' | 'partial' | 'pending' | 'failed'
+  instrument: string
+  generated_at: string
+  correlation_id: string
+  cycle: {
+    event_id: string
+    market_state_id: string
+    analysis_timestamp: string
+    knowledge_cutoff: string
+    freshness: 'fresh' | 'stale'
+  } | null
+  stages: {
+    market_state: DashboardStage
+    engine_outputs: DashboardStage<unknown[]>
+    quant_forecast: DashboardStage<QuantForecastResult>
+    ai_reasoning: DashboardStage<AIMarketForecast>
+    ai_proposal: DashboardStage<AISignalProposal>
+    guardrails: DashboardStage
+    final_action: DashboardStage<FinalSystemAction>
+    publication: DashboardStage<PublishedAnalyticalSignal>
+    monitoring: DashboardStage<ManagedSignal>
+    outcome: DashboardStage
+  }
+  calibration: DashboardStage<QuantCalibrationReport>
+  performance: DashboardStage<Record<string, unknown>>
+  readiness: DashboardStage<AIReasoningDashboard['production_readiness']>
+  reasoning: AIReasoningDashboard
+  health: {
+    quant: Record<string, unknown>
+    ai: Record<string, unknown>
+    guardrails: Record<string, unknown>
+    feature_flags: Record<string, boolean>
   }
 }
 

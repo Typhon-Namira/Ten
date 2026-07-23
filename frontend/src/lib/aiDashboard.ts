@@ -1,5 +1,6 @@
 import type {
   AIReasoningDashboard,
+  DashboardAggregate,
   FinalSystemAction,
   ManagedSignal,
   PublishedAnalyticalSignal,
@@ -71,7 +72,32 @@ export function pipelineSteps(
   data: AIReasoningDashboard | null,
   marketAvailable: boolean,
   quantStatus: string | null,
+  authoritative?: DashboardAggregate['stages'],
 ): PipelineStep[] {
+  if (authoritative) {
+    const mapping: Array<[keyof DashboardAggregate['stages'], string, string]> = [
+      ['market_state', 'market', 'Market State'],
+      ['quant_forecast', 'quant', 'Quant Forecast'],
+      ['ai_reasoning', 'reasoning', 'AI Reasoning'],
+      ['ai_proposal', 'proposal', 'AI Proposal'],
+      ['guardrails', 'guardrails', 'Guardrails'],
+      ['final_action', 'final', 'Final Action'],
+      ['publication', 'publication', 'Publication'],
+      ['monitoring', 'monitoring', 'Monitoring'],
+      ['outcome', 'outcome', 'Outcome'],
+    ]
+    return mapping.map(([key, id, label]) => {
+      const stage = authoritative[key]
+      const status: PipelineStatus = stage.status === 'available' || stage.status === 'complete'
+        ? key === 'monitoring' ? 'active' : 'completed'
+        : stage.status === 'failed'
+          ? 'failed'
+          : stage.status === 'degraded' || stage.status === 'partial'
+            ? 'unavailable'
+            : 'waiting'
+      return { id, label, status, detail: humanize(stage.reason) }
+    })
+  }
   const forecast = data?.forecast
   const proposal = data?.proposal
   const action = latestFinalAction(data)

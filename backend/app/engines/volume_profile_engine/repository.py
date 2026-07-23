@@ -74,7 +74,7 @@ class SqlAlchemyVolumeProfileRepository(VolumeProfileRepository, ScopedSessionRe
             await self.session.rollback()
             raise
 
-    async def _save(self, snapshot: VolumeProfileAnalysisSnapshot, payload: dict) -> None:
+    async def _save(self, snapshot: VolumeProfileAnalysisSnapshot, payload: dict[str, object]) -> None:
         insert_result = await self.session.execute(
             insert(VolumeProfileSnapshotRecord)
             .values(
