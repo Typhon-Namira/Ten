@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
+import logging
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -37,6 +38,8 @@ from .models import (
 )
 from .registry import HardGateRegistry
 from .repository import FinalDecisionRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,19 @@ class FinalDecisionService:
         await self.repository.save_action(base_action)
         for evaluation in evaluations:
             await self.repository.save_evaluation(evaluation)
+        logger.info(
+            "guardrails.completed",
+            extra={
+                "cycle_id": str(state.cycle_id),
+                "market_state_id": str(state.state_id),
+                "forecast_id": str(forecast.forecast_id),
+                "proposal_id": str(proposal.proposal_id),
+                "final_action_id": str(base_action.final_action_id),
+                "gate_count": len(evaluations),
+                "blocking_gate_count": len(blocking),
+                "publication_enabled": self.publication_enabled,
+            },
+        )
         publication: PublishedAnalyticalSignal | None = None
         final = base_action
         if not blocking and self.publication_enabled and proposal.recommended_action in {ProposalAction.BUY, ProposalAction.SELL}:
@@ -188,6 +204,19 @@ class FinalDecisionService:
                 final = base_action.model_copy(update={"publication_state": PublicationState.FAILED})
                 await self.repository.save_action(final)
         self.actions_evaluated += 1
+        logger.info(
+            "final_decision.completed",
+            extra={
+                "cycle_id": str(state.cycle_id),
+                "market_state_id": str(state.state_id),
+                "forecast_id": str(forecast.forecast_id),
+                "proposal_id": str(proposal.proposal_id),
+                "final_action_id": str(final.final_action_id),
+                "action": final.action.value,
+                "approval_state": final.approval_state.value,
+                "publication_state": final.publication_state.value,
+            },
+        )
         return FinalDecisionResult(action=final, publication=publication)
 
     def _evaluate_gate(
