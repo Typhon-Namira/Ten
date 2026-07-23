@@ -73,7 +73,7 @@ providers:
     enabled: false
     priority: 970
 cache:
-  memory_max_entries: 10000
+  memory_max_entries: 256
   realtime_ttl_seconds: 15
   historical_ttl_seconds: 3600
   persistent_directory: data/market_cache

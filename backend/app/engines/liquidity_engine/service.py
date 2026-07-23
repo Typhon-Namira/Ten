@@ -3,6 +3,7 @@ from time import perf_counter
 from typing import Any
 from uuid import UUID, uuid4
 
+from backend.app.core.bounded import BoundedSet
 from backend.app.engines.market_data_engine import MarketDataService, Timeframe
 from backend.app.engines.smc_engine.liquidity_contract import SMCLiquidityReader
 from backend.app.events import Event, EventBus
@@ -89,7 +90,7 @@ class LiquidityService:
         self.repository_mode = repository_mode
         self.analyzer = BaselineLiquidityAnalyzer(self.config, market_data.sessions)
         self.metrics = LiquidityMetrics()
-        self._published: set[UUID] = set()
+        self._published = BoundedSet[UUID](10_000)
         self._recovered: dict[tuple[str, Timeframe], LiquidityAnalysisSnapshot] = {}
         self.recovery_status = "not_attempted"
 

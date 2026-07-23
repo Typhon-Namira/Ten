@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from collections import OrderedDict
+from datetime import datetime, timedelta
 from hashlib import sha256
 from time import perf_counter
 from typing import Any
 from uuid import UUID, uuid4
 
+from backend.app.core.bounded import BoundedSet
 from backend.app.events import Event, EventBus
 from backend.app.features import FeatureRecord, FeatureStore
 
@@ -78,8 +80,17 @@ class EconomicCalendarMetrics:
         self.feature_publication_failures = 0
         self.event_publication_failures = 0
         self.last_sync_duration_ms = 0.0
+        self.last_sync_attempted: str | None = None
         self.last_successful_sync: str | None = None
+        self.next_scheduled_sync: str | None = None
+        self.coverage_start: str | None = None
+        self.coverage_end: str | None = None
+        self.relevant_upcoming_event: str | None = None
+        self.provider_status: str = "unknown"
+        self.parser_status: str = "unknown"
+        self.last_failure_reason: str | None = None
         self.latest_snapshot_id: str | None = None
+        self.identity_cache_evictions = 0
 
     def snapshot(self) -> dict[str, int | float | str | None]:
         return dict(vars(self))
@@ -105,8 +116,8 @@ class EconomicCalendarService:
         self.metrics = EconomicCalendarMetrics()
         self.recovery_state = "not_attempted"
         self.initialized = False
-        self._identity: dict[str, UUID] = {}
-        self._published: set[UUID] = set()
+        self._identity: OrderedDict[str, UUID] = OrderedDict()
+        self._published = BoundedSet[UUID](10_000)
         self._scheduler: asyncio.Task[None] | None = None
         self._sync_lock = asyncio.Lock()
         # The last ACTUALLY-OBSERVED provider health, refreshed on every synchronize()/snapshot()
@@ -131,7 +142,11 @@ class EconomicCalendarService:
                 raise ValueError("checkpoint versions are incompatible")
             if sha256(_checkpoint_bytes(checkpoint.state_payload)).hexdigest() != checkpoint.payload_hash:
                 raise ValueError("checkpoint payload integrity validation failed")
-            self._identity = {key: UUID(value) for key, value in checkpoint.state_payload.get("identity", {}).items()}
+            restored_identity = checkpoint.state_payload.get("identity", {})
+            self._identity = OrderedDict(
+                (key, UUID(value))
+                for key, value in list(restored_identity.items())[-self.config.processing.retention_events :]
+            )
             self.recovery_state = "recovered"
             self.metrics.recovery_count += 1
             self.initialized = True
@@ -166,13 +181,46 @@ class EconomicCalendarService:
                 await close()
 
     async def _poll(self) -> None:
+        consecutive_failures = 0
         while True:
+            now = self.clock.now()
+            self.metrics.last_sync_attempted = now.isoformat()
+            failures_before = self.metrics.synchronization_failures
             try:
-                now = self.clock.now()
-                await self.synchronize(now - timedelta(days=7), now + timedelta(days=30), boundary=now)
-            except Exception:
-                self.metrics.synchronization_failures += 1
-            await asyncio.sleep(self.config.processing.polling_interval_seconds)
+                snapshot = await self.synchronize(
+                    now - timedelta(days=7),
+                    now + timedelta(days=30),
+                    boundary=now,
+                    incremental=self.metrics.last_successful_sync is not None,
+                )
+                consecutive_failures = 0
+                delay = self._next_sync_delay(snapshot, now)
+                self.metrics.last_failure_reason = None
+            except Exception as exc:
+                if self.metrics.synchronization_failures == failures_before:
+                    self.metrics.synchronization_failures += 1
+                consecutive_failures += 1
+                exponent = min(consecutive_failures - 1, 8)
+                delay = min(
+                    self.config.processing.failure_backoff_initial_seconds * (2**exponent),
+                    self.config.processing.failure_backoff_max_seconds,
+                )
+                self.metrics.last_failure_reason = type(exc).__name__
+            self.metrics.next_scheduled_sync = (self.clock.now() + timedelta(seconds=delay)).isoformat()
+            await asyncio.sleep(delay)
+
+    def _next_sync_delay(self, snapshot: EconomicCalendarSnapshot, now: datetime) -> int:
+        lookahead = now + timedelta(minutes=self.config.processing.adaptive_lookahead_minutes)
+        relevant = [
+            item
+            for item in snapshot.events
+            if item.scheduled_at_utc is not None
+            and now <= item.scheduled_at_utc <= lookahead
+            and item.importance.value in {"high", "critical"}
+        ]
+        upcoming = min(relevant, key=lambda item: item.scheduled_at_utc or now) if relevant else None
+        self.metrics.relevant_upcoming_event = str(upcoming.event_id) if upcoming else None
+        return self.config.processing.adaptive_refresh_seconds if upcoming else self.config.processing.polling_interval_seconds
 
     async def synchronize(self, start: Any, end: Any, *, boundary: Any | None = None, incremental: bool = False) -> EconomicCalendarSnapshot:
         if start.tzinfo is None or end.tzinfo is None:
@@ -180,6 +228,9 @@ class EconomicCalendarService:
         now = boundary or self.clock.now()
         started = perf_counter()
         async with self._sync_lock:
+            self.metrics.last_sync_attempted = now.isoformat()
+            self.metrics.coverage_start = start.isoformat()
+            self.metrics.coverage_end = end.isoformat()
             await self._publish_event(
                 EconomicCalendarSyncStarted,
                 stable_id("sync-start", now.isoformat(), start.isoformat(), end.isoformat()),
@@ -261,7 +312,7 @@ class EconomicCalendarService:
                             )
                         else:
                             item = item.model_copy(update={"event_id": previous_id})
-                    self._identity[key] = item.event_id
+                    self._remember_identity(key, item.event_id)
                     normalized.append(item)
                 reconciled = reconcile(tuple(normalized), self.config.provider_priority)
                 for item in reconciled:
@@ -285,6 +336,8 @@ class EconomicCalendarService:
                     await self._publish_lifecycle(previous, item, revision)
                 events = await self.repository.list_events(start, end, now, self.config.processing.maximum_batch_size)
                 self._last_provider_statuses = tuple(statuses)
+                self.metrics.provider_status = "available" if any(status.reachable for status in statuses) else "unavailable"
+                self.metrics.parser_status = "degraded" if self.metrics.parse_failures else "healthy"
                 snapshot = build_snapshot(events, now, start, end, tuple(statuses), self.config)
                 await self.repository.save_snapshot(snapshot)
                 await self._checkpoint(now, observations)
@@ -388,6 +441,13 @@ class EconomicCalendarService:
         except Exception:
             self.metrics.checkpoint_failures += 1
             raise
+
+    def _remember_identity(self, key: str, event_id: UUID) -> None:
+        self._identity[key] = event_id
+        self._identity.move_to_end(key)
+        while len(self._identity) > self.config.processing.retention_events:
+            self._identity.popitem(last=False)
+            self.metrics.identity_cache_evictions += 1
 
     async def _publish_lifecycle(self, previous: EconomicEvent | None, current: EconomicEvent, revision: Any) -> None:
         event_type: type[Event] = EconomicEventDiscovered if previous is None else EconomicEventUpdated
@@ -540,6 +600,14 @@ class EconomicCalendarService:
             "primary_provider": primary_status.provider_name if primary_status else None,
             "primary_provider_connection_state": primary_status.connection_state.value if primary_status else "unknown",
             "last_successful_sync": self.metrics.last_successful_sync,
+            "last_sync_attempted": self.metrics.last_sync_attempted,
+            "next_scheduled_sync": self.metrics.next_scheduled_sync,
+            "coverage_start": self.metrics.coverage_start,
+            "coverage_end": self.metrics.coverage_end,
+            "relevant_upcoming_event": self.metrics.relevant_upcoming_event,
+            "provider_status": self.metrics.provider_status,
+            "parser_status": self.metrics.parser_status,
+            "last_failure_reason": self.metrics.last_failure_reason,
             "latest_snapshot_id": self.metrics.latest_snapshot_id,
             "event_statistics": {"fetched": self.metrics.events_fetched, "inserted": self.metrics.events_inserted},
             "revision_statistics": {"count": self.metrics.revision_count},

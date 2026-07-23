@@ -209,7 +209,8 @@ async def test_history_realtime_replay_and_events(tmp_path: Path) -> None:
     assert replay[-1] == candles[2]
     assert exact == candles[2]
     assert any(isinstance(event, HistoricalUpdated) for event in bus.history())
-    assert any(isinstance(event, NewCandle) for event in bus.history())
+    assert not any(isinstance(event, NewCandle) for event in bus.history())
+    assert service.poll_metrics["duplicate_responses"] == 1
 
 
 @pytest.mark.asyncio

@@ -68,12 +68,24 @@ class ApiConfig(StrictModel):
 
 
 class ProcessingConfig(StrictModel):
-    polling_interval_seconds: int = Field(default=300, ge=30, le=86400)
+    polling_interval_seconds: int = Field(default=3600, ge=300, le=86400)
+    adaptive_refresh_seconds: int = Field(default=300, ge=60, le=3600)
+    adaptive_lookahead_minutes: int = Field(default=120, ge=30, le=1440)
+    failure_backoff_initial_seconds: int = Field(default=60, ge=30, le=3600)
+    failure_backoff_max_seconds: int = Field(default=900, ge=60, le=21600)
     retention_events: int = Field(default=100000, ge=100, le=10_000_000)
     retention_observations: int = Field(default=500000, ge=100, le=50_000_000)
     retention_snapshots: int = Field(default=5000, ge=10, le=1_000_000)
     cache_size: int = Field(default=1000, ge=1, le=100000)
     maximum_batch_size: int = Field(default=10000, ge=1, le=100000)
+
+    @model_validator(mode="after")
+    def scheduler_ordering(self) -> ProcessingConfig:
+        if self.adaptive_refresh_seconds > self.polling_interval_seconds:
+            raise ValueError("adaptive calendar refresh cannot exceed the normal interval")
+        if self.failure_backoff_initial_seconds > self.failure_backoff_max_seconds:
+            raise ValueError("calendar failure backoff bounds are reversed")
+        return self
 
 
 class FreshnessConfig(StrictModel):

@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     api_prefix: str = ""
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     database_url: str = "postgresql+asyncpg://ten:ten@localhost:5432/ten"
+    db_pool_size: int = Field(default=3, ge=1, le=50)
+    db_max_overflow: int = Field(default=2, ge=0, le=50)
+    db_pool_timeout_seconds: float = Field(default=30, gt=0, le=300)
+    db_pool_recycle_seconds: int = Field(default=1800, ge=60, le=86400)
+    db_pool_pre_ping: bool = True
+    db_statement_timeout_ms: int = Field(default=30_000, ge=1000, le=300_000)
+    db_idle_transaction_timeout_ms: int = Field(default=30_000, ge=1000, le=300_000)
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "meta-llama/llama-3.3-70b-instruct"
@@ -35,7 +42,9 @@ class Settings(BaseSettings):
     market_data_timeframes: Annotated[tuple[str, ...], NoDecode] = ("M15",)
     market_data_bootstrap_enabled: bool = True
     market_data_bootstrap_candles: int = Field(default=2500, ge=50, le=5000)
-    market_data_poll_seconds: float = Field(default=60, ge=5, le=3600)
+    market_data_poll_seconds: float = Field(default=10, ge=5, le=3600)
+    market_data_idle_poll_seconds: float = Field(default=30, ge=5, le=3600)
+    market_data_provider_backoff_max_seconds: float = Field(default=300, ge=30, le=3600)
     # Must exceed the largest configured timeframe's own bar duration with real margin: a freshly
     # discovered "latest closed" candle is, by construction (no-lookahead), always somewhere
     # between 0 and just-under-one-bar-duration old (see `market_data_engine.adapters._period_has_closed`).
@@ -44,6 +53,13 @@ class Settings(BaseSettings):
     # Default here is 2x the default M15 timeframe's 900s duration.
     max_candle_staleness_seconds: int = Field(default=1800, ge=60, le=604800)
     replay_worker_enabled: bool = False
+    max_event_history_size: int = Field(default=1000, ge=100, le=100_000)
+    max_feature_store_entries: int = Field(default=10_000, ge=1000, le=1_000_000)
+    max_dashboard_event_buffer: int = Field(default=500, ge=100, le=5000)
+    max_client_queue_size: int = Field(default=500, ge=10, le=5000)
+    log_access_requests: bool = False
+    log_market_tick_events: bool = False
+    log_health_unchanged: bool = False
     public_read_access: bool = True
     api_keys: dict[str, str] = Field(default_factory=dict)
 

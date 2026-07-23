@@ -19,6 +19,8 @@ from backend.app.core.config import Settings, get_settings
 from backend.app.core.exceptions import TenError
 from backend.app.core.logging import configure_logging
 from backend.app.core.config import YamlConfigRepository
+from backend.app.events import InMemoryEventBus
+from backend.app.features import InMemoryFeatureStore
 from backend.app.engines.market_data_engine import MarketDataWorker, Timeframe, build_market_data_service
 from backend.app.engines.market_data_engine.config import MarketDataConfig
 from backend.app.engines.market_data_engine.repository import InMemoryMarketDataRepository, MarketDataRepository, SqlAlchemyMarketDataRepository
@@ -113,7 +115,12 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         configs = YamlConfigRepository()
         app.state.signal_repository = InMemorySignalRepository()
         app.state.engine_registry = build_engine_registry(configs=configs)
-        app.state.pipeline_manager = PipelineManager.from_yaml(app.state.engine_registry, configs)
+        app.state.pipeline_manager = PipelineManager.from_yaml(
+            app.state.engine_registry,
+            configs,
+            event_bus=InMemoryEventBus(history_capacity=settings.max_event_history_size),
+            feature_store=InMemoryFeatureStore(max_entries=settings.max_feature_store_entries),
+        )
         market_config = configs.load_model("market_data", MarketDataConfig).model_copy(
             update={
                 "symbols": settings.market_data_symbols,
@@ -138,7 +145,27 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")
         )
         try:
-            database_engine = create_async_engine(settings.database_url, pool_pre_ping=True, connect_args={"timeout": 3})
+            connect_args: dict[str, object] = {"timeout": 3}
+            if settings.database_url.startswith("postgresql+asyncpg://"):
+                connect_args["server_settings"] = {
+                    "statement_timeout": str(settings.db_statement_timeout_ms),
+                    "idle_in_transaction_session_timeout": str(settings.db_idle_transaction_timeout_ms),
+                }
+                database_engine = create_async_engine(
+                    settings.database_url,
+                    connect_args=connect_args,
+                    pool_pre_ping=settings.db_pool_pre_ping,
+                    pool_size=settings.db_pool_size,
+                    max_overflow=settings.db_max_overflow,
+                    pool_timeout=settings.db_pool_timeout_seconds,
+                    pool_recycle=settings.db_pool_recycle_seconds,
+                )
+            else:
+                database_engine = create_async_engine(
+                    settings.database_url,
+                    connect_args=connect_args,
+                    pool_pre_ping=settings.db_pool_pre_ping,
+                )
             async with database_engine.begin() as connection:
                 await prepare_database_schema(connection, managed_runtime=managed_runtime)
             session_factory = async_sessionmaker(database_engine, expire_on_commit=False)
@@ -274,7 +301,11 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             integration_repository = SqlAlchemyIntegrationRepository(app.state.database_session_factory)
             integration_mode = "postgresql"
         app.state.integration_repository = integration_repository
-        app.state.pipeline_activity_log = PipelineActivityLog(app.state.pipeline_manager.event_bus)
+        app.state.pipeline_activity_log = PipelineActivityLog(
+            app.state.pipeline_manager.event_bus,
+            capacity=settings.max_dashboard_event_buffer,
+            queue_capacity=settings.max_client_queue_size,
+        )
         app.state.pipeline_activity_log.start()
         app.state.pipeline_stage_tracker = PipelineStageTracker()
         app.state.integration_service = FullSystemIntegrationService(
@@ -344,6 +375,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             bootstrap_enabled=settings.market_data_bootstrap_enabled,
             bootstrap_candles=settings.market_data_bootstrap_candles,
             poll_seconds=settings.market_data_poll_seconds,
+            idle_poll_seconds=settings.market_data_idle_poll_seconds,
+            provider_backoff_max_seconds=settings.market_data_provider_backoff_max_seconds,
             historical_analysis=app.state.integration_service.process_historical_candle,
         )
         app.state.market_data_worker.start()

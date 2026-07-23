@@ -19,7 +19,7 @@ class ProviderConfig(BaseModel):
 
 
 class CacheConfig(BaseModel):
-    memory_max_entries: int = Field(default=10_000, ge=1)
+    memory_max_entries: int = Field(default=256, ge=1)
     realtime_ttl_seconds: int = Field(default=15, ge=1)
     historical_ttl_seconds: int = Field(default=3600, ge=1)
     persistent_directory: str = "data/market_cache"

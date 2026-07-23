@@ -121,15 +121,15 @@ cluster_window_minutes: 30
 country_currency: {US: USD, GB: GBP, JP: JPY, CA: CAD, AU: AUD, NZ: NZD, CH: CHF, EU: EUR}
 symbol_overrides: {XAUUSD: [USD], BTCUSD: [USD], SPX: [USD], DAX: [EUR]}
 inverted_surprise_categories: [employment]
-# Public sources are refreshed every 6-12h (see processing.polling_interval_seconds below), not
-# every few minutes — freshness thresholds are scaled accordingly. A schedule fetched within the
+# Public sources are refreshed hourly, with a five-minute adaptive interval only near high-impact
+# events. Freshness thresholds retain generous last-known-good slack. A schedule fetched within the
 # last 12 hours is fresh; a temporary fetch failure has ample slack (up to 3 days) before the
 # calendar is treated as genuinely stale, since a still-usable last-known-good schedule must
 # survive several missed refresh cycles rather than degrading immediately.
 freshness: {aging_minutes: 720, stale_minutes: 1440, critical_minutes: 4320}
 api: {default_page_size: 50, maximum_page_size: 500, maximum_query_window_days: 366, maximum_history_window_days: 3650, maximum_observation_records: 500, maximum_revision_records: 500}
-# Calendar schedule refresh: once at startup, then every 6 hours — a rolling 7-days-back /
-# 30-days-forward window (see EconomicCalendarService._poll()). This is deliberately conservative
-# ("do not run a web search every few minutes") — public sources are polite-polled, not hammered.
-processing: {polling_interval_seconds: 21600, retention_events: 100000, retention_observations: 500000, retention_snapshots: 5000, cache_size: 1000, maximum_batch_size: 10000}
+# Calendar schedule refresh: once at startup, then hourly over a rolling 7-days-back /
+# 30-days-forward window. The five-minute interval is activated only when a high/critical event
+# is within two hours; failures use bounded exponential backoff.
+processing: {polling_interval_seconds: 3600, adaptive_refresh_seconds: 300, adaptive_lookahead_minutes: 120, failure_backoff_initial_seconds: 60, failure_backoff_max_seconds: 900, retention_events: 100000, retention_observations: 500000, retention_snapshots: 5000, cache_size: 1000, maximum_batch_size: 10000}
 repository_mode: memory

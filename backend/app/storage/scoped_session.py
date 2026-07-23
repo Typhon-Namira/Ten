@@ -24,13 +24,53 @@ concurrent calls can ever observe each other's session.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
+from collections import deque
 from contextvars import ContextVar
 import functools
+from time import perf_counter
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _current_session: ContextVar[AsyncSession | None] = ContextVar("_current_session", default=None)
+
+
+class SessionRuntimeMetrics:
+    def __init__(self) -> None:
+        self.opened_total = 0
+        self.completed_total = 0
+        self.failed_total = 0
+        self.active = 0
+        self.peak_active = 0
+        self.durations_ms: deque[float] = deque(maxlen=500)
+
+    def started(self) -> float:
+        self.opened_total += 1
+        self.active += 1
+        self.peak_active = max(self.peak_active, self.active)
+        return perf_counter()
+
+    def finished(self, started: float, *, failed: bool) -> None:
+        self.active = max(0, self.active - 1)
+        self.failed_total += int(failed)
+        self.completed_total += int(not failed)
+        self.durations_ms.append((perf_counter() - started) * 1000)
+
+    def snapshot(self) -> dict[str, int | float]:
+        ordered = sorted(self.durations_ms)
+        p95 = ordered[max(0, round(0.95 * len(ordered)) - 1)] if ordered else 0.0
+        return {
+            "opened_total": self.opened_total,
+            "completed_total": self.completed_total,
+            "failed_total": self.failed_total,
+            "active": self.active,
+            "peak_active": self.peak_active,
+            "average_duration_ms": sum(self.durations_ms) / len(self.durations_ms) if self.durations_ms else 0.0,
+            "p95_duration_ms": p95,
+        }
+
+
+session_runtime_metrics = SessionRuntimeMetrics()
 
 
 class ScopedSessionRepository:
@@ -57,12 +97,20 @@ def scoped_session[F: Callable[..., Awaitable[Any]]](method: F) -> F:
 
     @functools.wraps(method)
     async def wrapper(self: ScopedSessionRepository, *args: object, **kwargs: object) -> object:
-        async with self._session_factory() as session:
-            token = _current_session.set(session)
-            try:
-                return await method(self, *args, **kwargs)
-            finally:
-                _current_session.reset(token)
+        started = session_runtime_metrics.started()
+        failed = False
+        try:
+            async with self._session_factory() as session:
+                token = _current_session.set(session)
+                try:
+                    return await method(self, *args, **kwargs)
+                finally:
+                    _current_session.reset(token)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            session_runtime_metrics.finished(started, failed=failed)
 
     return wrapper  # type: ignore[return-value]
 
@@ -73,12 +121,20 @@ def scoped_session_stream[G: Callable[..., AsyncIterator[Any]]](method: G) -> G:
 
     @functools.wraps(method)
     async def wrapper(self: ScopedSessionRepository, *args: object, **kwargs: object) -> AsyncIterator[object]:
-        async with self._session_factory() as session:
-            token = _current_session.set(session)
-            try:
-                async for item in method(self, *args, **kwargs):
-                    yield item
-            finally:
-                _current_session.reset(token)
+        started = session_runtime_metrics.started()
+        failed = False
+        try:
+            async with self._session_factory() as session:
+                token = _current_session.set(session)
+                try:
+                    async for item in method(self, *args, **kwargs):
+                        yield item
+                finally:
+                    _current_session.reset(token)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            session_runtime_metrics.finished(started, failed=failed)
 
     return wrapper  # type: ignore[return-value]

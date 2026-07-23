@@ -264,6 +264,14 @@ async def performance(request: Request, instrument: str | None = None, timeframe
     # disagree (e.g. provider rate-limited but the database still serves the last good candle) —
     # reported separately rather than collapsed into one "market data" status.
     database_candle, _ = await safe_call(lambda: market.repository.candle_at(symbol, tf, now))
+    database_engine = getattr(app.state, "smc_database_engine", None)
+    pool = getattr(database_engine, "pool", None)
+    from backend.app.storage.scoped_session import session_runtime_metrics
+
+    def pool_value(name: str) -> int | None:
+        value = getattr(pool, name, None)
+        return int(value()) if callable(value) else None
+
     return {
         "instrument": symbol,
         "timeframe": timeframe,
@@ -297,11 +305,17 @@ async def performance(request: Request, instrument: str | None = None, timeframe
             "processed": integration_metrics.get("processed"),
             "last_database_update": database_candle.ingestion_timestamp if database_candle else None,
             "latest_market_candle": database_candle.timestamp if database_candle else None,
+            "pool_size": pool_value("size"),
+            "checked_in": pool_value("checkedin"),
+            "checked_out": pool_value("checkedout"),
+            "overflow": pool_value("overflow"),
+            "sessions": session_runtime_metrics.snapshot(),
         },
         "cache": {
             "last_cache_update": market.cache.statistics.last_write_at,
             "hit_ratio": market.cache.statistics.hit_ratio,
             "writes": market.cache.statistics.writes,
+            **market.cache.metrics(),
         },
         "analysis": {"ai_scoring": app.state.ai_scoring_service.metrics.snapshot(), "signal_decision": app.state.signal_decision_service.metrics.snapshot()},
         "queue_length": integration_metrics.get("outbox_backlog"),
@@ -310,4 +324,7 @@ async def performance(request: Request, instrument: str | None = None, timeframe
             "integration_worker": app.state.integration_worker.status(settings.integration_worker_enabled),
         },
         "event_bus": app.state.pipeline_manager.event_bus.metrics(),
+        "feature_store": app.state.pipeline_manager.feature_store.metrics(),
+        "dashboard_events": app.state.pipeline_activity_log.metrics(),
+        "market_polling": dict(market.poll_metrics),
     }
