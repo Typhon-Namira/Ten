@@ -203,6 +203,21 @@ class HttpOpenRouterClient(OpenRouterClient):
             )
             _log_failure(details)
             raise OpenRouterRequestError(details) from exc
+        logger.info(
+            "openrouter.request.http_completed",
+            extra={
+                "request_id": request_id,
+                "cycle_id": cycle_id,
+                "model": model,
+                "endpoint": endpoint,
+                "http_status": response.status_code,
+                "response_content_type": _safe_text(response.headers.get("content-type"), limit=128),
+                "response_body_length": len(response.content),
+                "retry_after": _safe_text(response.headers.get("retry-after"), limit=128),
+                "elapsed_ms": (perf_counter() - started) * 1000,
+                "failure_phase": None,
+            },
+        )
         try:
             content = response.json()["choices"][0]["message"]["content"]
             parsed = json.loads(content)

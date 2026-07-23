@@ -158,14 +158,14 @@ async def test_blocked_market_event_persists_decision_without_false_signal() -> 
 async def test_new_candle_event_reaches_smc_through_the_exact_production_wiring_shape() -> None:
     """Regression test for the "market data healthy but SMC-onward chain silent" investigation.
 
-    `main.py` hardcodes `embedded_api_worker=False` in production ? a published `NewCandle` only
+    `main.py` hardcodes `embedded_api_worker=False` in production — a published `NewCandle` only
     gets enqueued by `_on_candle`; nothing processes it until something else calls
     `process_outbox_once()` (in production, `IntegrationWorker`'s poll loop). Every other test in
     this file uses `embedded_api_worker=True`, which processes inline and would not have caught a
     bug specific to the enqueue-then-drain-later path production actually uses. This test
     reproduces that exact shape: publish on the real event bus, assert nothing has run yet, then
     drain the outbox exactly as `IntegrationWorker.run()` does, and assert SMC (via the snapshot
-    it feeds into) actually ran and produced a result ? not silence.
+    it feeds into) actually ran and produced a result — not silence.
     """
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     config = IntegrationConfig(worker={"enabled": True, "embedded_api_worker": False})
@@ -178,7 +178,7 @@ async def test_new_candle_event_reaches_smc_through_the_exact_production_wiring_
     await coordinator.start()
     event = NewCandle(correlation_id=uuid4(), source="market_data", payload=candle().model_dump(mode="json"))
     await bus.publish(event)
-    # Enqueued, but nothing has processed it yet ? exactly the production shape.
+    # Enqueued, but nothing has processed it yet — exactly the production shape.
     assert repository.metrics()["snapshots"] == 0
     assert repository.metrics()["outbox_backlog"] == 1
     processed = await coordinator.process_outbox_once()
@@ -204,21 +204,21 @@ def test_envelope_semantic_identity_and_mode_isolation() -> None:
 def test_event_id_is_stable_across_repeated_polls_of_the_same_candle() -> None:
     """Regression test for the "market data healthy, SMC-onward chain runs constantly but nothing
     ever progresses" investigation: `event_id` used to be derived from `payload_hash` (a hash of
-    the WHOLE payload, including `ingestion_time` ? stamped fresh via `datetime.now(UTC)` on every
+    the WHOLE payload, including `ingestion_time` — stamped fresh via `datetime.now(UTC)` on every
     single fetch). Two polls of the exact same already-closed candle, seconds apart, therefore
     produced two different `event_id`s, so `repository.processed(event_id)` could never recognize
-    the second poll as a duplicate ? `process()` re-ran the entire SMC-onward chain from scratch
+    the second poll as a duplicate — `process()` re-ran the entire SMC-onward chain from scratch
     on every single poll of an already-processed candle, forever, each time re-triggering a fresh
     `MarketDataService.history()` call (and its full anomaly-validation pass) too. `event_id` must
     depend only on the candle's own identity (provider, instrument, timeframe, open time,
-    revision) ? not on when any particular fetch happened to observe it."""
+    revision) — not on when any particular fetch happened to observe it."""
     value = candle()
     polled_a_moment_apart = value.model_copy(update={"ingestion_timestamp": value.ingestion_timestamp + timedelta(seconds=4)})
     first = CanonicalEventEnvelope.final_candle(value, uuid4(), NOW)
     second = CanonicalEventEnvelope.final_candle(polled_a_moment_apart, uuid4(), NOW + timedelta(seconds=4))
     assert first.event_id == second.event_id
     assert first.idempotency_key == second.idempotency_key
-    # `payload_hash` itself must still faithfully reflect each envelope's own payload ? only its
+    # `payload_hash` itself must still faithfully reflect each envelope's own payload — only its
     # role as an INPUT to `event_id` was the bug, not the field's own correctness.
     assert first.payload_hash == canonical_hash(first.payload)
     assert second.payload_hash == canonical_hash(second.payload)
@@ -236,7 +236,7 @@ def test_event_id_is_stable_across_repeated_polls_of_the_same_candle() -> None:
 @pytest.mark.asyncio
 async def test_repeated_polls_of_the_same_candle_never_create_duplicate_snapshots() -> None:
     """End-to-end companion to the `event_id` stability test above, through the real event-bus ->
-    enqueue -> outbox-drain path (not the direct `CanonicalEventEnvelope` construction) ? two
+    enqueue -> outbox-drain path (not the direct `CanonicalEventEnvelope` construction) — two
     `NewCandle` publications for the exact same underlying candle, seconds apart, must result in
     exactly one processed event and one snapshot, not two."""
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
@@ -259,7 +259,7 @@ async def test_repeated_polls_of_the_same_candle_never_create_duplicate_snapshot
     await coordinator.process_outbox_once()
     await bus.publish(second_poll)
     processed_second = await coordinator.process_outbox_once()
-    assert processed_second == 0  # nothing new to do ? the second poll was correctly recognized as a duplicate
+    assert processed_second == 0  # nothing new to do — the second poll was correctly recognized as a duplicate
     assert repository.metrics()["events"] == 1
     assert repository.metrics()["snapshots"] == 1
     await coordinator.stop()
@@ -424,7 +424,7 @@ async def test_market_data_failure_finalizes_the_stage_tracker_cycle_instead_of_
     invokes `tracker.fail_in_flight()`, so a provider failure (e.g. a rate-limit circuit-breaker
     trip) left the cycle permanently stuck at candle_received=success/smc_analysis=waiting
     forever (rendered "running" indefinitely, per `_render()`) instead of reaching a terminal
-    failed state ? exactly the dashboard symptom of a stage frozen on "running" while later,
+    failed state — exactly the dashboard symptom of a stage frozen on "running" while later,
     unrelated candles kept completing and publishing their own events."""
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     tracker = PipelineStageTracker()
@@ -546,7 +546,7 @@ async def test_ai_reasoning_failure_is_isolated_from_scoring_and_publication() -
 
 @pytest.mark.asyncio
 async def test_degraded_volume_evidence_continues_through_unified_state_quant_and_ai(
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     coordinator = service(bus, repository)
@@ -558,19 +558,19 @@ async def test_degraded_volume_evidence_continues_through_unified_state_quant_an
     coordinator.ai_centric_shadow_mode = True
 
     target_logger = logging.getLogger("backend.app.integration.service")
-    target_logger.addHandler(caplog.handler)
-    previous_level = target_logger.level
-    target_logger.setLevel(logging.INFO)
-    try:
-        await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
-    finally:
-        target_logger.removeHandler(caplog.handler)
-        target_logger.setLevel(previous_level)
+    events: list[str] = []
+    original_info = target_logger.info
+
+    def capture_info(message: object, *args: object, **kwargs: object) -> None:
+        events.append(str(message))
+        original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(target_logger, "info", capture_info)
+    await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
 
     assert stages == ["unified_market_state", "quant_forecast", "ai_reasoning", "final_decision"]
     assert repository.metrics()["snapshots"] == 1
     assert coordinator.failures == 0
-    events = [record.message for record in caplog.records if record.name == target_logger.name]
     assert "ai_reasoning.gate.entered" in events
     assert "ai_reasoning.job.enqueued" in events
 

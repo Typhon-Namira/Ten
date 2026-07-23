@@ -111,3 +111,39 @@ async def test_http_200_parse_failure_is_typed_as_response_decoding() -> None:
     assert captured.value.details.reason_code == "openrouter_response_decoding_failed"
     assert captured.value.details.phase == "response_decoding"
     assert captured.value.details.http_status == 200
+
+
+@pytest.mark.asyncio
+async def test_http_200_result_is_logged_without_payload(caplog: pytest.LogCaptureFixture) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"choices": [{"message": {"content": '{"result": "private-value"}'}}]},
+            request=request,
+        )
+
+    client = HttpOpenRouterClient(
+        "secret-key",
+        "https://openrouter.ai/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    with caplog.at_level(logging.INFO, logger="backend.app.ai.openrouter_client.client"):
+        result = await client.complete_json(
+            system_prompt="secret-system-prompt",
+            payload={"private": "payload"},
+            model="model",
+            temperature=0,
+            max_tokens=10,
+            request_id="request",
+            cycle_id="cycle",
+        )
+
+    assert result == {"result": "private-value"}
+    completed = next(record for record in caplog.records if record.message == "openrouter.request.http_completed")
+    assert completed.http_status == 200
+    assert completed.response_content_type == "application/json"
+    assert completed.response_body_length > 0
+    assert "secret-key" not in caplog.text
+    assert "secret-system-prompt" not in caplog.text
+    assert "private-value" not in caplog.text
