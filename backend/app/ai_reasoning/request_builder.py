@@ -14,7 +14,48 @@ from .config import AIReasoningConfig
 from .models import AIReasoningRequest, AIMarketForecast, AISignalProposal, ManagedSignal, MarketMemorySummary
 
 
-def _evidence(item: EvidenceItem) -> dict[str, Any]:
+_MAX_AI_COLLECTION_ITEMS = 2
+_MAX_AI_STRING_CHARACTERS = 2_000
+
+
+def _bounded_value(value: Any) -> Any:
+    """Keep analytical summaries while bounding provider request size.
+
+    Unified Market State remains the complete authoritative record. Engines can legitimately
+    persist thousands of historical zones/levels in one snapshot; serializing those collections
+    repeatedly into the LLM request produced payloads larger than the provider context. Long
+    collections are represented by deterministic edge samples and their exact count. The
+    enclosing evidence ID already commits to the complete unabridged value. Every scalar and
+    every top-level engine field remains present.
+    """
+
+    if isinstance(value, dict):
+        return {str(key): _bounded_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        if len(value) <= _MAX_AI_COLLECTION_ITEMS:
+            return [_bounded_value(item) for item in value]
+        edge = _MAX_AI_COLLECTION_ITEMS // 2
+        return {
+            "collection_summary": {
+                "total_count": len(value),
+                "sampling": "first_and_latest",
+            },
+            "items": [
+                *(_bounded_value(item) for item in value[:edge]),
+                *(_bounded_value(item) for item in value[-edge:]),
+            ],
+        }
+    if isinstance(value, str) and len(value) > _MAX_AI_STRING_CHARACTERS:
+        return {
+            "text_summary": {
+                "character_count": len(value),
+            },
+            "text": value[:_MAX_AI_STRING_CHARACTERS],
+        }
+    return value
+
+
+def _evidence(item: EvidenceItem, *, bounded_raw: Any | None = None) -> dict[str, Any]:
     return {
         "evidence_id": str(item.evidence_id),
         "engine": item.source_engine,
@@ -23,7 +64,22 @@ def _evidence(item: EvidenceItem) -> dict[str, Any]:
         "confidence": item.confidence,
         "quality": item.quality,
         "uncertainty": item.uncertainty,
-        "raw": item.raw_value,
+        "raw": _bounded_value(item.raw_value) if bounded_raw is None else bounded_raw,
+        "reason_codes": item.reason_codes,
+        "observed_at": item.observed_at.isoformat(),
+        "available_at": item.available_at.isoformat(),
+    }
+
+
+def _evidence_reference(item: EvidenceItem) -> dict[str, Any]:
+    return {
+        "evidence_id": str(item.evidence_id),
+        "engine": item.source_engine,
+        "timeframe": item.source_timeframe,
+        "availability": item.availability.value,
+        "confidence": item.confidence,
+        "quality": item.quality,
+        "uncertainty": item.uncertainty,
         "reason_codes": item.reason_codes,
         "observed_at": item.observed_at.isoformat(),
         "available_at": item.available_at.isoformat(),
@@ -64,8 +120,16 @@ class AIReasoningRequestBuilder:
             f"ten:ai-reasoning:{state.state_id}:{quant.result_id}:{prompt_version}:{self.model_identifier}",
         )
         evidence = tuple(state.evidence)
+        bounded_raw = {
+            item.evidence_id: _bounded_value(item.raw_value)
+            for item in evidence
+        }
         grouped = {
-            name: tuple(_evidence(item) for item in evidence if item.source_engine == name)
+            name: tuple(
+                _evidence(item, bounded_raw=bounded_raw[item.evidence_id])
+                for item in evidence
+                if item.source_engine == name
+            )
             for name in {
                 "market_data",
                 "smc",
@@ -76,11 +140,14 @@ class AIReasoningRequestBuilder:
                 "economic_calendar",
             }
         }
-        raw_text = {item.evidence_id: str(item.raw_value).lower() for item in evidence}
+        raw_text = {
+            item.evidence_id: str(bounded_raw[item.evidence_id]).lower()
+            for item in evidence
+        }
 
         def containing(*tokens: str) -> tuple[dict[str, Any], ...]:
             return tuple(
-                _evidence(item)
+                _evidence_reference(item)
                 for item in evidence
                 if any(token in raw_text[item.evidence_id] for token in tokens)
             )
@@ -110,10 +177,27 @@ class AIReasoningRequestBuilder:
             trigger_timeframe=state.trigger_timeframe,
             supported_timeframe_states=tuple(item.model_dump(mode="json") for item in state.timeframes),
             market_regime=grouped["market_regime"],
-            trend_evidence=grouped["market_data"] + grouped["smc"],
-            volatility_evidence=grouped["market_data"] + grouped["market_regime"],
-            momentum_evidence=grouped["institutional_flow"] + containing("momentum", "displacement"),
-            structure_evidence=grouped["smc"],
+            trend_evidence=tuple(
+                _evidence_reference(item)
+                for item in evidence
+                if item.source_engine in {"market_data", "smc"}
+            ),
+            volatility_evidence=tuple(
+                _evidence_reference(item)
+                for item in evidence
+                if item.source_engine in {"market_data", "market_regime"}
+            ),
+            momentum_evidence=tuple(
+                _evidence_reference(item)
+                for item in evidence
+                if item.source_engine == "institutional_flow"
+            )
+            + containing("momentum", "displacement"),
+            structure_evidence=tuple(
+                _evidence_reference(item)
+                for item in evidence
+                if item.source_engine == "smc"
+            ),
             smc_evidence=grouped["smc"],
             bos_choch_mss_evidence=containing("bos", "choch", "mss"),
             liquidity_pools=grouped["liquidity"],
