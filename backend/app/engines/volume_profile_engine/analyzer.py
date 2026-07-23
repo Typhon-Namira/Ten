@@ -2,7 +2,8 @@ from abc import ABC
 from collections import defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
-from math import sqrt
+import logging
+from math import isfinite, sqrt
 from statistics import fmean
 
 from backend.app.engines.common import AnalysisEngine
@@ -28,9 +29,11 @@ from .models import (
     ProfileMigrationType,
     ProfileShape,
     ProfileShapeType,
+    ProfileSkipReason,
     ProfileStatus,
     ProfileType,
     SessionType,
+    SkippedProfilePeriod,
     ValueArea,
     ValueAreaMethod,
     VolumeAllocationMethod,
@@ -45,6 +48,8 @@ from .models import (
     VolumeSourceType,
     stable_id,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class VolumeProfileAnalyzer(AnalysisEngine[list[Candle], VolumeProfileResult], ABC):
@@ -83,18 +88,43 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
         quality = self._quality(candles, context.volume_source_type)
         status = AnalysisStatus.COMPLETE
         profiles: list[VolumeProfile] = []
+        skipped_periods: list[SkippedProfilePeriod] = []
         if len(candles) < self.config.processing.minimum_candles:
             status = AnalysisStatus.INSUFFICIENT_HISTORY
+            skipped_periods.append(
+                self._skipped_period(
+                    candles,
+                    context,
+                    ProfileType.FIXED_RANGE,
+                    "analysis_window",
+                    ProfileSkipReason.INSUFFICIENT_VOLUME_PROFILE_DATA,
+                    boundary,
+                )
+            )
         elif quality.usable_volume_ratio == 0:
             status = AnalysisStatus.DEGRADED
+            skipped_periods.append(
+                self._skipped_period(
+                    candles,
+                    context,
+                    ProfileType.FIXED_RANGE,
+                    "analysis_window",
+                    ProfileSkipReason.INSUFFICIENT_VOLUME_PROFILE_DATA,
+                    boundary,
+                )
+            )
         else:
             bounded = candles[-self.config.processing.maximum_candles :]
-            profiles.append(self._profile(bounded, ProfileType.FIXED_RANGE, context, completed=True))
-            profiles.append(self._profile(bounded, ProfileType.DEVELOPING, context, completed=False))
-            profiles.extend(self._period_profiles(bounded, context, ProfileType.SESSION))
-            profiles.extend(self._period_profiles(bounded, context, ProfileType.DAILY))
-            profiles.extend(self._period_profiles(bounded, context, ProfileType.WEEKLY))
-            profiles.extend(self._period_profiles(bounded, context, ProfileType.MONTHLY))
+            fixed = self._profile(bounded, ProfileType.FIXED_RANGE, context, completed=True)
+            developing = self._profile(bounded, ProfileType.DEVELOPING, context, completed=False)
+            if fixed is not None:
+                profiles.append(fixed)
+            if developing is not None:
+                profiles.append(developing)
+            for profile_type in (ProfileType.SESSION, ProfileType.DAILY, ProfileType.WEEKLY, ProfileType.MONTHLY):
+                period_profiles, period_skips = self._period_profiles(bounded, context, profile_type)
+                profiles.extend(period_profiles)
+                skipped_periods.extend(period_skips)
             completed = [x for x in profiles if x.status == ProfileStatus.COMPLETED]
             if completed:
                 composite = self._profile(
@@ -104,12 +134,28 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
                     completed=True,
                     constituent_ids=tuple(x.id for x in completed[-self.config.processing.maximum_composite_profiles :]),
                 )
-                profiles.append(composite)
+                if composite is not None:
+                    profiles.append(composite)
             for anchor in context.anchors:
                 anchored = [x for x in bounded if x.timestamp >= anchor.availability_timestamp and anchor.availability_timestamp <= boundary]
                 if anchored:
-                    profiles.append(self._profile(anchored, ProfileType.ANCHORED, context, completed=False, anchor=anchor))
+                    profile = self._profile(anchored, ProfileType.ANCHORED, context, completed=False, anchor=anchor)
+                    if profile is not None:
+                        profiles.append(profile)
+                    else:
+                        skipped_periods.append(
+                            self._skipped_period(
+                                anchored,
+                                context,
+                                ProfileType.ANCHORED,
+                                str(anchor.id),
+                                ProfileSkipReason.INSUFFICIENT_VOLUME_PROFILE_DATA,
+                                boundary,
+                            )
+                        )
             profiles = self._tested_references(profiles, bounded)
+            if skipped_periods:
+                status = AnalysisStatus.DEGRADED
         migrations = self._migrations(profiles)
         confluences = self._confluences(profiles, context)
         transition_items = []
@@ -148,8 +194,8 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
         transitions = tuple(transition_items)
         snapshot_id = stable_id(
             "snapshot",
-            candles[0].symbol if candles else "unknown",
-            candles[0].timeframe if candles else Timeframe.M15,
+            candles[0].symbol if candles else context.instrument,
+            candles[0].timeframe if candles else context.requested_timeframe or Timeframe.M15,
             boundary,
             mode,
             context.volume_source_type,
@@ -159,8 +205,8 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
         )
         return VolumeProfileAnalysisSnapshot(
             id=snapshot_id,
-            symbol=candles[0].symbol.replace("/", "") if candles else "UNKNOWN",
-            timeframe=candles[0].timeframe if candles else Timeframe.M15,
+            symbol=candles[0].symbol.replace("/", "") if candles else context.instrument.replace("/", "").upper() or "UNKNOWN",
+            timeframe=candles[0].timeframe if candles else context.requested_timeframe or Timeframe.M15,
             analysis_timestamp=boundary,
             processing_mode=mode,
             status=status,
@@ -173,15 +219,30 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
             volume_data_quality=quality,
             confidence_summary={"overall": fmean([x.confidence_score for x in profiles]) if profiles else 0.0},
             quality_summary={"market_data": quality.score, "volume_source": self._source_score(context.volume_source_type)},
+            degraded_reasons=tuple(dict.fromkeys(item.reason for item in skipped_periods)),
+            skipped_periods=tuple(skipped_periods),
             configuration_version=self.config.version,
             engine_version=self.version,
             market_data_boundary=f"{len(candles)}:{boundary.isoformat()}",
             created_at=boundary,
         )
 
+    @staticmethod
+    def _is_usable_candle(candle: Candle) -> bool:
+        prices = (candle.open, candle.high, candle.low, candle.close)
+        return (
+            isfinite(candle.volume)
+            and candle.volume > 0
+            and all(isfinite(value) and value > 0 for value in prices)
+            and candle.low <= min(candle.open, candle.close)
+            and candle.high >= max(candle.open, candle.close)
+            and candle.low <= candle.high
+        )
+
     def _quality(self, candles: list[Candle], source: VolumeSourceType) -> VolumeDataQuality:
         missing = sum(x.volume == 0 for x in candles)
-        usable = len(candles) - missing
+        usable = sum(self._is_usable_candle(x) for x in candles)
+        invalid = len(candles) - missing - usable
         ratio = usable / len(candles) if candles else 0.0
         score = min(self._source_score(source), fmean([x.quality_score for x in candles]) if candles else 0.0) * ratio
         level = (
@@ -200,15 +261,54 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
             limitations.append("volume semantics are unknown")
         if missing:
             limitations.append("zero-volume observations were excluded")
+        if invalid:
+            limitations.append("malformed volume or OHLC observations were excluded")
         return VolumeDataQuality(
             source_type=source,
             quality_level=level,
             score=score,
             usable_volume_ratio=ratio,
             missing_observations=missing,
-            invalid_observations=0,
+            invalid_observations=invalid,
             limitations=tuple(limitations),
         )
+
+    def _skipped_period(
+        self,
+        candles: list[Candle],
+        context: VolumeProfileContext,
+        kind: ProfileType,
+        period_key: str,
+        reason: ProfileSkipReason,
+        boundary: datetime,
+    ) -> SkippedProfilePeriod:
+        usable_count = sum(self._is_usable_candle(candle) for candle in candles)
+        symbol = candles[0].symbol.replace("/", "") if candles else context.instrument.replace("/", "").upper()
+        timeframe = candles[0].timeframe if candles else context.requested_timeframe or Timeframe.M15
+        item = SkippedProfilePeriod(
+            symbol=symbol or "UNKNOWN",
+            timeframe=timeframe,
+            profile_type=kind,
+            period_key=period_key,
+            reason=reason,
+            input_count=len(candles),
+            usable_count=usable_count,
+            analysis_boundary=boundary,
+        )
+        logger.warning(
+            "volume_profile.period.skipped",
+            extra={
+                "volume_profile_symbol": item.symbol,
+                "volume_profile_timeframe": item.timeframe.value,
+                "volume_profile_boundary": item.analysis_boundary.isoformat(),
+                "volume_profile_input_count": item.input_count,
+                "volume_profile_usable_count": item.usable_count,
+                "volume_profile_skipped_period": item.period_key,
+                "volume_profile_profile_type": item.profile_type.value,
+                "volume_profile_skip_reason": item.reason.value,
+            },
+        )
+        return item
 
     @staticmethod
     def _source_score(source: VolumeSourceType) -> float:
@@ -256,6 +356,8 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
         return base, row, count, method
 
     def _allocate(self, candles: list[Candle], context: VolumeProfileContext) -> tuple[tuple[VolumeProfileBucket, ...], float, PriceGridMethod]:
+        if not candles:
+            return (), 0.0, PriceGridMethod(self.config.price_grid.method)
         base, row, count, grid_method = self._grid(candles, context)
         volumes = [0.0] * count
         buys = [0.0] * count
@@ -510,10 +612,14 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
         constituent_ids: tuple[object, ...] = (),
         anchor: object | None = None,
         session: SessionType | None = None,
-    ) -> VolumeProfile:
-        usable = [x for x in candles if x.volume > 0]
+    ) -> VolumeProfile | None:
+        usable = [x for x in candles if self._is_usable_candle(x)]
+        if not usable:
+            return None
         buckets, included, grid_method = self._allocate(usable, context)
-        source_total = sum(x.volume for x in candles)
+        if not buckets or included <= 0:
+            return None
+        source_total = sum(x.volume for x in candles if isfinite(x.volume) and x.volume >= 0)
         key = stable_id("logical-profile", candles[0].symbol, candles[0].timeframe, kind, candles[0].timestamp, getattr(anchor, "id", None), constituent_ids)
         poc = self._poc(buckets, included, key)
         value_area = self._value_area(buckets, poc, included, key)
@@ -577,7 +683,9 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
             version=len(candles),
         )
 
-    def _period_profiles(self, candles: list[Candle], context: VolumeProfileContext, kind: ProfileType) -> list[VolumeProfile]:
+    def _period_profiles(
+        self, candles: list[Candle], context: VolumeProfileContext, kind: ProfileType
+    ) -> tuple[list[VolumeProfile], list[SkippedProfilePeriod]]:
         groups: dict[object, list[Candle]] = defaultdict(list)
         key: object
         for candle in candles:
@@ -594,14 +702,34 @@ class BaselineVolumeProfileAnalyzer(VolumeProfileAnalyzer):
                 key = (candle.timestamp.year, candle.timestamp.month)
             groups[key].append(candle)
         ordered = sorted(groups.items(), key=lambda x: x[1][0].timestamp)
-        result = []
+        result: list[VolumeProfile] = []
+        skipped: list[SkippedProfilePeriod] = []
+        boundary = candles[-1].timestamp if candles else datetime(1970, 1, 1, tzinfo=UTC)
+        if not ordered:
+            skipped.append(
+                self._skipped_period(candles, context, kind, "no_eligible_period", ProfileSkipReason.EMPTY_PROFILE_PERIOD, boundary)
+            )
+            return result, skipped
         for index, (key, values) in enumerate(ordered[-3:]):
             profile_session: SessionType | None = None
             if kind == ProfileType.SESSION:
                 session_name = str(key[1])  # type: ignore[index]
                 profile_session = SessionType.OVERLAP if session_name == "london_new_york_overlap" else SessionType(session_name)
-            result.append(self._profile(values, kind, context, completed=index < len(ordered[-3:]) - 1, session=profile_session))
-        return result
+            profile = self._profile(values, kind, context, completed=index < len(ordered[-3:]) - 1, session=profile_session)
+            if profile is None:
+                skipped.append(
+                    self._skipped_period(
+                        values,
+                        context,
+                        kind,
+                        str(key),
+                        ProfileSkipReason.INSUFFICIENT_VOLUME_PROFILE_DATA,
+                        boundary,
+                    )
+                )
+                continue
+            result.append(profile)
+        return result, skipped
 
     @staticmethod
     def _tested_references(profiles: list[VolumeProfile], candles: list[Candle]) -> list[VolumeProfile]:

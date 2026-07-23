@@ -16,6 +16,7 @@ class VolumeProfileContext:
     smc: SMCLiquidityContext | None = None
     liquidity_source_ids: tuple[str, ...] = ()
     anchors: tuple[ProfileAnchor, ...] = ()
+    requested_timeframe: Timeframe | None = None
 
 
 class VolumeProfileReader(Protocol):

@@ -116,7 +116,11 @@ class VolumeProfileService:
             state = await self.liquidity.state(symbol, timeframe, candles[-1].timestamp)
             liquidity_ids = tuple(str(x.id) for x in state.pools) if state else ()
         source = VolumeSourceType(self.config.default_volume_source)
-        return await self.analyze_context(VolumeProfileContext(tuple(candles), source, symbol, None, smc, liquidity_ids), mode, correlation_id)
+        return await self.analyze_context(
+            VolumeProfileContext(tuple(candles), source, symbol, None, smc, liquidity_ids, requested_timeframe=timeframe),
+            mode,
+            correlation_id,
+        )
 
     async def analyze_context(
         self, context: VolumeProfileContext, mode: ProcessingMode = ProcessingMode.HISTORICAL, correlation_id: UUID | None = None
@@ -135,7 +139,13 @@ class VolumeProfileService:
     async def replay(self, symbol: str, timeframe: Timeframe, timestamp: datetime, limit: int = 500) -> VolumeProfileAnalysisSnapshot:
         candles = await self.market_data.replay(symbol, timeframe, timestamp, limit=min(limit, self.config.processing.maximum_candles))
         snapshot = await self.analyze_context(
-            VolumeProfileContext(tuple(candles), VolumeSourceType(self.config.default_volume_source), symbol), ProcessingMode.REPLAY
+            VolumeProfileContext(
+                tuple(candles),
+                VolumeSourceType(self.config.default_volume_source),
+                symbol,
+                requested_timeframe=timeframe,
+            ),
+            ProcessingMode.REPLAY,
         )
         self.metrics.replay_runs += 1
         await self.event_bus.publish(VolumeProfileReplayCompleted(correlation_id=uuid4(), source="volume_profile", payload={"snapshot_id": str(snapshot.id)}))
@@ -296,7 +306,12 @@ class VolumeProfileService:
                     event_id=stable_id("event", final.__name__, snapshot.id),
                     correlation_id=correlation_id,
                     source="volume_profile",
-                    payload={"snapshot_id": str(snapshot.id), "status": snapshot.status.value},
+                    payload={
+                        "snapshot_id": str(snapshot.id),
+                        "status": snapshot.status.value,
+                        "degraded_reasons": [reason.value for reason in snapshot.degraded_reasons],
+                        "skipped_periods": [item.model_dump(mode="json") for item in snapshot.skipped_periods],
+                    },
                 )
             )
         except Exception:
@@ -337,6 +352,8 @@ class VolumeProfileService:
             "analytical_timestamp": snapshot.analysis_timestamp.isoformat(),
             "source_traceability": snapshot.market_data_boundary,
             "data_quality": snapshot.quality_summary,
+            "degraded_reasons": [reason.value for reason in snapshot.degraded_reasons],
+            "skipped_periods": [item.model_dump(mode="json") for item in snapshot.skipped_periods],
             "configuration_version": snapshot.configuration_version,
             "engine_version": snapshot.engine_version,
             "snapshot_id": str(snapshot.id),

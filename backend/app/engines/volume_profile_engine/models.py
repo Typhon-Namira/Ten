@@ -34,6 +34,11 @@ class ProfileStatus(StrEnum):
     DEGRADED = "degraded"
 
 
+class ProfileSkipReason(StrEnum):
+    INSUFFICIENT_VOLUME_PROFILE_DATA = "insufficient_volume_profile_data"
+    EMPTY_PROFILE_PERIOD = "empty_profile_period"
+
+
 class ProfileLifecycleState(StrEnum):
     INITIALIZED = "initialized"
     DEVELOPING = "developing"
@@ -205,6 +210,22 @@ class DataQualityLevel(StrEnum):
 
 class ImmutableModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class SkippedProfilePeriod(ImmutableModel):
+    symbol: str
+    timeframe: Timeframe
+    profile_type: ProfileType
+    period_key: str
+    reason: ProfileSkipReason
+    input_count: int = Field(ge=0)
+    usable_count: int = Field(ge=0)
+    analysis_boundary: datetime
+
+    @field_validator("analysis_boundary")
+    @classmethod
+    def timezone(cls, value: datetime) -> datetime:
+        return utc(value)
 
 
 class VolumeDataQuality(ImmutableModel):
@@ -543,6 +564,8 @@ class VolumeProfileAnalysisSnapshot(ImmutableModel):
     volume_data_quality: VolumeDataQuality
     confidence_summary: dict[str, float]
     quality_summary: dict[str, float]
+    degraded_reasons: tuple[ProfileSkipReason, ...] = ()
+    skipped_periods: tuple[SkippedProfilePeriod, ...] = ()
     configuration_version: str
     engine_version: str
     market_data_boundary: str
