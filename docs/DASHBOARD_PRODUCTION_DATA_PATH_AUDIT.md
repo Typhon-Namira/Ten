@@ -69,6 +69,21 @@ The endpoint always returns HTTP 200 for normal data states:
 
 The existing individual endpoints remain registered for backward compatibility.
 
+## Provider payload boundary
+
+The first deployed synchronized cycle exposed an additional concrete failure: the complete
+market state was approximately 22 MB and the old request builder repeated full historical
+zone/level collections across several prompt fields. The provider request exceeded practical
+model/request limits and persisted `llm_unavailable`.
+
+Unified Market State still persists the complete, unmodified engine payload. At the external AI
+boundary only, long historical collections are now represented by their exact total count,
+deterministic first/latest samples, and the enclosing evidence ID (which commits to the complete
+raw evidence). Every top-level engine field and scalar summary remains present, while derived
+prompt categories carry evidence references instead of duplicating the same raw payload. A real
+production state that previously generated an unbounded request now produces a roughly 320 KB
+request.
+
 ## Production configuration
 
 The intended shadow rollout is:

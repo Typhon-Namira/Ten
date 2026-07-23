@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -17,6 +18,7 @@ from backend.app.ai_reasoning.models import (
     EntryZone,
     ManagedSignalState,
     MarketMemoryEntry,
+    MarketMemorySummary,
     ProposalAction,
     SetupReadiness,
 )
@@ -260,6 +262,49 @@ async def test_monitoring_flag_alone_cannot_create_new_opportunity() -> None:
 async def test_existing_openrouter_is_the_only_provider_boundary() -> None:
     assert ExistingOpenRouterReasoningProvider.provider_name == "openrouter"
     assert ValidProvider().metadata()["external_ai_apis"] == ("openrouter",)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_request_bounds_large_engine_collections_without_changing_market_state() -> None:
+    state, quant = await state_and_quant()
+    source = next(item for item in state.evidence if item.source_engine == "smc")
+    zones = [
+        {
+            "zone_id": index,
+            "created_at": (BOUNDARY - timedelta(minutes=5_000 - index)).isoformat(),
+            "low": 3_000 + index / 100,
+            "high": 3_001 + index / 100,
+            "metadata": {"touches": list(range(20))},
+        }
+        for index in range(5_000)
+    ]
+    oversized = source.model_copy(
+        update={"raw_value": {"status": "ready", "summary": {"bias": "bullish"}, "zones": zones}}
+    )
+    evidence = tuple(oversized if item.evidence_id == source.evidence_id else item for item in state.evidence)
+    large_state = state.model_copy(update={"evidence": evidence})
+    config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig)
+
+    request = AIReasoningRequestBuilder(
+        config,
+        model_identifier="configured-model",
+        clock=lambda: NOW,
+    ).build(
+        large_state,
+        quant,
+        MarketMemorySummary(entry_count=0),
+        existing_signal=None,
+        previous_forecast=None,
+        previous_proposal=None,
+    )
+
+    encoded = json.dumps(request.model_dump(mode="json"))
+    smc_raw = request.smc_evidence[0]["raw"]
+    assert len(encoded) < 500_000
+    assert smc_raw["summary"]["bias"] == "bullish"
+    assert smc_raw["zones"]["collection_summary"]["total_count"] == 5_000
+    assert [item["zone_id"] for item in smc_raw["zones"]["items"]] == [0, 4_999]
+    assert source.raw_value["structure"]["direction"] == "bullish"
 
 
 @pytest.mark.asyncio
