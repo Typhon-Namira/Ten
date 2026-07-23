@@ -156,7 +156,7 @@ class AIReasoningService:
                 failure_errors = exc.errors
             except Exception as exc:
                 failure_state = "llm_unavailable"
-                failure_errors = (type(exc).__name__,)
+                failure_errors = (type(exc).__name__, str(exc)[:200])
                 self._provider_failure_streak += 1
                 backoff = min(
                     self.config.provider_backoff_initial_seconds * (2 ** (self._provider_failure_streak - 1)),
