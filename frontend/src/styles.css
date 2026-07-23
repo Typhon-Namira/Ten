@@ -274,6 +274,7 @@ tbody tr, .source-diagnostics tr { transition: background .15s var(--ease); }
 .shadow-forecast__grid article div { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; color: var(--muted); font-size: 12px; }
 .shadow-forecast__grid strong { color: var(--text); font-weight: 600; }
 .ai-reasoning__banner { padding: 10px 12px; border: 1px solid rgba(226,176,72,.5); border-radius: 8px; color: var(--gold); background: rgba(226,176,72,.08); font-size: 11px; font-weight: 700; letter-spacing: .06em; }
+.ai-reasoning__banner--live { border-color: rgba(72,226,148,.5); color: #75e6ad; background: rgba(72,226,148,.08); }
 .ai-reasoning__sections { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 12px; }
 .ai-reasoning__sections section { padding: 13px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,.02); }
 .ai-reasoning__sections h3 { margin: 0 0 9px; font-size: 13px; }

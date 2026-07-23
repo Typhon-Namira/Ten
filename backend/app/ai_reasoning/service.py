@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+import json
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from backend.app.final_decision.models import ExecutionContext, LLMUsageMetric, OperationMode
+from backend.app.final_decision.service import FinalDecisionService
 from backend.app.market_state import UnifiedMarketState
 from backend.app.quant_forecasting.models import QuantForecastResult
 
@@ -18,6 +23,7 @@ from .models import (
     AIResultStatus,
     AISignalProposal,
     LLMStructuredOutputFailure,
+    ManagedSignalState,
     MarketMemoryEntry,
 )
 from .provider import AIReasoningProvider
@@ -39,6 +45,7 @@ class AIReasoningService:
         *,
         proposals_enabled: bool,
         monitoring_enabled: bool,
+        final_decision: FinalDecisionService | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
@@ -49,7 +56,12 @@ class AIReasoningService:
         self.config = config
         self.proposals_enabled = proposals_enabled
         self.monitoring_enabled = monitoring_enabled
+        self.final_decision = final_decision
         self.clock = clock or (lambda: datetime.now(UTC))
+        self._llm_semaphore = asyncio.Semaphore(config.llm_concurrency_limit)
+        self._processed_state_hashes: set[str] = set()
+        self._provider_failure_streak = 0
+        self._provider_backoff_until: datetime | None = None
         self.memory = MarketMemory(config.maximum_memory_entries)
         metadata = provider.metadata()
         self.lifecycle = SignalLifecycleService(
@@ -81,6 +93,12 @@ class AIReasoningService:
         quant = QuantForecastResult.model_validate(quant.model_dump(mode="python"))
         if state.market_data_boundary > state.knowledge_cutoff:
             raise ValueError("AI reasoning requires a legally closed point-in-time state")
+        if state.state_hash in self._processed_state_hashes:
+            # One primary reasoning call per immutable closed-cycle state. Monitoring and
+            # publication are driven by the persisted first result, never by per-tick polling.
+            return None
+        if self._provider_backoff_until is not None and self.clock() < self._provider_backoff_until:
+            return None
         active_signals = await self.repository.active_signals(state.instrument)
         if self.monitoring_enabled and not self.proposals_enabled and not active_signals:
             # Monitoring is independently controllable and cannot create a brand-new opportunity
@@ -109,9 +127,14 @@ class AIReasoningService:
         failure_errors: tuple[str, ...] = ()
         for attempt in range(self.config.maximum_retries + 1):
             try:
-                response = await self.provider.reason(request, prompt_version=request.prompt_version)
+                async with self._llm_semaphore:
+                    response = await asyncio.wait_for(
+                        self.provider.reason(request, prompt_version=request.prompt_version),
+                        timeout=self.config.request_timeout_seconds,
+                    )
                 last_raw = response.raw_output
                 self.last_latency_ms = response.latency_ms
+                await self._record_usage(request, state.state_hash, response.token_usage, response.latency_ms, True, None)
                 candidate = self.validator.validate(response.raw_output, request=request, state=state, quant=quant)
                 forecast = candidate.forecast.model_copy(
                     update={
@@ -125,6 +148,8 @@ class AIReasoningService:
                 self.last_validation_passed = True
                 self.last_retry_count = attempt
                 self.last_failure_state = None
+                self._provider_failure_streak = 0
+                self._provider_backoff_until = None
                 break
             except StructuredAIOutputError as exc:
                 failure_state = "structured_output_invalid"
@@ -132,6 +157,13 @@ class AIReasoningService:
             except Exception as exc:
                 failure_state = "llm_unavailable"
                 failure_errors = (type(exc).__name__,)
+                self._provider_failure_streak += 1
+                backoff = min(
+                    self.config.provider_backoff_initial_seconds * (2 ** (self._provider_failure_streak - 1)),
+                    self.config.provider_backoff_max_seconds,
+                )
+                self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
+                await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
             await self._record_failure(request.request_id, attempt, request.model_identifier, request.prompt_version, last_raw, failure_errors, failure_state)
 
         if validated is None:
@@ -141,6 +173,7 @@ class AIReasoningService:
             self.last_failure_state = failure_state
             unavailable = self._unavailable_forecast(request, failure_state, failure_errors)
             await self.repository.save_forecast(unavailable)
+            self._processed_state_hashes.add(state.state_hash)
             return ValidatedAIOutput(forecast=unavailable, proposal=None)
 
         await self.repository.save_forecast(validated.forecast)
@@ -158,6 +191,29 @@ class AIReasoningService:
                     proposal,
                     setup_family=validated.forecast.selected_setup_family or "non_actionable",
                 )
+        if (
+            self.final_decision is not None
+            and proposal is not None
+            and signal is not None
+            and validated.forecast.status == AIResultStatus.AVAILABLE
+        ):
+            context = self._execution_context(state, quant, request, signal.signal_id, proposal.structural_opportunity_key)
+            final_result = await self.final_decision.evaluate(
+                state,
+                quant,
+                validated.forecast,
+                proposal,
+                signal,
+                context,
+            )
+            if final_result.publication is not None and signal.state == ManagedSignalState.PROPOSED:
+                signal = await self.lifecycle.apply_guardrail_approved_transition(
+                    signal,
+                    ManagedSignalState.CONFIRMED,
+                    approval_rule=self.final_decision.config.hard_gate_registry_version,
+                    forecast=validated.forecast,
+                    proposal=proposal,
+                )
         if self.monitoring_enabled:
             for active in active_signals:
                 await self.lifecycle.monitor(
@@ -167,7 +223,106 @@ class AIReasoningService:
                     previous_probability=previous_forecast.dominant_scenario_probability if previous_forecast else None,
                 )
         await self._append_memory(state, quant, validated.forecast, proposal, signal)
+        self._processed_state_hashes.add(state.state_hash)
         return validated
+
+    async def _record_usage(
+        self,
+        request: Any,
+        state_hash: str,
+        token_usage: dict[str, int] | None,
+        latency_ms: float | None,
+        success: bool,
+        failure_state: str | None,
+    ) -> None:
+        if self.final_decision is None:
+            return
+        payload = request.model_dump(mode="json")
+        request_hash = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+        total = token_usage.get("total_tokens") if token_usage else None
+        usage = LLMUsageMetric(
+            metric_id=uuid5(NAMESPACE_URL, f"ten:llm-usage:{request.request_id}:{success}:{failure_state}"),
+            usage_date=self.clock().date().isoformat(),
+            request_hash=request_hash,
+            market_state_hash=state_hash,
+            model_identifier=request.model_identifier,
+            prompt_version=request.prompt_version,
+            generation_parameters={"temperature": self.config.temperature, "max_tokens": self.config.max_tokens},
+            request_count=1,
+            input_tokens=token_usage.get("input_tokens") if token_usage else None,
+            output_tokens=token_usage.get("output_tokens") if token_usage else None,
+            total_tokens=total,
+            latency_ms=latency_ms,
+            success=success,
+            failure_state=failure_state,
+            created_at=self.clock(),
+        )
+        await self.final_decision.repository.save_usage(usage)
+
+    def _execution_context(
+        self,
+        state: UnifiedMarketState,
+        quant: QuantForecastResult,
+        request: Any,
+        signal_id: Any,
+        opportunity_key: str,
+    ) -> ExecutionContext:
+        market_open = self._find_boolean(state, ("market_open", "is_market_open"))
+        economic_blackout = self._find_boolean(state, ("prohibited_window", "blackout", "event_blackout"))
+        session = self._find_string(state, ("session", "session_name")) or "unknown"
+        current_price = quant.predictions[0].reference_price if quant.predictions else None
+        return ExecutionContext(
+            context_id=uuid5(NAMESPACE_URL, f"ten:execution-context:{state.state_id}"),
+            instrument=state.instrument,
+            evaluated_at=max(self.clock(), state.market_data_boundary),
+            operation_mode=OperationMode.ANALYTICAL_LIVE if self.final_decision and self.final_decision.publication_enabled else OperationMode.SHADOW,
+            analytical_only=True,
+            broker_execution_available=False,
+            market_open=market_open,
+            current_price=current_price,
+            spread=request.spread,
+            session=session,
+            publication_service_available=True,
+            persistence_available=True,
+            economic_context_available=bool(request.economic_event_context),
+            prohibited_economic_event_window=economic_blackout,
+            active_opportunity_keys=(opportunity_key,),
+            active_signal_id=signal_id,
+        )
+
+    @staticmethod
+    def _walk(value: Any) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        if isinstance(value, dict):
+            found.append(value)
+            for nested in value.values():
+                found.extend(AIReasoningService._walk(nested))
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                found.extend(AIReasoningService._walk(nested))
+        return found
+
+    @classmethod
+    def _find_boolean(cls, state: UnifiedMarketState, keys: tuple[str, ...]) -> bool | None:
+        for evidence in state.evidence:
+            for payload in cls._walk(evidence.raw_value):
+                for key in keys:
+                    if isinstance(payload.get(key), bool):
+                        value = payload[key]
+                        assert isinstance(value, bool)
+                        return value
+        return None
+
+    @classmethod
+    def _find_string(cls, state: UnifiedMarketState, keys: tuple[str, ...]) -> str | None:
+        for evidence in state.evidence:
+            for payload in cls._walk(evidence.raw_value):
+                for key in keys:
+                    if isinstance(payload.get(key), str):
+                        value = payload[key]
+                        assert isinstance(value, str)
+                        return value
+        return None
 
     async def _record_failure(
         self,
@@ -274,8 +429,8 @@ class AIReasoningService:
             "enabled": self.enabled,
             "proposals_enabled": self.proposals_enabled,
             "monitoring_enabled": self.monitoring_enabled,
-            "publication_enabled": False,
-            "adjustments_enabled": False,
+            "publication_enabled": self.final_decision.publication_enabled if self.final_decision else False,
+            "adjustments_enabled": self.final_decision.adjustments_enabled if self.final_decision else False,
             "provider_available": self.last_failure_state != "llm_unavailable" if self.requests else None,
             "provider": metadata["provider"],
             "model_identifier": metadata["model_identifier"],
@@ -289,4 +444,7 @@ class AIReasoningService:
             "fallback_state": "no_ai_proposal" if self.last_failure_state else None,
             "shadow_only": True,
             "awaiting_guardrail_validation": True,
+            "provider_backoff_until": self._provider_backoff_until.isoformat() if self._provider_backoff_until else None,
+            "deduplicated_market_states": len(self._processed_state_hashes),
+            "final_decision": self.final_decision.health() if self.final_decision else None,
         }

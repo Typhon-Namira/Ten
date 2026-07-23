@@ -1,0 +1,40 @@
+version: "ai_guardrails_v1"
+hard_gate_registry_version: "hard_gates_v1"
+risk_policy_version: "ai_risk_policy_v1"
+execution_policy_version: "ai_execution_policy_v1"
+publication_schema_version: "analytical_signal_v1"
+replay_policy_version: "ai_replay_v1"
+outcome_policy_version: "ai_outcomes_v1"
+calibration_policy_version: "ai_calibration_v1"
+readiness_policy_version: "ai_readiness_v1"
+minimum_absolute_risk_to_reward: 1.0
+maximum_spread:
+  asia: 0.60
+  london: 0.45
+  new_york: 0.50
+  rollover: 0.90
+  unknown: 0.45
+maximum_signal_age_seconds: 900
+maximum_setup_expiry_seconds: 3600
+minimum_stop_distance: 0.10
+maximum_stop_distance: 20.0
+maximum_entry_distance: 5.0
+supported_entry_types: ["market", "limit", "stop", "zone"]
+price_precision: 3
+economic_event_blackout_required: true
+minimum_evidence_change_ratio: 0.05
+llm_request_timeout_seconds: 30.0
+llm_concurrency_limit: 1
+provider_backoff_initial_seconds: 5.0
+provider_backoff_max_seconds: 300.0
+maximum_daily_llm_requests: 500
+maximum_daily_llm_tokens: 1500000
+configured_slippage: 0.0
+minimum_readiness_sample_size: 100
+maximum_llm_failure_rate: 0.05
+maximum_publication_failure_rate: 0.01
+policy_sources:
+  minimum_absolute_risk_to_reward: "Phase 5 initial absolute safety policy; not inherited from legacy scoring"
+  spread_limits: "Phase 5 initial XAUUSD analytical publication safety policy"
+  stop_distance: "Phase 5 initial XAUUSD geometry safety policy"
+  account_risk: "Unavailable until an authoritative broker/account-risk service is integrated"

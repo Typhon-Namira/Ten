@@ -16,3 +16,7 @@ class AIReasoningConfig(BaseModel):
     maximum_retries: int = Field(ge=0, le=3)
     temperature: float = Field(ge=0, le=1)
     max_tokens: int = Field(ge=256, le=10000)
+    request_timeout_seconds: float = Field(gt=0)
+    llm_concurrency_limit: int = Field(ge=1, le=32)
+    provider_backoff_initial_seconds: float = Field(gt=0)
+    provider_backoff_max_seconds: float = Field(gt=0)

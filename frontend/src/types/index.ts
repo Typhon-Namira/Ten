@@ -679,11 +679,28 @@ export interface AIReasoningDashboard {
     monitoring: Record<string, unknown>[]
     outcomes: Record<string, unknown>[]
   }>
+  final_actions: Record<string, FinalSystemAction[]>
+  publications: Record<string, PublishedAnalyticalSignal | null>
+  llm_usage: {
+    request_count: number
+    total_tokens: number | null
+    successful_requests: number
+    failed_requests: number
+  }
+  performance: Record<string, unknown> | null
+  production_readiness: {
+    status: string
+    sample_count: number
+    blockers: string[]
+    warnings: string[]
+    measured_checks: Record<string, { passed: boolean; threshold: unknown }>
+  } | null
   health: {
     enabled: boolean
     proposals_enabled: boolean
     monitoring_enabled: boolean
-    publication_enabled: false
+    publication_enabled: boolean
+    adjustments_enabled: boolean
     provider_available: boolean | null
     provider: string
     model_identifier: string
@@ -694,8 +711,64 @@ export interface AIReasoningDashboard {
     failed_requests: number
     failure_state: string | null
     fallback_state: string | null
-    shadow_only: true
-    awaiting_guardrail_validation: true
+    shadow_only: boolean
+    awaiting_guardrail_validation: boolean
+    provider_backoff_until: string | null
+    deduplicated_market_states: number
+    guardrails: {
+      status: string
+      publication_enabled: boolean
+      adjustments_enabled: boolean
+      analytical_only: true
+      broker_execution_available: false
+      actions_evaluated: number
+      publications_succeeded: number
+      publications_failed: number
+      publication_failure_rate: number
+      policy_versions: Record<string, string>
+    }
   }
+}
+
+export interface FinalSystemAction {
+  final_action_id: string
+  action: string
+  approval_state: string
+  publication_state: string
+  final_direction: string
+  final_entry: { low: number; high: number } | null
+  final_stop_loss: number | null
+  final_take_profits: number[]
+  final_risk_to_reward: number | null
+  final_expiry: string | null
+  final_risk_classification: string
+  gate_evaluations: { gate_id: string; status: string; reason_codes: string[] }[]
+  modifications: {
+    field_name: string
+    original_value: unknown
+    final_value: unknown
+    modifying_gate_or_policy: string
+    exact_reason: string
+  }[]
+  policy_versions: Record<string, string>
+  analytical_only: true
+  broker_execution_performed: false
+  created_at: string
+}
+
+export interface PublishedAnalyticalSignal {
+  publication_id: string
+  signal_id: string
+  direction: string
+  setup_family: string
+  entry_zone: { low: number; high: number }
+  stop_loss: number
+  take_profit_levels: number[]
+  lifecycle_state: string
+  dominant_scenario: string
+  final_risk_classification: string
+  analytical_only: true
+  broker_execution: false
+  published_at: string
 }
 

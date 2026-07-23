@@ -8,9 +8,15 @@ export function AIReasoningPanel({ data }: { data: AIReasoningDashboard | null }
   const proposal = data?.proposal
   const signal = data?.managed_signals[0]
   const history = signal ? data?.signal_histories[signal.signal_id] : null
+  const finalAction = signal ? data?.final_actions[signal.signal_id]?.at(-1) : null
+  const publication = signal ? data?.publications[signal.signal_id] : null
+  const failedGates = finalAction?.gate_evaluations.filter(item => item.status !== 'passed' && item.status !== 'not_applicable') ?? []
+  const live = Boolean(data?.health.publication_enabled && publication)
 
   return <div className="ai-reasoning">
-    <div className="ai-reasoning__banner">SHADOW-ONLY · AWAITING GUARDRAIL VALIDATION · NOT APPROVED FOR PUBLICATION</div>
+    <div className={`ai-reasoning__banner ${live ? 'ai-reasoning__banner--live' : ''}`}>
+      {live ? 'ANALYTICAL LIVE · GUARDRAIL APPROVED · NO BROKER EXECUTION' : 'SHADOW / SAFE TEST · DETERMINISTIC GUARDRAILS · NO BROKER EXECUTION'}
+    </div>
     <div className="ai-reasoning__sections">
       <section>
         <h3>AI Market Forecast</h3>
@@ -39,7 +45,20 @@ export function AIReasoningPanel({ data }: { data: AIReasoningDashboard | null }
         </dl>
       </section>
       <section>
-        <h3>Signal Lifecycle</h3>
+        <h3>Final Decision</h3>
+        <dl>
+          <div><dt>Action / approval</dt><dd>{finalAction ? `${finalAction.action} · ${finalAction.approval_state}` : 'Not evaluated'}</dd></div>
+          <div><dt>Publication</dt><dd>{finalAction?.publication_state ?? 'disabled'}</dd></div>
+          <div><dt>Final risk</dt><dd>{finalAction?.final_risk_classification ?? '—'}</dd></div>
+          <div><dt>Risk-to-Reward</dt><dd>{finalAction?.final_risk_to_reward?.toFixed(2) ?? '—'}</dd></div>
+          <div><dt>Gate results</dt><dd>{finalAction ? `${finalAction.gate_evaluations.length - failedGates.length} passed · ${failedGates.length} blocked/unavailable` : '—'}</dd></div>
+          <div><dt>Modifications</dt><dd>{finalAction?.modifications.length ?? 0}</dd></div>
+          <div><dt>Analytical publication</dt><dd>{publication ? `${publication.direction} · ${new Date(publication.published_at).toLocaleString()}` : 'None'}</dd></div>
+          <div><dt>Broker execution</dt><dd>Not available</dd></div>
+        </dl>
+      </section>
+      <section>
+        <h3>Signal Monitoring</h3>
         <dl>
           <div><dt>State</dt><dd>{signal?.state ?? 'No managed signal'}</dd></div>
           <div><dt>Opportunity</dt><dd className="mono">{signal?.structural_opportunity_key.slice(0, 16) ?? '—'}</dd></div>
@@ -47,18 +66,20 @@ export function AIReasoningPanel({ data }: { data: AIReasoningDashboard | null }
           <div><dt>Transitions</dt><dd>{history?.transitions.length ?? 0}</dd></div>
           <div><dt>Level revisions</dt><dd>{history?.revisions.length ?? 0}</dd></div>
           <div><dt>Monitoring evaluations</dt><dd>{history?.monitoring.length ?? 0}</dd></div>
+          <div><dt>Outcomes</dt><dd>{history?.outcomes.length ?? 0}</dd></div>
         </dl>
       </section>
       <section>
-        <h3>AI Health</h3>
+        <h3>System Health and Usage</h3>
         <dl>
           <div><dt>Provider</dt><dd>{data?.health.provider ?? 'OpenRouter'}</dd></div>
           <div><dt>Model</dt><dd>{data?.health.model_identifier ?? '—'}</dd></div>
-          <div><dt>Prompt</dt><dd>{data?.health.prompt_version ?? '—'}</dd></div>
           <div><dt>Availability</dt><dd>{data?.health.provider_available == null ? 'not called' : data.health.provider_available ? 'available' : 'unavailable'}</dd></div>
           <div><dt>Latency</dt><dd>{data?.health.latest_latency_ms == null ? '—' : `${data.health.latest_latency_ms.toFixed(0)} ms`}</dd></div>
-          <div><dt>Validation / retries</dt><dd>{data?.health.latest_validation_passed == null ? '—' : String(data.health.latest_validation_passed)} / {data?.health.latest_retry_count ?? 0}</dd></div>
-          <div><dt>Failures / fallback</dt><dd>{data?.health.failed_requests ?? 0} · {data?.health.fallback_state ?? 'none'}</dd></div>
+          <div><dt>LLM requests / tokens today</dt><dd>{data?.llm_usage.request_count ?? 0} / {data?.llm_usage.total_tokens ?? 'unavailable'}</dd></div>
+          <div><dt>Guardrails / publications</dt><dd>{data?.health.guardrails.status ?? '—'} / {data?.health.guardrails.publications_succeeded ?? 0}</dd></div>
+          <div><dt>Policy</dt><dd>{data?.health.guardrails.policy_versions.guardrails ?? '—'}</dd></div>
+          <div><dt>Production readiness</dt><dd>{data?.production_readiness?.status ?? 'not measured'}</dd></div>
         </dl>
       </section>
     </div>

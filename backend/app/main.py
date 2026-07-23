@@ -77,6 +77,14 @@ from backend.app.ai_reasoning import (
 from backend.app.ai_reasoning.repository import AIReasoningRepository
 from backend.app.ai_reasoning.request_builder import AIReasoningRequestBuilder
 from backend.app.ai_reasoning.validation import StructuredAIOutputValidator
+from backend.app.final_decision import (
+    FinalDecisionRepository,
+    FinalDecisionService,
+    GuardrailPolicyConfig,
+    HardGateRegistry,
+    InMemoryFinalDecisionRepository,
+    SqlAlchemyFinalDecisionRepository,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -353,6 +361,21 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             ai_repository = SqlAlchemyAIReasoningRepository(app.state.database_session_factory)
         ai_proposals_enabled = app.state.engine_registry.context.feature_flags.is_enabled(FeatureFlag.AI_SIGNAL_PROPOSALS)
         ai_monitoring_enabled = app.state.engine_registry.context.feature_flags.is_enabled(FeatureFlag.AI_SIGNAL_MONITORING)
+        ai_publication_enabled = app.state.engine_registry.context.feature_flags.is_enabled(FeatureFlag.AI_SIGNAL_PUBLICATION)
+        ai_adjustments_enabled = app.state.engine_registry.context.feature_flags.is_enabled(FeatureFlag.AI_SIGNAL_ADJUSTMENTS)
+        guardrail_config = configs.load_model("ai_guardrails", GuardrailPolicyConfig)
+        final_repository: FinalDecisionRepository = InMemoryFinalDecisionRepository()
+        if app.state.database_session_factory is not None:
+            final_repository = SqlAlchemyFinalDecisionRepository(app.state.database_session_factory)
+        app.state.final_decision_repository = final_repository
+        app.state.final_decision_service = FinalDecisionService(
+            final_repository,
+            HardGateRegistry(),
+            setup_family_registry,
+            guardrail_config,
+            publication_enabled=ai_publication_enabled,
+            adjustments_enabled=ai_adjustments_enabled,
+        )
         ai_provider = ExistingOpenRouterReasoningProvider(
             app.state.llm_client,
             PromptLoader(Path(__file__).resolve().parent / "ai_reasoning" / "prompts"),
@@ -373,6 +396,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             ai_reasoning_config,
             proposals_enabled=ai_proposals_enabled,
             monitoring_enabled=ai_monitoring_enabled,
+            final_decision=app.state.final_decision_service,
         )
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
