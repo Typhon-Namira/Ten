@@ -1,5 +1,6 @@
 import { Activity, Clock3, History, RefreshCw, ShieldCheck, Signal as SignalIcon, Wifi, WifiOff } from 'lucide-react'
 import { AIExplanationPanel } from '../components/AIExplanationPanel'
+import { AIReasoningPanel } from '../components/AIReasoningPanel'
 import { ChartWorkspace } from '../components/ChartWorkspace'
 import { EngineGrid } from '../components/EngineGrid'
 import { LiveLogPanel } from '../components/LiveLogPanel'
@@ -15,6 +16,7 @@ import { Sparkline } from '../components/widgets/Widgets'
 import { ChartFocusProvider } from '../lib/ChartFocusContext'
 import { useActiveSelection } from '../hooks/useActiveSelection'
 import { useAiScoreHistory } from '../hooks/useAiScoreHistory'
+import { useAIReasoning } from '../hooks/useAIReasoning'
 import { useChartOverlays } from '../hooks/useChartOverlays'
 import { useDashboard } from '../hooks/useDashboard'
 import { useEventStream } from '../hooks/useEventStream'
@@ -29,6 +31,7 @@ export function Dashboard() {
   const { status: streamStatus, events } = useEventStream()
   const { stages, rejections, marketIntelligence, performance, lastUpdated } = useLiveDashboard(selection.instrument, selection.timeframe)
   const aiScoreHistory = useAiScoreHistory(selection.instrument, selection.timeframe)
+  const aiReasoning = useAIReasoning(selection.instrument)
   const { forecast: quantForecast, calibration: quantCalibration, outcomes: quantOutcomes } = useQuantForecast(selection.instrument)
   // Same call the chart makes for its default (unchanged) timeframe — reused here so the
   // liquidity distribution widget shows real per-pool strength data instead of the single
@@ -93,6 +96,7 @@ export function Dashboard() {
         <section className="panel" id="stages"><div className="panel__head"><div><p className="eyebrow">PIPELINE STAGES</p><h2>Live stage tracker</h2></div><span>updates every 5s</span></div><div className="panel-body"><PipelineStageTracker data={stages} /></div></section>
         <section className="panel" id="intelligence"><div className="panel__head"><div><p className="eyebrow">MARKET INTELLIGENCE</p><h2>Live market state</h2></div><span>updates every 5s</span></div><div className="panel-body"><MarketIntelligencePanel data={marketIntelligence} liquidityPools={overlays?.liquidity_pools ?? []} /></div></section>
         <section className="panel" id="shadow-forecast"><div className="panel__head"><div><p className="eyebrow">QUANTITATIVE RESEARCH</p><h2>Multi-horizon forecast</h2></div><span>shadow only</span></div><div className="panel-body"><ShadowForecastPanel forecast={quantForecast} calibration={quantCalibration} outcomes={quantOutcomes} /></div></section>
+        <section className="panel" id="ai-reasoning"><div className="panel__head"><div><p className="eyebrow">AI-CENTRIC MARKET ANALYSIS</p><h2>Reasoning and signal lifecycle</h2></div><span>feature gated</span></div><div className="panel-body"><AIReasoningPanel data={aiReasoning} /></div></section>
         <section className="panel" id="signals">
           <div className="panel__head"><div><p className="eyebrow">SCENARIO FEED</p><h2>Current signals</h2></div><span>{signals.length} scenarios</span></div>
           {signals.length === 0 ? <PublicationDistancePanel intelligence={marketIntelligence} rejections={rejections} /> : <SignalTable signals={signals} />}

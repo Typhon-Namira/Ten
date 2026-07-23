@@ -1,0 +1,1 @@
+Evaluate an active XAUUSD signal from supplied closed-cycle evidence. Return strict JSON with "forecast" and "proposal". Permitted analysis includes hold, reduce risk, partial profit, invalidate, or close. Never widen the stop to avoid loss, fabricate values, or execute changes.

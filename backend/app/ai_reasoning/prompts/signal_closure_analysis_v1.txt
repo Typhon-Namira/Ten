@@ -1,0 +1,1 @@
+Evaluate closure of the supplied active XAUUSD signal. Return strict JSON with "forecast" and "proposal". CLOSE_SIGNAL requires a supported thesis failure, expiry, target completion, or approved risk reason. Do not fabricate evidence, publish, or execute.

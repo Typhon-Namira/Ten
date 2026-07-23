@@ -38,7 +38,7 @@ def _stage_status(result: object) -> str:
 class FullSystemIntegrationService:
     """Coordinates existing engines at a final-candle boundary; contains no analytics."""
 
-    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
+    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
         self.event_bus, self.repository, self.config = event_bus, repository, config
         self.market_data, self.smc, self.liquidity = market_data, smc, liquidity
         self.volume_profile, self.institutional_flow = volume_profile, institutional_flow
@@ -49,6 +49,7 @@ class FullSystemIntegrationService:
         self.stage_tracker = stage_tracker
         self.unified_market_state = unified_market_state
         self.quantitative_forecasting = quantitative_forecasting
+        self.ai_reasoning = ai_reasoning
         self.ai_centric_shadow_mode = ai_centric_shadow_mode
         self._unsubscribe: Callable[[], None] | None = None
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -201,7 +202,9 @@ class FullSystemIntegrationService:
                 try:
                     market_state = await self.unified_market_state.capture_cycle(envelope, dict(outputs))
                     if market_state is not None and self.quantitative_forecasting is not None:
-                        await self.quantitative_forecasting.forecast(market_state)
+                        quantitative_forecast = await self.quantitative_forecasting.forecast(market_state)
+                        if quantitative_forecast is not None and self.ai_reasoning is not None:
+                            await self.ai_reasoning.process(market_state, quantitative_forecast)
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)
             evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]

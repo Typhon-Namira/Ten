@@ -605,3 +605,97 @@ export interface QuantForecastOutcome {
   spread_adjusted_return: number | null
 }
 
+export interface AIMarketForecast {
+  forecast_id: string
+  status: string
+  dominant_direction: 'BUY' | 'SELL' | 'NEUTRAL' | null
+  buy_probability: number | null
+  sell_probability: number | null
+  neutral_probability: number | null
+  expected_horizon: string | null
+  expected_minimum_move: number | null
+  expected_base_move: number | null
+  expected_maximum_move: number | null
+  expected_volatility: number | null
+  dominant_scenario: string | null
+  dominant_scenario_probability: number | null
+  alternative_scenarios: { name: string; probability: number; direction: string }[]
+  selected_setup_family: string | null
+  supporting_evidence_ids: string[]
+  contradicting_evidence_ids: string[]
+  evidence_completeness: number | null
+  evidence_agreement: number | null
+  forecast_confidence: number | null
+  uncertainty: number | null
+  setup_readiness: string | null
+  generated_at: string
+  shadow_only: true
+  awaiting_guardrail_validation: true
+}
+
+export interface AISignalProposal {
+  proposal_id: string
+  structural_opportunity_key: string
+  recommended_action: string
+  direction: string
+  entry_type: string | null
+  entry_zone: { low: number; high: number } | null
+  stop_loss: number | null
+  take_profit_levels: number[]
+  expected_risk_to_reward: number | null
+  invalidation_price: number | null
+  invalidation_conditions: string[]
+  expires_at: string | null
+  setup_readiness: string
+  proposal_confidence: number
+  supporting_evidence_ids: string[]
+  contradicting_evidence_ids: string[]
+  shadow_only: true
+  awaiting_guardrail_validation: true
+}
+
+export interface ManagedSignal {
+  signal_id: string
+  structural_opportunity_key: string
+  setup_family: string
+  direction: string
+  state: string
+  current_proposal_id: string
+  entry_zone: { low: number; high: number } | null
+  stop_loss: number | null
+  take_profit_levels: number[]
+  invalidation_price: number | null
+  expires_at: string | null
+  updated_at: string
+}
+
+export interface AIReasoningDashboard {
+  forecast: AIMarketForecast | null
+  proposal: AISignalProposal | null
+  managed_signals: ManagedSignal[]
+  signal_histories: Record<string, {
+    transitions: Record<string, unknown>[]
+    revisions: Record<string, unknown>[]
+    monitoring: Record<string, unknown>[]
+    outcomes: Record<string, unknown>[]
+  }>
+  health: {
+    enabled: boolean
+    proposals_enabled: boolean
+    monitoring_enabled: boolean
+    publication_enabled: false
+    provider_available: boolean | null
+    provider: string
+    model_identifier: string
+    prompt_version: string
+    latest_latency_ms: number | null
+    latest_validation_passed: boolean | null
+    latest_retry_count: number
+    failed_requests: number
+    failure_state: string | null
+    fallback_state: string | null
+    shadow_only: true
+    awaiting_guardrail_validation: true
+  }
+}
+
