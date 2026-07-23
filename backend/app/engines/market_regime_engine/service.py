@@ -4,6 +4,7 @@ from time import perf_counter
 from typing import Any
 from uuid import UUID, uuid4
 
+from backend.app.core.bounded import BoundedSet
 from backend.app.engines.market_data_engine import MarketDataService, Timeframe
 from backend.app.events import Event, EventBus
 from backend.app.features import FeatureRecord, FeatureStore
@@ -138,7 +139,7 @@ class MarketRegimeService:
         self.analyzer = BaselineMarketRegimeAnalyzer(self.config)
         self.metrics = MarketRegimeMetrics()
         self.recovery_state = "not_attempted"
-        self._published: set[UUID] = set()
+        self._published = BoundedSet[UUID](10_000)
 
     async def restore(self) -> int:
         try:

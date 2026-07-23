@@ -23,4 +23,6 @@ def test_railway_config_starts_nested_fastapi_app() -> None:
     assert "COPY --from=frontend-build /app/frontend/dist ./frontend/dist" in dockerfile
     assert "COPY alembic.ini ./alembic.ini" in dockerfile
     assert "COPY migrations ./migrations" in dockerfile
-    assert 'CMD ["sh", "-c", "exec uvicorn backend.app.main:app --host 0.0.0.0 --port \\\"${PORT:-8000}\\\""]' in dockerfile
+    assert "exec uvicorn backend.app.main:app --host 0.0.0.0" in dockerfile
+    assert "TEN_LOG_ACCESS_REQUESTS" in dockerfile
+    assert "--no-access-log" in dockerfile

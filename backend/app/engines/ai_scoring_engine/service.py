@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import logging
@@ -33,7 +34,7 @@ class AIScoringMetrics:
     persistence_failures_total: int = 0
     feature_publish_failures_total: int = 0
     event_publish_failures_total: int = 0
-    durations_ms: list[float] = field(default_factory=list)
+    durations_ms: deque[float] = field(default_factory=lambda: deque(maxlen=500))
     latest_snapshot_id: str | None = None
 
     def snapshot(self) -> dict[str, object]:

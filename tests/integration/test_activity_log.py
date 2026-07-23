@@ -27,6 +27,10 @@ class PoolSwept(Event):
     pass
 
 
+class CycleCompleted(Event):
+    pass
+
+
 @pytest.mark.asyncio
 async def test_same_type_same_correlation_burst_merges_into_one_entry_with_a_count() -> None:
     bus = InMemoryEventBus()
@@ -118,5 +122,26 @@ async def test_subscriber_queue_receives_the_merged_entry_not_every_individual_e
     merged = await asyncio.wait_for(queue.get(), timeout=1)
     assert merged.type == "PoolSwept" and merged.count == 10
     assert queue.qsize() <= 1  # only the PoolCreated (or nothing yet) remains queued
+    log.unsubscribe(key)
+    log.stop()
+
+
+@pytest.mark.asyncio
+async def test_slow_client_queue_stays_bounded_and_keeps_new_terminal_event() -> None:
+    bus = InMemoryEventBus()
+    log = PipelineActivityLog(bus, capacity=3, queue_capacity=2)
+    log.start()
+    key, queue = log.subscribe()
+    await bus.publish(PoolCreated(correlation_id=uuid4(), source="liquidity", payload={"n": 1}))
+    await bus.publish(PoolSwept(correlation_id=uuid4(), source="liquidity", payload={"n": 2}))
+    await bus.publish(CycleCompleted(correlation_id=uuid4(), source="integration", payload={"terminal": True}))
+    log.snapshot()  # flush the terminal event
+
+    retained = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert queue.qsize() == 0
+    assert len(retained) <= 2
+    assert retained[-1].type == "CycleCompleted"
+    assert log.metrics()["dropped_client_events"] >= 1
+    assert log.metrics()["entries"] <= 3
     log.unsubscribe(key)
     log.stop()

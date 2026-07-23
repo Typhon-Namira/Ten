@@ -50,7 +50,7 @@ class MarketDataCache:
                     expires = datetime.fromisoformat(payload["expires"])
                     if expires > datetime.now(UTC):
                         candles = [Candle.model_validate(item) for item in payload["candles"]]
-                        self._memory[key] = (expires, candles)
+                        self._store_memory(key, expires, candles)
                         self.statistics.hits += 1
                         return list(candles)
                     path.unlink(missing_ok=True)
@@ -62,11 +62,7 @@ class MarketDataCache:
     async def set(self, key: str, candles: list[Candle], ttl_seconds: int) -> None:
         expires = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
         async with self._lock:
-            self._memory[key] = (expires, list(candles))
-            self._memory.move_to_end(key)
-            while len(self._memory) > self.max_entries:
-                self._memory.popitem(last=False)
-                self.statistics.evictions += 1
+            self._store_memory(key, expires, candles)
             payload = {"expires": expires.isoformat(), "candles": [item.model_dump(mode="json") for item in candles]}
             self._path(key).write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
             self.statistics.writes += 1
@@ -84,6 +80,23 @@ class MarketDataCache:
 
     def _path(self, key: str) -> Path:
         return self.directory / f"{self._safe(key)}.json"
+
+    def _store_memory(self, key: str, expires: datetime, candles: list[Candle]) -> None:
+        self._memory[key] = (expires, list(candles))
+        self._memory.move_to_end(key)
+        while len(self._memory) > self.max_entries:
+            self._memory.popitem(last=False)
+            self.statistics.evictions += 1
+
+    def metrics(self) -> dict[str, int | float]:
+        return {
+            "entries": len(self._memory),
+            "capacity": self.max_entries,
+            "evictions": self.statistics.evictions,
+            "hits": self.statistics.hits,
+            "misses": self.statistics.misses,
+            "hit_ratio": self.statistics.hit_ratio,
+        }
 
     @staticmethod
     def _safe(key: str) -> str:

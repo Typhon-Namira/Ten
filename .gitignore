@@ -20,6 +20,7 @@ frontend/.pnpm-store/
 htmlcov/
 node_modules/
 dist/
+work/
 *.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts

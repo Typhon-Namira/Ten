@@ -1,5 +1,6 @@
 """Single-source-of-truth facade for historical, realtime, replay, and state queries."""
 
+import asyncio
 import logging
 from collections import Counter
 from collections.abc import Callable
@@ -58,6 +59,14 @@ class MarketDataService:
         self.event_bus = event_bus or InMemoryEventBus()
         self.sync_status = SyncStatus.IDLE
         self.realtime_status = RealtimeStatus.STOPPED
+        self._poll_locks: dict[tuple[str, Timeframe], asyncio.Lock] = {}
+        self.poll_metrics = {
+            "attempts": 0,
+            "new_closed_candles": 0,
+            "duplicate_responses": 0,
+            "corrected_responses": 0,
+            "persistence_writes": 0,
+        }
 
     async def history(self, symbol: str, timeframe: Timeframe, *, start: datetime | None = None, end: datetime | None = None, limit: int = 500, refresh: bool = False) -> list[Candle]:
         symbol = canonical_symbol(symbol)
@@ -127,14 +136,51 @@ class MarketDataService:
             stored = await self.repository.history(symbol, timeframe, limit=1)
             if stored:
                 return stored[-1]
-        self.realtime_status = RealtimeStatus.POLLING
-        candle = await self.manager.latest(symbol, timeframe)
-        normalized = self.validator.validate([candle]).candles[-1]
-        await self.repository.append_realtime(normalized)
-        await self.cache.set(key, [normalized], self.config.cache.realtime_ttl_seconds)
-        await self.event_bus.publish(NewCandle(correlation_id=uuid4(), source="market_data", payload=normalized.model_dump(mode="json")))
-        await self.event_bus.publish(RealtimeUpdated(correlation_id=uuid4(), source="market_data", payload={"symbol": symbol, "timeframe": timeframe.value}))
-        return normalized
+        lock = self._poll_locks.setdefault((symbol, timeframe), asyncio.Lock())
+        async with lock:
+            self.realtime_status = RealtimeStatus.POLLING
+            self.poll_metrics["attempts"] += 1
+            candle = await self.manager.latest(symbol, timeframe)
+            normalized = self.validator.validate([candle]).candles[-1]
+            previous = await self.repository.candle_at(symbol, timeframe, normalized.timestamp)
+            same_identity = previous is not None and previous.timestamp == normalized.timestamp
+            if previous is not None and same_identity and self._same_market_values(previous, normalized):
+                self.poll_metrics["duplicate_responses"] += 1
+                return previous
+            newly_closed = [normalized]
+            if previous is not None and previous.timestamp + timeframe.duration < normalized.timestamp:
+                gap_size = int((normalized.timestamp - previous.timestamp) / timeframe.duration)
+                recovered = await self.manager.history(
+                    ProviderRequest(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        start=previous.timestamp + timeframe.duration,
+                        end=normalized.timestamp,
+                        limit=max(1, min(gap_size, 100_000)),
+                    )
+                )
+                recovered_report = self.validator.validate(recovered)
+                by_timestamp = {item.timestamp: item for item in recovered_report.candles if previous.timestamp < item.timestamp <= normalized.timestamp}
+                by_timestamp[normalized.timestamp] = normalized
+                newly_closed = [by_timestamp[timestamp] for timestamp in sorted(by_timestamp)]
+                historical_only = newly_closed[:-1]
+                if historical_only:
+                    await self.repository.upsert_historical(historical_only)
+                    self.poll_metrics["persistence_writes"] += len(historical_only)
+            await self.repository.append_realtime(normalized)
+            self.poll_metrics["persistence_writes"] += 1
+            await self.cache.invalidate(self._key("history", symbol, timeframe))
+            await self.cache.set(key, [normalized], self.config.cache.realtime_ttl_seconds)
+            if same_identity:
+                self.poll_metrics["corrected_responses"] += 1
+            else:
+                self.poll_metrics["new_closed_candles"] += len(newly_closed)
+                for closed in newly_closed:
+                    await self.event_bus.publish(NewCandle(correlation_id=uuid4(), source="market_data", payload=closed.model_dump(mode="json")))
+            await self.event_bus.publish(
+                RealtimeUpdated(correlation_id=uuid4(), source="market_data", payload={"symbol": symbol, "timeframe": timeframe.value})
+            )
+            return normalized
 
     async def replay(self, symbol: str, timeframe: Timeframe, at: datetime, *, limit: int = 500) -> list[Candle]:
         return await self.repository.history(symbol, timeframe, end=at, limit=limit)
@@ -232,6 +278,12 @@ class MarketDataService:
     @staticmethod
     def _key(kind: str, symbol: str, timeframe: Timeframe, start: datetime | None = None, end: datetime | None = None, limit: int | None = None) -> str:
         return ":".join((kind, symbol, timeframe.value, start.isoformat() if start else "", end.isoformat() if end else "", str(limit or "")))
+
+    @staticmethod
+    def _same_market_values(left: Candle, right: Candle) -> bool:
+        """Ignore fetch-time metadata while preserving exact canonical market values."""
+        fields = ("symbol", "timeframe", "timestamp", "open", "high", "low", "close", "volume", "spread", "provider", "quality_score", "quality_level")
+        return all(getattr(left, field) == getattr(right, field) for field in fields)
 
 
 #: Keyless public-source providers — constructed with no API key and no env var lookup at all.

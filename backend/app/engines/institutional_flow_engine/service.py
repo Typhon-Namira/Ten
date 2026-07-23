@@ -3,6 +3,7 @@ from time import perf_counter
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from backend.app.core.bounded import BoundedSet
 from backend.app.engines.market_data_engine import MarketDataService, Timeframe
 from backend.app.events import Event, EventBus
 from backend.app.features import FeatureRecord, FeatureStore
@@ -101,7 +102,7 @@ class InstitutionalFlowService:
         self.repository_mode = repository_mode
         self.analyzer = BaselineInstitutionalFlowAnalyzer(self.config)
         self.metrics = InstitutionalFlowMetrics()
-        self._published: set[UUID] = set()
+        self._published = BoundedSet[UUID](10_000)
         self._recovered: dict[tuple[str, Timeframe], InstitutionalFlowAnalysisSnapshot] = {}
         self.recovery_status = "not_attempted"
 

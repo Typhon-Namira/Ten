@@ -449,6 +449,30 @@ async def test_service_poll_duplicate_publication_same_identity_and_corrupt_rest
 
 
 @pytest.mark.asyncio
+async def test_calendar_uses_hourly_normal_and_adaptive_high_impact_refresh() -> None:
+    near = EconomicCalendarService(
+        InMemoryEventBus(), InMemoryFeatureStore(), config(), providers=(InMemoryProvider("p", (raw(),)),), clock=FixedClock(NOW)
+    )
+    await near.restore()
+    near_snapshot = await near.synchronize(NOW - timedelta(days=1), NOW + timedelta(days=1))
+    assert near.config.processing.polling_interval_seconds == 3600
+    assert near._next_sync_delay(near_snapshot, NOW) == near.config.processing.adaptive_refresh_seconds == 300
+    assert near.metrics.relevant_upcoming_event is not None
+
+    far = EconomicCalendarService(
+        InMemoryEventBus(),
+        InMemoryFeatureStore(),
+        config(),
+        providers=(InMemoryProvider("p", (raw(scheduled_at=(NOW + timedelta(days=1)).isoformat()),)),),
+        clock=FixedClock(NOW),
+    )
+    await far.restore()
+    far_snapshot = await far.synchronize(NOW - timedelta(days=1), NOW + timedelta(days=2))
+    assert far._next_sync_delay(far_snapshot, NOW) == 3600
+    assert far.metrics.relevant_upcoming_event is None
+
+
+@pytest.mark.asyncio
 async def test_recovery_and_replay_failure_branches() -> None:
     repository = InMemoryEconomicCalendarRepository()
     state: dict[str, Any] = {"identity": {}}

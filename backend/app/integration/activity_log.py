@@ -54,13 +54,19 @@ class PipelineActivityLog:
     """Bounded ring buffer of recent events plus live fan-out to subscribed queues (for SSE)."""
 
     def __init__(self, event_bus: EventBus, *, capacity: int = 500, queue_capacity: int = 500) -> None:
+        if capacity < 1 or queue_capacity < 1:
+            raise ValueError("activity-log capacities must be positive")
         self._event_bus = event_bus
+        self._capacity = capacity
         self._queue_capacity = queue_capacity
         self._entries: deque[ActivityLogEntry] = deque(maxlen=capacity)
         self._subscribers: dict[int, asyncio.Queue[ActivityLogEntry]] = {}
         self._unsubscribe: Callable[[], None] | None = None
         self._pending: ActivityLogEntry | None = None
         self._flush_timer: asyncio.TimerHandle | None = None
+        self.evictions = 0
+        self.dropped_client_events = 0
+        self.coalesced_events = 0
 
     def start(self) -> None:
         if self._unsubscribe is None:
@@ -87,6 +93,8 @@ class PipelineActivityLog:
             return
         entry = self._pending
         self._pending = None
+        if len(self._entries) == self._capacity:
+            self.evictions += 1
         self._entries.append(entry)
         for queue in list(self._subscribers.values()):
             if queue.full():
@@ -94,6 +102,7 @@ class PipelineActivityLog:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
+                self.dropped_client_events += 1
             queue.put_nowait(entry)
 
     async def _on_event(self, event: Event) -> None:
@@ -112,6 +121,7 @@ class PipelineActivityLog:
             # reset here, so a long-running burst still flushes within `MERGE_WINDOW_SECONDS`
             # rather than being held open indefinitely by a steady trickle of matching events.
             self._pending = replace(entry, id=pending.id, occurred_at=pending.occurred_at, count=pending.count + 1)
+            self.coalesced_events += 1
             return
         self._flush_pending()
         self._pending = entry
@@ -133,3 +143,14 @@ class PipelineActivityLog:
 
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+    def metrics(self) -> dict[str, int]:
+        return {
+            "entries": len(self._entries),
+            "capacity": self._capacity,
+            "evictions": self.evictions,
+            "subscribers": len(self._subscribers),
+            "queue_capacity": self._queue_capacity,
+            "dropped_client_events": self.dropped_client_events,
+            "coalesced_events": self.coalesced_events,
+        }

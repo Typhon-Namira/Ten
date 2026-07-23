@@ -2,7 +2,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
@@ -33,11 +33,11 @@ class EventBus(ABC):
 class InMemoryEventBus(EventBus):
     """Process-local event bus with failure isolation and observable history."""
 
-    def __init__(self, capacity: int = 1000, handler_timeout_seconds: float = 30.0) -> None:
-        if capacity < 1 or handler_timeout_seconds <= 0:
+    def __init__(self, capacity: int = 1000, handler_timeout_seconds: float = 30.0, history_capacity: int = 1000) -> None:
+        if capacity < 1 or history_capacity < 1 or handler_timeout_seconds <= 0:
             raise ValueError("event bus capacity and timeout must be positive")
         self._handlers: dict[type[Event], list[EventHandler]] = defaultdict(list)
-        self._history: list[Event] = []
+        self._history: deque[Event] = deque(maxlen=history_capacity)
         self._lock = asyncio.Lock()
         self._capacity = asyncio.Semaphore(capacity)
         self._inflight: set[asyncio.Future[None]] = set()
@@ -45,6 +45,7 @@ class InMemoryEventBus(EventBus):
         self._closed = False
         self.published_total = 0
         self.failed_total = 0
+        self.history_evictions = 0
 
     def subscribe(self, event_type: type[EventT], handler: EventHandler) -> Callable[[], None]:
         handlers = self._handlers[event_type]
@@ -61,6 +62,8 @@ class InMemoryEventBus(EventBus):
             raise RuntimeError("event bus is closed")
         async with self._capacity:
             async with self._lock:
+                if len(self._history) == self._history.maxlen:
+                    self.history_evictions += 1
                 self._history.append(event)
                 self.published_total += 1
                 handlers = [handler for event_type, registered in self._handlers.items() if isinstance(event, event_type) for handler in registered]
@@ -85,7 +88,15 @@ class InMemoryEventBus(EventBus):
         await self.drain()
 
     def metrics(self) -> dict[str, int | bool]:
-        return {"published_total": self.published_total, "failed_total": self.failed_total, "inflight": len(self._inflight), "closed": self._closed}
+        return {
+            "published_total": self.published_total,
+            "failed_total": self.failed_total,
+            "inflight": len(self._inflight),
+            "retained": len(self._history),
+            "history_capacity": self._history.maxlen or 0,
+            "history_evictions": self.history_evictions,
+            "closed": self._closed,
+        }
 
     def history(self) -> tuple[Event, ...]:
         return tuple(self._history)
