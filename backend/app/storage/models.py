@@ -760,3 +760,108 @@ class IntegrationDataQualityIssueRecord(Base):
     status: Mapped[str] = mapped_column(String(24), index=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class MarketEvidenceFrameRecord(Base):
+    """Full pre-normalization engine outputs for one closed timeframe candle."""
+
+    __tablename__ = "market_evidence_frames"
+    __table_args__ = (
+        Index("ux_market_evidence_frames_hash", "frame_hash", unique=True),
+        Index("ix_market_evidence_frames_series_boundary", "instrument", "timeframe", "candle_close_at"),
+    )
+
+    frame_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    frame_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    candle_close_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    knowledge_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class UnifiedMarketStateRecord(Base):
+    """Immutable, synchronized M1/M5/M15 state for an AI-centric shadow cycle."""
+
+    __tablename__ = "unified_market_states"
+    __table_args__ = (
+        Index("ux_unified_market_states_hash", "state_hash", unique=True),
+        Index("ix_unified_market_states_series_boundary", "instrument", "market_data_boundary"),
+    )
+
+    state_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    trigger_timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    market_data_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    knowledge_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class UnifiedMarketStateTimeframeRecord(Base):
+    """The exact evidence frame selected for one timeframe in a market state."""
+
+    __tablename__ = "unified_market_state_timeframes"
+    __table_args__ = (Index("ix_unified_market_state_timeframes_frame", "frame_id"),)
+
+    state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    timeframe: Mapped[str] = mapped_column(String(16), primary_key=True)
+    frame_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("market_evidence_frames.frame_id", ondelete="RESTRICT"),
+    )
+    source_candle_close_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expected_candle_close_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    stale: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class EvidenceItemRecord(Base):
+    """State-specific evidence preserving the complete raw analytical output."""
+
+    __tablename__ = "evidence_items"
+    __table_args__ = (
+        Index("ix_evidence_items_engine_timeframe", "source_engine", "source_timeframe"),
+        Index("ix_evidence_items_availability_time", "availability", "available_at"),
+    )
+
+    evidence_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    source_frame_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("market_evidence_frames.frame_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    source_engine: Mapped[str] = mapped_column(String(64), index=True)
+    source_timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    availability: Mapped[str] = mapped_column(String(32), index=True)
+    source_candle_close_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class UnifiedMarketStateEvidenceLinkRecord(Base):
+    """Ordered many-to-many relationship between states and evidence items."""
+
+    __tablename__ = "unified_market_state_evidence_links"
+    __table_args__ = (
+        Index("ux_unified_market_state_evidence_ordinal", "state_id", "ordinal", unique=True),
+        Index("ix_unified_market_state_evidence_item", "evidence_id"),
+    )
+
+    state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    evidence_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("evidence_items.evidence_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)

@@ -15,6 +15,11 @@ class FeatureFlag(StrEnum):
     ENABLE_REPLAY = "EnableReplay"
     ENABLE_MARKET_REGIME = "EnableMarketRegime"
     ENABLE_DASHBOARD_MODULES = "EnableDashboardModules"
+    AI_CENTRIC_SHADOW_MODE = "ai_centric_shadow_mode"
+    AI_SIGNAL_PROPOSALS = "ai_signal_proposals"
+    AI_SIGNAL_MONITORING = "ai_signal_monitoring"
+    AI_SIGNAL_PUBLICATION = "ai_signal_publication"
+    AI_SIGNAL_ADJUSTMENTS = "ai_signal_adjustments"
 
 
 class FeatureFlagSettings(BaseModel):

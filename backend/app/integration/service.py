@@ -38,7 +38,7 @@ def _stage_status(result: object) -> str:
 class FullSystemIntegrationService:
     """Coordinates existing engines at a final-candle boundary; contains no analytics."""
 
-    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None) -> None:
+    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
         self.event_bus, self.repository, self.config = event_bus, repository, config
         self.market_data, self.smc, self.liquidity = market_data, smc, liquidity
         self.volume_profile, self.institutional_flow = volume_profile, institutional_flow
@@ -47,6 +47,8 @@ class FullSystemIntegrationService:
         self.repository_mode = repository_mode
         self.clock = clock or (lambda: datetime.now(UTC))
         self.stage_tracker = stage_tracker
+        self.unified_market_state = unified_market_state
+        self.ai_centric_shadow_mode = ai_centric_shadow_mode
         self._unsubscribe: Callable[[], None] | None = None
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self.started = False
@@ -192,6 +194,13 @@ class FullSystemIntegrationService:
             elif tracker is not None:
                 tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis", "liquidity_analysis", "volume_profile", "institutional_flow", "market_regime"), "skipped")
             outputs.append(("economic_calendar", await self.economic_calendar.context(symbol, as_of=boundary)))
+            if self.ai_centric_shadow_mode and self.unified_market_state is not None:
+                # Phase 1 is observational only.  A shadow-state capture failure is logged but can
+                # never change legacy scoring, decision gates, or signal publication.
+                try:
+                    await self.unified_market_state.capture_cycle(envelope, dict(outputs))
+                except Exception:
+                    logger.exception("unified_market_state.shadow_capture_failed", extra=log_context)
             evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]
             for name, value in outputs:
                 identifier = next((getattr(value, key) for key in ("snapshot_id", "id", "context_id") if getattr(value, key, None) is not None), semantic_uuid(name, envelope.event_id))
