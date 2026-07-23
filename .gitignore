@@ -11,6 +11,7 @@ __pycache__/
 .pytest-institutional-flow-*/
 .pytest-market-regime-*/
 .pytest-economic-calendar*/
+.pytest-audit-*/
 frontend/.local_modules/
 frontend/.pnpm-store/
 .pnpm-store/

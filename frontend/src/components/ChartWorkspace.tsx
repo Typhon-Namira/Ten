@@ -81,7 +81,6 @@ export function ChartWorkspace({ instrument, defaultTimeframe }: { instrument: s
       hasFitRef.current = false
     }
     // Chart instance is created once per mount; re-created only if the workspace itself remounts.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Candle + volume data — refreshed on every poll, but the view is only auto-fit once so the

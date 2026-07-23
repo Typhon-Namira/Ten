@@ -7,17 +7,15 @@ export type StreamStatus = 'connecting' | 'open' | 'closed'
 const MAX_ENTRIES = 200
 
 export function useEventStream() {
-  const [status, setStatus] = useState<StreamStatus>('connecting')
+  const [status, setStatus] = useState<StreamStatus>(() =>
+    typeof window !== 'undefined' && typeof window.EventSource !== 'undefined' ? 'connecting' : 'closed',
+  )
   const [events, setEvents] = useState<ActivityEvent[]>([])
   const seen = useRef<Set<string>>(new Set())
 
   useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
-      setStatus('closed')
-      return
-    }
+    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') return
     const source = new EventSource(STREAM_URL)
-    setStatus('connecting')
     source.onopen = () => setStatus('open')
     source.onerror = () => setStatus(source.readyState === EventSource.CONNECTING ? 'connecting' : 'closed')
     source.onmessage = (message) => {

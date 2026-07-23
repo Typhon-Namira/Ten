@@ -145,7 +145,7 @@ class InMemoryEconomicCalendarRepository(EconomicCalendarRepository):
     async def save_revision(self, revision: EconomicEventRevision) -> None:
         async with self._lock:
             values = self._revisions.setdefault(revision.event_id, [])
-            if not any(item.revision_id == revision.revision_id for item in values):
+            if not any(item.revision_number == revision.revision_number for item in values):
                 values.append(revision)
                 values.sort(key=lambda item: item.revision_number)
 
@@ -356,7 +356,7 @@ class SqlAlchemyEconomicCalendarRepository(EconomicCalendarRepository, ScopedSes
                     payload_hash=revision.payload_hash,
                     payload=revision.model_dump(mode="json"),
                 )
-                .on_conflict_do_nothing(index_elements=["id"])
+                .on_conflict_do_nothing(index_elements=["event_id", "revision_number"])
             )
             await self.session.commit()
         except Exception:

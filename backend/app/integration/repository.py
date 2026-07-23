@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from typing import Protocol
-from datetime import UTC, datetime
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
-from sqlalchemy import literal, select, update
+from sqlalchemy import literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import IntegrationDataQualityIssueRecord, IntegrationEventRecord, IntegrationEventTraceRecord, IntegrationOutboxRecord, IntegrationProcessedEventRecord, IntegrationSnapshotRecord, OperationalSignalRecord
+from backend.app.storage.logical_identity import returned_identity
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import CanonicalEventEnvelope, DataQualityIssue, IntegrationSnapshot, IntegrationTraceRecord, OperationalSignal, OutboxItem, semantic_uuid
@@ -20,6 +21,7 @@ class IntegrationRepository(Protocol):
     async def persist_event(self, envelope: CanonicalEventEnvelope) -> None: ...
     async def enqueue(self, envelope: CanonicalEventEnvelope) -> OutboxItem: ...
     async def pending(self, now: datetime, limit: int) -> tuple[OutboxItem, ...]: ...
+    async def oldest_pending(self) -> OutboxItem | None: ...
     async def complete(self, outbox_id: UUID, now: datetime) -> None: ...
     async def fail(self, outbox_id: UUID, code: str) -> None: ...
     async def processed(self, event_id: str) -> bool: ...
@@ -50,6 +52,7 @@ class InMemoryIntegrationRepository:
         self._limit = limit
         self._events: dict[str, CanonicalEventEnvelope] = {}
         self._outbox: dict[UUID, OutboxItem] = {}
+        self._outbox_leases: dict[UUID, datetime] = {}
         self._processed: set[str] = set()
         self._snapshots: dict[UUID, IntegrationSnapshot] = {}
         self._signals: dict[UUID, OperationalSignal] = {}
@@ -76,18 +79,42 @@ class InMemoryIntegrationRepository:
 
     async def pending(self, now: datetime, limit: int) -> tuple[OutboxItem, ...]:
         async with self._lock:
-            values = [item for item in self._outbox.values() if item.published_at is None and item.available_at <= now]
-        return tuple(sorted(values, key=lambda item: (item.available_at, str(item.outbox_id)))[:limit])
+            values = [
+                item
+                for item in self._outbox.values()
+                if item.published_at is None
+                and item.available_at <= now
+                and self._outbox_leases.get(item.outbox_id, now) <= now
+            ]
+            claimed = tuple(sorted(values, key=lambda item: (item.available_at, str(item.outbox_id)))[:limit])
+            lease_expires_at = now + timedelta(minutes=15)
+            for item in claimed:
+                self._outbox_leases[item.outbox_id] = lease_expires_at
+            return claimed
+
+    async def oldest_pending(self) -> OutboxItem | None:
+        async with self._lock:
+            values = [item for item in self._outbox.values() if item.published_at is None]
+            return min(values, key=lambda item: (item.available_at, str(item.outbox_id)), default=None)
 
     async def complete(self, outbox_id: UUID, now: datetime) -> None:
         async with self._lock:
             item = self._outbox[outbox_id]
             self._outbox[outbox_id] = item.model_copy(update={"published_at": now})
+            self._outbox_leases.pop(outbox_id, None)
 
     async def fail(self, outbox_id: UUID, code: str) -> None:
         async with self._lock:
             item = self._outbox[outbox_id]
-            self._outbox[outbox_id] = item.model_copy(update={"attempts": item.attempts + 1, "last_error_code": code})
+            delay_seconds = min(2 ** min(item.attempts, 8), 300)
+            self._outbox[outbox_id] = item.model_copy(
+                update={
+                    "attempts": item.attempts + 1,
+                    "last_error_code": code,
+                    "available_at": datetime.now(UTC) + timedelta(seconds=delay_seconds),
+                }
+            )
+            self._outbox_leases.pop(outbox_id, None)
 
     async def processed(self, event_id: str) -> bool:
         async with self._lock:
@@ -152,6 +179,8 @@ class InMemoryIntegrationRepository:
 class SqlAlchemyIntegrationRepository(ScopedSessionRepository):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         ScopedSessionRepository.__init__(self, session_factory)
+        self._worker_identity = str(uuid4())
+        self._lease_duration = timedelta(minutes=15)
         self._metrics = {"events": 0, "outbox_backlog": 0, "processed": 0, "snapshots": 0, "signals": 0, "quality_issues": 0}
 
     @scoped_session
@@ -201,24 +230,120 @@ class SqlAlchemyIntegrationRepository(ScopedSessionRepository):
 
     @scoped_session
     async def pending(self, now: datetime, limit: int) -> tuple[OutboxItem, ...]:
-        query = select(IntegrationOutboxRecord, IntegrationEventRecord).join(IntegrationEventRecord, IntegrationEventRecord.event_id == IntegrationOutboxRecord.event_id).where(IntegrationOutboxRecord.published_at.is_(None), IntegrationOutboxRecord.available_at <= now).order_by(IntegrationOutboxRecord.available_at).limit(limit)
-        rows = (await self.session.execute(query)).all()
-        return tuple(OutboxItem(outbox_id=outbox.outbox_id, envelope=CanonicalEventEnvelope.model_validate(event.payload), available_at=outbox.available_at, attempts=outbox.attempts, published_at=outbox.published_at, last_error_code=outbox.last_error_code) for outbox, event in rows)
+        try:
+            eligible = (
+                select(IntegrationOutboxRecord.outbox_id)
+                .where(
+                    IntegrationOutboxRecord.published_at.is_(None),
+                    IntegrationOutboxRecord.available_at <= now,
+                    or_(
+                        IntegrationOutboxRecord.lease_expires_at.is_(None),
+                        IntegrationOutboxRecord.lease_expires_at <= now,
+                    ),
+                )
+                .order_by(IntegrationOutboxRecord.available_at, IntegrationOutboxRecord.outbox_id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            claimed_ids = tuple((await self.session.scalars(eligible)).all())
+            if not claimed_ids:
+                await self.session.commit()
+                return ()
+            await self.session.execute(
+                update(IntegrationOutboxRecord)
+                .where(IntegrationOutboxRecord.outbox_id.in_(claimed_ids))
+                .values(
+                    claimed_by=self._worker_identity,
+                    lease_expires_at=now + self._lease_duration,
+                )
+            )
+            query = (
+                select(IntegrationOutboxRecord, IntegrationEventRecord)
+                .join(IntegrationEventRecord, IntegrationEventRecord.event_id == IntegrationOutboxRecord.event_id)
+                .where(IntegrationOutboxRecord.outbox_id.in_(claimed_ids))
+                .order_by(IntegrationOutboxRecord.available_at, IntegrationOutboxRecord.outbox_id)
+            )
+            rows = (await self.session.execute(query)).all()
+            items = tuple(
+                OutboxItem(
+                    outbox_id=outbox.outbox_id,
+                    envelope=CanonicalEventEnvelope.model_validate(event.payload),
+                    available_at=outbox.available_at,
+                    attempts=outbox.attempts,
+                    published_at=outbox.published_at,
+                    last_error_code=outbox.last_error_code,
+                )
+                for outbox, event in rows
+            )
+            await self.session.commit()
+            return items
+        except Exception:
+            await self.session.rollback()
+            raise
+
+    @scoped_session
+    async def oldest_pending(self) -> OutboxItem | None:
+        query = (
+            select(IntegrationOutboxRecord, IntegrationEventRecord)
+            .join(IntegrationEventRecord, IntegrationEventRecord.event_id == IntegrationOutboxRecord.event_id)
+            .where(IntegrationOutboxRecord.published_at.is_(None))
+            .order_by(IntegrationOutboxRecord.available_at, IntegrationOutboxRecord.outbox_id)
+            .limit(1)
+        )
+        row = (await self.session.execute(query)).first()
+        if row is None:
+            return None
+        outbox, event = row
+        return OutboxItem(
+            outbox_id=outbox.outbox_id,
+            envelope=CanonicalEventEnvelope.model_validate(event.payload),
+            available_at=outbox.available_at,
+            attempts=outbox.attempts,
+            published_at=outbox.published_at,
+            last_error_code=outbox.last_error_code,
+        )
 
     @scoped_session
     async def complete(self, outbox_id: UUID, now: datetime) -> None:
         try:
-            await self.session.execute(update(IntegrationOutboxRecord).where(IntegrationOutboxRecord.outbox_id == outbox_id).values(published_at=now))
+            statement = (
+                update(IntegrationOutboxRecord)
+                .where(
+                    IntegrationOutboxRecord.outbox_id == outbox_id,
+                    IntegrationOutboxRecord.claimed_by == self._worker_identity,
+                )
+                .values(published_at=now, claimed_by=None, lease_expires_at=None)
+                .returning(IntegrationOutboxRecord.outbox_id)
+            )
+            completed = returned_identity(await self.session.execute(statement), outbox_id)
             await self.session.commit()
         except Exception:
             await self.session.rollback()
             raise
-        self._metrics["outbox_backlog"] = max(0, self._metrics["outbox_backlog"] - 1)
+        if completed is not None:
+            self._metrics["outbox_backlog"] = max(0, self._metrics["outbox_backlog"] - 1)
 
     @scoped_session
     async def fail(self, outbox_id: UUID, code: str) -> None:
         try:
-            await self.session.execute(update(IntegrationOutboxRecord).where(IntegrationOutboxRecord.outbox_id == outbox_id).values(attempts=IntegrationOutboxRecord.attempts + 1, last_error_code=code))
+            record = await self.session.get(IntegrationOutboxRecord, outbox_id)
+            if record is None or record.claimed_by != self._worker_identity:
+                return
+            delay_seconds = min(2 ** min(record.attempts, 8), 300)
+            await self.session.execute(
+                update(IntegrationOutboxRecord)
+                .where(
+                    IntegrationOutboxRecord.outbox_id == outbox_id,
+                    IntegrationOutboxRecord.claimed_by == self._worker_identity,
+                )
+                .values(
+                    attempts=IntegrationOutboxRecord.attempts + 1,
+                    last_error_code=code,
+                    available_at=datetime.now(UTC) + timedelta(seconds=delay_seconds),
+                    claimed_by=None,
+                    lease_expires_at=None,
+                )
+            )
             await self.session.commit()
         except Exception:
             await self.session.rollback()

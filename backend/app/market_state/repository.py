@@ -155,7 +155,7 @@ class SqlAlchemyUnifiedMarketStateRepository(ScopedSessionRepository):
                 await self.session.execute(
                     insert(UnifiedMarketStateEvidenceLinkRecord)
                     .values(state_id=value.state_id, evidence_id=evidence_item.evidence_id, ordinal=ordinal)
-                    .on_conflict_do_nothing(index_elements=["state_id", "evidence_id"])
+                    .on_conflict_do_nothing(index_elements=["state_id", "ordinal"])
                 )
             await self.session.commit()
         except Exception:

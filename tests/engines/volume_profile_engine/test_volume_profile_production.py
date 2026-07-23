@@ -285,6 +285,8 @@ async def test_memory_and_sql_repository_checkpoint_restart_and_corruption() -> 
     memory = InMemoryVolumeProfileRepository()
     await memory.save(snapshot)
     await memory.save(snapshot)
+    await memory.save(snapshot.model_copy(update={"id": uuid4()}))
+    await memory.save(snapshot.model_copy(update={"id": uuid4(), "engine_version": "divergent"}))
     assert await memory.latest("XAU/USD", Timeframe.M15) == snapshot
     assert await memory.at("XAUUSD", Timeframe.M15, snapshot.analysis_timestamp) == snapshot
     assert await memory.at("XAUUSD", Timeframe.H1, snapshot.analysis_timestamp) is None

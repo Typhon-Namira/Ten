@@ -257,9 +257,9 @@ async def performance(request: Request, instrument: str | None = None, timeframe
     # only true measure of "how long has this been waiting" — never leave it null while backlog > 0.
     queue_oldest_pending_age_seconds = None
     if integration_metrics.get("outbox_backlog"):
-        oldest_pending, _ = await safe_call(lambda: integration.repository.pending(now, 1))
-        if oldest_pending:
-            queue_oldest_pending_age_seconds = max(0.0, (now - oldest_pending[0].available_at).total_seconds())
+        oldest_pending, _ = await safe_call(integration.repository.oldest_pending)
+        if oldest_pending is not None:
+            queue_oldest_pending_age_seconds = max(0.0, (now - oldest_pending.available_at).total_seconds())
     # Database, cache, and provider are independent sources of truth that can legitimately
     # disagree (e.g. provider rate-limited but the database still serves the last good candle) —
     # reported separately rather than collapsed into one "market data" status.

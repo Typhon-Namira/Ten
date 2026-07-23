@@ -704,6 +704,8 @@ class IntegrationOutboxRecord(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     last_error_code: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class IntegrationProcessedEventRecord(Base):

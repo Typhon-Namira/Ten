@@ -11,9 +11,14 @@ export function useAnimatedNumber(target: number | null, durationMs = 500): numb
 
   useEffect(() => {
     if (target === null) {
-      setValue(null)
+      let active = true
+      queueMicrotask(() => {
+        if (active) setValue(null)
+      })
       fromRef.current = null
-      return
+      return () => {
+        active = false
+      }
     }
     const from = fromRef.current ?? target
     const start = performance.now()
@@ -32,7 +37,6 @@ export function useAnimatedNumber(target: number | null, durationMs = 500): numb
     return () => {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target, durationMs])
 
   return value

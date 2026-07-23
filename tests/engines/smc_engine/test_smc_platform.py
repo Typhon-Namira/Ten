@@ -134,6 +134,8 @@ async def test_repository_time_travel_is_idempotent(candles: list[Candle]) -> No
     snapshot = BaselineSMCAnalyzer().analyze_snapshot(candles, ProcessingMode.REPLAY)
     await repository.save(snapshot)
     await repository.save(snapshot)
+    await repository.save(snapshot.model_copy(update={"id": uuid4()}))
+    await repository.save(snapshot.model_copy(update={"id": uuid4(), "engine_version": "divergent"}))
     assert await repository.latest("XAU/USD", Timeframe.M15) == snapshot
     assert await repository.at("XAUUSD", Timeframe.M15, snapshot.analysis_timestamp) == snapshot
     assert await repository.at("XAUUSD", Timeframe.M15, snapshot.analysis_timestamp - timedelta(seconds=1)) is None

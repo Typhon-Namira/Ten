@@ -19,18 +19,25 @@ export function usePerformanceHistory(snapshot: PerformanceMetrics | null): Perf
 
   useEffect(() => {
     if (!snapshot) return
-    setHistory((previous) =>
-      [
-        ...previous,
-        {
-          pipelineLatency: snapshot.pipeline_latency_ms ?? snapshot.pipeline_in_flight_ms,
-          providerLatency: snapshot.provider.last_latency_ms,
-          queueLength: snapshot.queue_length,
-        },
-      ].slice(-MAX_POINTS),
-    )
+    let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      setHistory((previous) =>
+        [
+          ...previous,
+          {
+            pipelineLatency: snapshot.pipeline_latency_ms ?? snapshot.pipeline_in_flight_ms,
+            providerLatency: snapshot.provider.last_latency_ms,
+            queueLength: snapshot.queue_length,
+          },
+        ].slice(-MAX_POINTS),
+      )
+    })
     // Re-runs whenever the snapshot object identity changes, which happens on every poll cycle
     // in useLiveDashboard (each refresh sets new state) — no extra dedupe key needed.
+    return () => {
+      active = false
+    }
   }, [snapshot])
 
   return history

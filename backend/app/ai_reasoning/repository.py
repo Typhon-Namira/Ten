@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -93,8 +93,11 @@ class InMemoryAIReasoningRepository:
 
     async def save_forecast(self, value: AIMarketForecast) -> AIMarketForecast:
         async with self._lock:
-            self.forecasts[value.forecast_id] = value
-        return value
+            existing = self.forecasts.get(value.request_id)
+            if existing is not None:
+                return existing
+            self.forecasts[value.request_id] = value
+            return value
 
     async def save_proposal(self, value: AISignalProposal) -> AISignalProposal:
         async with self._lock:
@@ -123,8 +126,18 @@ class InMemoryAIReasoningRepository:
 
     async def save_signal(self, value: ManagedSignal) -> ManagedSignal:
         async with self._lock:
-            self.signals[value.signal_id] = value
-        return value
+            existing_key = next(
+                (key for key, item in self.signals.items() if item.structural_opportunity_key == value.structural_opportunity_key),
+                None,
+            )
+            if existing_key is not None:
+                existing = self.signals[existing_key]
+                if existing.signal_id != value.signal_id:
+                    return existing
+                self.signals[existing_key] = value
+                return value
+            self.signals[value.structural_opportunity_key] = value
+            return value
 
     async def save_transition(self, value: SignalStateTransition) -> SignalStateTransition:
         async with self._lock:
@@ -143,7 +156,7 @@ class InMemoryAIReasoningRepository:
 
     async def save_signal_outcome(self, value: SignalOutcome) -> SignalOutcome:
         async with self._lock:
-            self.outcomes[value.outcome_id] = value
+            self.outcomes[value.signal_id] = value
         return value
 
     async def append_memory(self, value: MarketMemoryEntry) -> MarketMemoryEntry:
@@ -220,7 +233,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
 
     @scoped_session
     async def save_forecast(self, value: AIMarketForecast) -> AIMarketForecast:
-        await self.session.execute(
+        statement = (
             insert(AIMarketForecastRecord)
             .values(
                 forecast_id=value.forecast_id,
@@ -233,23 +246,37 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 payload=value.model_dump(mode="json"),
                 generated_at=value.generated_at,
             )
-            .on_conflict_do_nothing(index_elements=["forecast_id"])
+            .on_conflict_do_nothing(index_elements=["request_id"])
+            .returning(AIMarketForecastRecord.forecast_id)
         )
-        for ordinal, scenario in enumerate(value.alternative_scenarios):
+        forecast_id = (await self.session.execute(statement)).scalar_one_or_none()
+        persisted = value
+        if forecast_id is None:
+            record = (
+                await self.session.scalars(
+                    select(AIMarketForecastRecord).where(AIMarketForecastRecord.request_id == value.request_id).limit(1)
+                )
+            ).first()
+            if record is None:
+                await self.session.rollback()
+                raise RuntimeError("AI forecast conflict did not resolve to a persisted row")
+            forecast_id = record.forecast_id
+            persisted = AIMarketForecast.model_validate(record.payload)
+        for ordinal, scenario in enumerate(persisted.alternative_scenarios):
             await self.session.execute(
                 insert(AIForecastScenarioRecord)
-                .values(forecast_id=value.forecast_id, ordinal=ordinal, scenario_name=scenario.name, payload=scenario.model_dump(mode="json"))
+                .values(forecast_id=forecast_id, ordinal=ordinal, scenario_name=scenario.name, payload=scenario.model_dump(mode="json"))
                 .on_conflict_do_nothing(index_elements=["forecast_id", "ordinal"])
             )
-        for role, evidence_ids in (("supporting", value.supporting_evidence_ids), ("contradicting", value.contradicting_evidence_ids)):
+        for role, evidence_ids in (("supporting", persisted.supporting_evidence_ids), ("contradicting", persisted.contradicting_evidence_ids)):
             for evidence_id in evidence_ids:
                 await self.session.execute(
                     insert(AIForecastEvidenceLinkRecord)
-                    .values(forecast_id=value.forecast_id, evidence_id=evidence_id, role=role)
+                    .values(forecast_id=forecast_id, evidence_id=evidence_id, role=role)
                     .on_conflict_do_nothing(index_elements=["forecast_id", "evidence_id", "role"])
                 )
         await self.session.commit()
-        return value
+        return persisted
 
     @scoped_session
     async def save_proposal(self, value: AISignalProposal) -> AISignalProposal:
@@ -300,7 +327,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
     @scoped_session
     async def save_signal(self, value: ManagedSignal) -> ManagedSignal:
         payload = value.model_dump(mode="json")
-        await self.session.execute(
+        statement = (
             insert(ManagedSignalRecord)
             .values(
                 signal_id=value.signal_id,
@@ -313,13 +340,37 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 payload=payload,
                 updated_at=value.updated_at,
             )
-            .on_conflict_do_update(
-                index_elements=["signal_id"],
-                set_={"state": value.state.value, "current_proposal_id": value.current_proposal_id, "payload": payload, "updated_at": value.updated_at},
-            )
+            .on_conflict_do_nothing(index_elements=["structural_opportunity_key"])
+            .returning(ManagedSignalRecord.payload)
         )
+        persisted_payload = (await self.session.execute(statement)).scalar_one_or_none()
+        if persisted_payload is None:
+            record = (
+                await self.session.scalars(
+                    select(ManagedSignalRecord)
+                    .where(ManagedSignalRecord.structural_opportunity_key == value.structural_opportunity_key)
+                    .limit(1)
+                )
+            ).first()
+            if record is None:
+                await self.session.rollback()
+                raise RuntimeError("managed-signal conflict did not resolve to a persisted row")
+            if record.signal_id != value.signal_id:
+                await self.session.commit()
+                return ManagedSignal.model_validate(record.payload)
+            await self.session.execute(
+                update(ManagedSignalRecord)
+                .where(ManagedSignalRecord.signal_id == value.signal_id)
+                .values(
+                    state=value.state.value,
+                    current_proposal_id=value.current_proposal_id,
+                    payload=payload,
+                    updated_at=value.updated_at,
+                )
+            )
+            persisted_payload = payload
         await self.session.commit()
-        return value
+        return ManagedSignal.model_validate(persisted_payload)
 
     async def _save_simple(self, record_type: type, values: dict[str, object], conflict: str) -> None:
         await self.session.execute(insert(record_type).values(**values).on_conflict_do_nothing(index_elements=[conflict]))
@@ -342,7 +393,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
 
     @scoped_session
     async def save_signal_outcome(self, value: SignalOutcome) -> SignalOutcome:
-        await self._save_simple(ManagedSignalOutcomeRecord, {"outcome_id": value.outcome_id, "signal_id": value.signal_id, "final_state": value.final_state.value, "payload": value.model_dump(mode="json"), "closed_at": value.closed_at}, "outcome_id")
+        await self._save_simple(ManagedSignalOutcomeRecord, {"outcome_id": value.outcome_id, "signal_id": value.signal_id, "final_state": value.final_state.value, "payload": value.model_dump(mode="json"), "closed_at": value.closed_at}, "signal_id")
         return value
 
     @scoped_session

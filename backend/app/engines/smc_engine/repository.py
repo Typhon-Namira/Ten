@@ -16,6 +16,7 @@ from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
 from backend.app.storage.models import SMCAnalysisSnapshotRecord, SMCCheckpointRecord, SMCObjectRecord
 from backend.app.storage.batching import DEFAULT_BIND_PARAMETER_BUDGET, bounded_insert_chunks, maximum_rows_per_insert
+from backend.app.storage.logical_identity import analytical_snapshot_boundary, ensure_analytical_determinism, returned_identity
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .models import SMCAnalysisSnapshot, stable_id
@@ -57,18 +58,21 @@ class SMCRepository(ABC):
 class InMemorySMCRepository(SMCRepository):
     def __init__(self) -> None:
         self._snapshots: dict[tuple[str, Timeframe], list[SMCAnalysisSnapshot]] = {}
-        self._ids: set[object] = set()
+        self._boundaries: dict[tuple[str, ...], SMCAnalysisSnapshot] = {}
         self._lock = asyncio.Lock()
 
     async def save(self, snapshot: SMCAnalysisSnapshot, *, correlation_id: UUID | None = None) -> None:
         async with self._lock:
-            if snapshot.id in self._ids:
+            boundary = analytical_snapshot_boundary(snapshot, include_processing_mode=True)
+            existing = self._boundaries.get(boundary)
+            if existing is not None:
+                ensure_analytical_determinism(existing, snapshot, entity_type="smc_analysis_snapshot", include_processing_mode=True)
                 return
             key = (canonical_symbol(snapshot.symbol), snapshot.timeframe)
             items = self._snapshots.setdefault(key, [])
             items.append(snapshot)
             items.sort(key=lambda item: item.analysis_timestamp)
-            self._ids.add(snapshot.id)
+            self._boundaries[boundary] = snapshot
 
     async def latest(self, symbol: str, timeframe: Timeframe) -> SMCAnalysisSnapshot | None:
         async with self._lock:
@@ -120,7 +124,43 @@ class SqlAlchemySMCRepository(SMCRepository, ScopedSessionRepository):
         }
         logger.info("smc.persistence.started", extra=context)
         try:
-            await self.session.execute(insert(SMCAnalysisSnapshotRecord).values(values).on_conflict_do_nothing(index_elements=["id"]))
+            insert_result = await self.session.execute(
+                insert(SMCAnalysisSnapshotRecord)
+                .values(values)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        SMCAnalysisSnapshotRecord.symbol,
+                        SMCAnalysisSnapshotRecord.timeframe,
+                        SMCAnalysisSnapshotRecord.analysis_timestamp,
+                        SMCAnalysisSnapshotRecord.configuration_version,
+                        SMCAnalysisSnapshotRecord.processing_mode,
+                    ]
+                )
+                .returning(SMCAnalysisSnapshotRecord.id)
+            )
+            inserted_id = returned_identity(insert_result, snapshot.id)
+            persisted_snapshot = snapshot
+            if inserted_id is None:
+                persisted_record = (
+                    await self.session.scalars(
+                        select(SMCAnalysisSnapshotRecord).where(
+                            SMCAnalysisSnapshotRecord.symbol == canonical_symbol(snapshot.symbol),
+                            SMCAnalysisSnapshotRecord.timeframe == snapshot.timeframe.value,
+                            SMCAnalysisSnapshotRecord.analysis_timestamp == snapshot.analysis_timestamp,
+                            SMCAnalysisSnapshotRecord.configuration_version == snapshot.configuration_version,
+                            SMCAnalysisSnapshotRecord.processing_mode == snapshot.processing_mode.value,
+                        )
+                    )
+                ).first()
+                if persisted_record is None:
+                    raise RuntimeError("SMC snapshot insert did not resolve a canonical row")
+                persisted_snapshot = SMCAnalysisSnapshot.model_validate(persisted_record.payload)
+            ensure_analytical_determinism(
+                persisted_snapshot,
+                snapshot,
+                entity_type="smc_analysis_snapshot",
+                include_processing_mode=True,
+            )
             for chunk_index, chunk in enumerate(chunks, start=1):
                 chunk_context = {**context, "chunk_index": chunk_index, "chunk_size": len(chunk)}
                 chunk_inserted = 0
@@ -138,7 +178,7 @@ class SqlAlchemySMCRepository(SMCRepository, ScopedSessionRepository):
                     logger.exception("smc.persistence.chunk.failed", extra={**chunk_context, "exception_type": type(exc).__name__})
                     raise
                 logger.info("smc.persistence.chunk.completed", extra={**chunk_context, "inserted_objects": chunk_inserted, "skipped_objects": len(chunk) - chunk_inserted, "duration_ms": (perf_counter() - started) * 1000})
-            checkpoint = {"symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "configuration_version": snapshot.configuration_version, "snapshot_id": snapshot.id, "last_processed_candle": snapshot.analysis_timestamp, "state_payload": snapshot.model_dump(mode="json"), "updated_at": snapshot.created_at}
+            checkpoint = {"symbol": canonical_symbol(snapshot.symbol), "timeframe": snapshot.timeframe.value, "configuration_version": snapshot.configuration_version, "snapshot_id": persisted_snapshot.id, "last_processed_candle": persisted_snapshot.analysis_timestamp, "state_payload": persisted_snapshot.model_dump(mode="json"), "updated_at": persisted_snapshot.created_at}
             statement = insert(SMCCheckpointRecord).values(checkpoint)
             await self.session.execute(statement.on_conflict_do_update(index_elements=["symbol", "timeframe", "configuration_version"], set_={name: getattr(statement.excluded, name) for name in ("snapshot_id", "last_processed_candle", "state_payload", "updated_at")}))
             await self.session.commit()

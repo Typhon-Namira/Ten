@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
 from backend.app.storage.batching import bounded_insert_chunks
+from backend.app.storage.logical_identity import analytical_snapshot_boundary, ensure_analytical_determinism, returned_identity
 from backend.app.storage.models import LiquidityCheckpointRecord, LiquidityObjectRecord, LiquiditySnapshotRecord
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
@@ -30,17 +31,20 @@ class LiquidityRepository(ABC):
 class InMemoryLiquidityRepository(LiquidityRepository):
     def __init__(self) -> None:
         self._items: dict[tuple[str, Timeframe], list[LiquidityAnalysisSnapshot]] = {}
-        self._ids: set[object] = set()
+        self._boundaries: dict[tuple[str, ...], LiquidityAnalysisSnapshot] = {}
         self._lock = asyncio.Lock()
 
     async def save(self, snapshot: LiquidityAnalysisSnapshot) -> None:
         async with self._lock:
-            if snapshot.id in self._ids:
+            boundary = analytical_snapshot_boundary(snapshot, include_processing_mode=True)
+            existing = self._boundaries.get(boundary)
+            if existing is not None:
+                ensure_analytical_determinism(existing, snapshot, entity_type="liquidity_snapshot", include_processing_mode=True)
                 return
             items = self._items.setdefault((canonical_symbol(snapshot.symbol), snapshot.timeframe), [])
             items.append(snapshot)
             items.sort(key=lambda x: x.analysis_timestamp)
-            self._ids.add(snapshot.id)
+            self._boundaries[boundary] = snapshot
 
     async def latest(self, symbol: str, timeframe: Timeframe) -> LiquidityAnalysisSnapshot | None:
         async with self._lock:
@@ -71,7 +75,7 @@ class SqlAlchemyLiquidityRepository(LiquidityRepository, ScopedSessionRepository
             raise
 
     async def _save(self, snapshot: LiquidityAnalysisSnapshot, payload: dict) -> None:
-        await self.session.execute(
+        insert_result = await self.session.execute(
             insert(LiquiditySnapshotRecord)
             .values(
                 id=snapshot.id,
@@ -84,7 +88,39 @@ class SqlAlchemyLiquidityRepository(LiquidityRepository, ScopedSessionRepository
                 payload=payload,
                 created_at=snapshot.created_at,
             )
-            .on_conflict_do_nothing(index_elements=["id"])
+            .on_conflict_do_nothing(
+                index_elements=[
+                    LiquiditySnapshotRecord.symbol,
+                    LiquiditySnapshotRecord.timeframe,
+                    LiquiditySnapshotRecord.analysis_timestamp,
+                    LiquiditySnapshotRecord.configuration_version,
+                    LiquiditySnapshotRecord.processing_mode,
+                ]
+            )
+            .returning(LiquiditySnapshotRecord.id)
+        )
+        inserted_id = returned_identity(insert_result, snapshot.id)
+        persisted_snapshot = snapshot
+        if inserted_id is None:
+            persisted_record = (
+                await self.session.scalars(
+                    select(LiquiditySnapshotRecord).where(
+                        LiquiditySnapshotRecord.symbol == canonical_symbol(snapshot.symbol),
+                        LiquiditySnapshotRecord.timeframe == snapshot.timeframe.value,
+                        LiquiditySnapshotRecord.analysis_timestamp == snapshot.analysis_timestamp,
+                        LiquiditySnapshotRecord.configuration_version == snapshot.configuration_version,
+                        LiquiditySnapshotRecord.processing_mode == snapshot.processing_mode.value,
+                    )
+                )
+            ).first()
+            if persisted_record is None:
+                raise RuntimeError("liquidity snapshot insert did not resolve a canonical row")
+            persisted_snapshot = LiquidityAnalysisSnapshot.model_validate(persisted_record.payload)
+        ensure_analytical_determinism(
+            persisted_snapshot,
+            snapshot,
+            entity_type="liquidity_snapshot",
+            include_processing_mode=True,
         )
         objects = []
         for kind, values in (
@@ -121,17 +157,16 @@ class SqlAlchemyLiquidityRepository(LiquidityRepository, ScopedSessionRepository
         if objects:
             for chunk in bounded_insert_chunks(objects):
                 await self.session.execute(insert(LiquidityObjectRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
-        digest = sha256(snapshot.model_dump_json().encode()).hexdigest()
         statement = insert(LiquidityCheckpointRecord).values(
             symbol=canonical_symbol(snapshot.symbol),
             timeframe=snapshot.timeframe.value,
             configuration_version=snapshot.configuration_version,
             engine_version=snapshot.engine_version,
-            snapshot_id=snapshot.id,
-            last_processed_candle=snapshot.analysis_timestamp,
-            state_hash=digest,
-            state_payload=payload,
-            updated_at=snapshot.created_at,
+            snapshot_id=persisted_snapshot.id,
+            last_processed_candle=persisted_snapshot.analysis_timestamp,
+            state_hash=sha256(persisted_snapshot.model_dump_json().encode()).hexdigest(),
+            state_payload=persisted_snapshot.model_dump(mode="json"),
+            updated_at=persisted_snapshot.created_at,
         )
         await self.session.execute(
             statement.on_conflict_do_update(
