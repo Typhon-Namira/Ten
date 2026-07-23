@@ -535,3 +535,73 @@ export interface ReplaySessionOverview {
   completed_at: string | null
 }
 
+export interface QuantForecastHorizon {
+  horizon_id: string
+  timeframe: 'M1' | 'M5'
+  candle_count: number
+  duration_seconds: number
+}
+
+export interface QuantHorizonPrediction {
+  horizon: QuantForecastHorizon
+  reference_price: number
+  buy_probability: number
+  sell_probability: number
+  neutral_probability: number
+  expected_return: number
+  expected_base_movement: number
+  expected_minimum_movement: number
+  expected_maximum_movement: number
+  expected_volatility: number
+  expected_mfe: number
+  expected_mae: number
+  tp1_probability: number
+  tp2_probability: number
+  stop_loss_probability: number
+  sl_before_tp_probability: number
+  uncertainty_interval: { low: number; high: number; confidence_level: number }
+  transition_probabilities: Record<string, number>
+}
+
+export interface QuantForecastResult {
+  result_id: string
+  market_state_id: string
+  instrument: string
+  point_in_time: string
+  status: 'available' | 'unavailable' | 'insufficient_history' | 'incompatible_features' | 'failed'
+  model_name: string
+  model_version: string
+  training_dataset_version: string
+  feature_schema_version: string
+  calibration_version: string
+  model_kind: string
+  calibration_status: string
+  shadow_only: true
+  approved_for_publication: false
+  predictions: QuantHorizonPrediction[]
+  reason_codes: string[]
+}
+
+export interface QuantCalibrationReport {
+  model_name: string
+  model_version: string
+  generated_at: string
+  sample_count: number
+  brier_score: number | null
+  log_loss: number | null
+  expected_calibration_error: number | null
+  status: string
+  filters: Record<string, string>
+}
+
+export interface QuantForecastOutcome {
+  forecast_result_id: string
+  horizon_id: string
+  status: 'pending' | 'valid' | 'missing_data' | 'incomplete'
+  realized_return: number | null
+  realized_direction: string | null
+  maximum_favorable_excursion: number | null
+  maximum_adverse_excursion: number | null
+  spread_adjusted_return: number | null
+}
+

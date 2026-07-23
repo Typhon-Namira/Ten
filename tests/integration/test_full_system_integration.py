@@ -63,6 +63,16 @@ class UnexpectedShadowCapture:
         raise AssertionError("disabled shadow capture must not be invoked")
 
 
+class CompleteShadowCapture:
+    async def capture_cycle(self, *_: object, **__: object) -> object:
+        return object()
+
+
+class FailingQuantForecast:
+    async def forecast(self, _: object) -> None:
+        raise RuntimeError("shadow model failed")
+
+
 NOW = datetime(2026, 7, 19, 12, 30, tzinfo=UTC)
 
 
@@ -332,6 +342,22 @@ async def test_shadow_capture_failure_is_isolated_from_legacy_production_result(
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     coordinator = service(bus, repository)
     coordinator.unified_market_state = UnexpectedShadowCapture()
+    coordinator.ai_centric_shadow_mode = True
+
+    result = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+
+    assert result is None
+    assert repository.metrics()["snapshots"] == 1
+    assert await repository.signals() == ()
+    assert coordinator.failures == 0
+
+
+@pytest.mark.asyncio
+async def test_shadow_forecast_failure_is_isolated_from_scoring_and_publication() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    coordinator.unified_market_state = CompleteShadowCapture()
+    coordinator.quantitative_forecasting = FailingQuantForecast()
     coordinator.ai_centric_shadow_mode = True
 
     result = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
