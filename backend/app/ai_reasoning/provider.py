@@ -54,6 +54,8 @@ class ExistingOpenRouterReasoningProvider:
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            request_id=str(request.request_id),
+            cycle_id=str(request.cycle_id),
         )
         return AIProviderResponse(
             raw_output=raw,

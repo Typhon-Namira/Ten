@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import json
+import logging
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from backend.app.core.exceptions import OpenRouterRequestError
 from backend.app.final_decision.models import ExecutionContext, LLMUsageMetric, OperationMode
 from backend.app.final_decision.service import FinalDecisionService
 from backend.app.market_state import UnifiedMarketState
@@ -32,6 +35,8 @@ from .request_builder import AIReasoningRequestBuilder
 from .setup_families import SetupFamilyRegistry
 from .validation import StructuredAIOutputError, StructuredAIOutputValidator, ValidatedAIOutput
 
+logger = logging.getLogger(__name__)
+
 
 class AIReasoningService:
     def __init__(
@@ -43,6 +48,7 @@ class AIReasoningService:
         registry: SetupFamilyRegistry,
         config: AIReasoningConfig,
         *,
+        shadow_enabled: bool = False,
         proposals_enabled: bool,
         monitoring_enabled: bool,
         final_decision: FinalDecisionService | None = None,
@@ -54,6 +60,7 @@ class AIReasoningService:
         self.validator = validator
         self.registry = registry
         self.config = config
+        self.shadow_enabled = shadow_enabled
         self.proposals_enabled = proposals_enabled
         self.monitoring_enabled = monitoring_enabled
         self.final_decision = final_decision
@@ -79,14 +86,28 @@ class AIReasoningService:
 
     @property
     def enabled(self) -> bool:
-        return self.proposals_enabled or self.monitoring_enabled
+        return self.shadow_enabled or self.proposals_enabled or self.monitoring_enabled
 
     async def process(
         self,
         state: UnifiedMarketState,
         quant: QuantForecastResult,
     ) -> ValidatedAIOutput | None:
+        worker_context = {
+            "cycle_id": str(state.cycle_id),
+            "market_state_id": str(state.state_id),
+            "quantitative_forecast_id": str(quant.result_id),
+            "instrument": state.instrument,
+            "shadow_enabled": self.shadow_enabled,
+            "proposals_enabled": self.proposals_enabled,
+            "monitoring_enabled": self.monitoring_enabled,
+        }
+        logger.info("ai_reasoning.worker.received", extra=worker_context)
         if not self.enabled:
+            logger.info(
+                "ai_reasoning.gate.skipped",
+                extra={**worker_context, "skip_reason": "all_ai_reasoning_feature_flags_disabled"},
+            )
             return None
         # Revalidate immutable Phase 1/2 boundaries before any external call.
         state = UnifiedMarketState.model_validate(state.model_dump(mode="python"))
@@ -96,14 +117,31 @@ class AIReasoningService:
         if state.state_hash in self._processed_state_hashes:
             # One primary reasoning call per immutable closed-cycle state. Monitoring and
             # publication are driven by the persisted first result, never by per-tick polling.
+            logger.info(
+                "ai_reasoning.gate.skipped",
+                extra={**worker_context, "skip_reason": "market_state_already_processed"},
+            )
             return None
         if self._provider_backoff_until is not None and self.clock() < self._provider_backoff_until:
+            logger.info(
+                "ai_reasoning.gate.skipped",
+                extra={
+                    **worker_context,
+                    "skip_reason": "provider_backoff_active",
+                    "provider_backoff_until": self._provider_backoff_until.isoformat(),
+                },
+            )
             return None
         active_signals = await self.repository.active_signals(state.instrument)
         if self.monitoring_enabled and not self.proposals_enabled and not active_signals:
             # Monitoring is independently controllable and cannot create a brand-new opportunity
             # while proposal generation is disabled.
-            return None
+            if not self.shadow_enabled:
+                logger.info(
+                    "ai_reasoning.gate.skipped",
+                    extra={**worker_context, "skip_reason": "monitoring_only_without_active_signal"},
+                )
+                return None
         existing_signal = active_signals[0] if active_signals else None
         previous_forecast = await self.repository.latest_forecast(state.instrument)
         previous_proposal = await self.repository.latest_proposal()
@@ -119,12 +157,25 @@ class AIReasoningService:
         )
         for family in self.registry.all():
             await self.repository.save_setup_family(family, self.registry.version)
-        await self.repository.save_request(request)
+        try:
+            await self.repository.save_request(request)
+        except Exception as exc:
+            logger.exception(
+                "ai_reasoning.persist.failed",
+                extra={
+                    **worker_context,
+                    "request_id": str(request.request_id),
+                    "failure_phase": "persistence",
+                    "exception_class": type(exc).__name__,
+                },
+            )
+            raise
         self.requests += 1
         validated: ValidatedAIOutput | None = None
         last_raw: dict[str, Any] | None = None
         failure_state = "unavailable"
         failure_errors: tuple[str, ...] = ()
+        provider_failure: dict[str, Any] | None = None
         for attempt in range(self.config.maximum_retries + 1):
             try:
                 async with self._llm_semaphore:
@@ -154,9 +205,41 @@ class AIReasoningService:
             except StructuredAIOutputError as exc:
                 failure_state = "structured_output_invalid"
                 failure_errors = exc.errors
-            except Exception as exc:
-                failure_state = "llm_unavailable"
-                failure_errors = (type(exc).__name__, str(exc)[:200])
+                provider_failure = {
+                    "reason_code": failure_state,
+                    "phase": "structured_output_validation",
+                    "request_id": str(request.request_id),
+                    "cycle_id": str(request.cycle_id),
+                    "model": request.model_identifier,
+                    "exception_class": type(exc).__name__,
+                }
+                logger.error(
+                    "ai_reasoning.request.failed",
+                    extra={
+                        **provider_failure,
+                        "failure_phase": "structured_output_validation",
+                        "failed_during_http_request": False,
+                        "failed_during_response_decoding": False,
+                        "failed_during_structured_output_validation": True,
+                        "failed_during_domain_parsing": False,
+                        "failed_during_persistence": False,
+                    },
+                )
+            except OpenRouterRequestError as exc:
+                provider_failure = asdict(exc.details)
+                failure_state = exc.details.reason_code
+                failure_errors = tuple(
+                    value
+                    for value in (
+                        exc.details.reason_code,
+                        exc.details.error_code,
+                        exc.details.error_message,
+                        exc.details.metadata_error_type,
+                        exc.details.metadata_provider_code,
+                    )
+                    if value
+                )
+                self.last_latency_ms = exc.details.elapsed_ms
                 self._provider_failure_streak += 1
                 backoff = min(
                     self.config.provider_backoff_initial_seconds * (2 ** (self._provider_failure_streak - 1)),
@@ -164,19 +247,95 @@ class AIReasoningService:
                 )
                 self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
                 await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
-            await self._record_failure(request.request_id, attempt, request.model_identifier, request.prompt_version, last_raw, failure_errors, failure_state)
+            except Exception as exc:
+                failure_state = "llm_unavailable"
+                failure_errors = (type(exc).__name__, str(exc)[:200])
+                provider_failure = {
+                    "reason_code": failure_state,
+                    "phase": "domain_parsing",
+                    "request_id": str(request.request_id),
+                    "cycle_id": str(request.cycle_id),
+                    "model": request.model_identifier,
+                    "exception_class": type(exc).__name__,
+                }
+                self._provider_failure_streak += 1
+                backoff = min(
+                    self.config.provider_backoff_initial_seconds * (2 ** (self._provider_failure_streak - 1)),
+                    self.config.provider_backoff_max_seconds,
+                )
+                self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
+                await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
+            await self._record_failure(
+                request.request_id,
+                attempt,
+                request.model_identifier,
+                request.prompt_version,
+                last_raw,
+                failure_errors,
+                failure_state,
+                provider_failure,
+            )
 
         if validated is None:
             self.failed_requests += 1
             self.last_validation_passed = False
             self.last_retry_count = self.config.maximum_retries
             self.last_failure_state = failure_state
-            unavailable = self._unavailable_forecast(request, failure_state, failure_errors)
-            await self.repository.save_forecast(unavailable)
+            unavailable = self._unavailable_forecast(
+                request,
+                failure_state,
+                failure_errors,
+                provider_failure,
+            )
+            try:
+                await self.repository.save_forecast(unavailable)
+            except Exception as exc:
+                logger.exception(
+                    "ai_reasoning.persist.failed",
+                    extra={
+                        **worker_context,
+                        "request_id": str(request.request_id),
+                        "failure_phase": "persistence",
+                        "exception_class": type(exc).__name__,
+                    },
+                )
+                raise
             self._processed_state_hashes.add(state.state_hash)
+            logger.info(
+                "ai_reasoning.persist.completed",
+                extra={
+                    **worker_context,
+                    "request_id": str(request.request_id),
+                    "forecast_id": str(unavailable.forecast_id),
+                    "status": unavailable.status.value,
+                    "failure_reason_code": unavailable.failure_state,
+                },
+            )
+            logger.info(
+                "ai_reasoning.completed",
+                extra={
+                    **worker_context,
+                    "request_id": str(request.request_id),
+                    "forecast_id": str(unavailable.forecast_id),
+                    "status": unavailable.status.value,
+                    "failure_reason_code": unavailable.failure_state,
+                },
+            )
             return ValidatedAIOutput(forecast=unavailable, proposal=None)
 
-        await self.repository.save_forecast(validated.forecast)
+        try:
+            await self.repository.save_forecast(validated.forecast)
+        except Exception as exc:
+            logger.exception(
+                "ai_reasoning.persist.failed",
+                extra={
+                    **worker_context,
+                    "request_id": str(request.request_id),
+                    "failure_phase": "persistence",
+                    "exception_class": type(exc).__name__,
+                },
+            )
+            raise
         proposal = validated.proposal
         signal = existing_signal
         if proposal is not None:
@@ -224,6 +383,25 @@ class AIReasoningService:
                 )
         await self._append_memory(state, quant, validated.forecast, proposal, signal)
         self._processed_state_hashes.add(state.state_hash)
+        logger.info(
+            "ai_reasoning.persist.completed",
+            extra={
+                **worker_context,
+                "request_id": str(request.request_id),
+                "forecast_id": str(validated.forecast.forecast_id),
+                "status": validated.forecast.status.value,
+                "failure_reason_code": None,
+            },
+        )
+        logger.info(
+            "ai_reasoning.completed",
+            extra={
+                **worker_context,
+                "request_id": str(request.request_id),
+                "forecast_id": str(validated.forecast.forecast_id),
+                "status": validated.forecast.status.value,
+            },
+        )
         return validated
 
     async def _record_usage(
@@ -333,6 +511,7 @@ class AIReasoningService:
         raw: dict[str, Any] | None,
         errors: tuple[str, ...],
         state: str,
+        provider_failure: dict[str, Any] | None,
     ) -> None:
         failure = LLMStructuredOutputFailure(
             failure_id=uuid5(NAMESPACE_URL, f"ten:llm-failure:{request_id}:{attempt}:{state}"),
@@ -343,12 +522,19 @@ class AIReasoningService:
             raw_output=raw,
             validation_errors=errors,
             failure_state=state,
+            provider_failure=provider_failure,
             latency_ms=self.last_latency_ms,
             created_at=self.clock(),
         )
         await self.repository.save_failure(failure)
 
-    def _unavailable_forecast(self, request: Any, failure_state: str, errors: tuple[str, ...]) -> AIMarketForecast:
+    def _unavailable_forecast(
+        self,
+        request: Any,
+        failure_state: str,
+        errors: tuple[str, ...],
+        provider_failure: dict[str, Any] | None,
+    ) -> AIMarketForecast:
         return AIMarketForecast(
             forecast_id=uuid5(NAMESPACE_URL, f"ten:ai-forecast:{request.request_id}:{failure_state}"),
             request_id=request.request_id,
@@ -367,6 +553,24 @@ class AIReasoningService:
             validation_passed=False,
             retry_count=self.config.maximum_retries,
             failure_state=failure_state,
+            failure_phase=str(provider_failure.get("phase")) if provider_failure and provider_failure.get("phase") else None,
+            provider_http_status=(
+                int(provider_failure["http_status"])
+                if provider_failure and provider_failure.get("http_status") is not None
+                else None
+            ),
+            provider_error_code=str(provider_failure.get("error_code")) if provider_failure and provider_failure.get("error_code") else None,
+            provider_error_message=str(provider_failure.get("error_message")) if provider_failure and provider_failure.get("error_message") else None,
+            provider_metadata_error_type=(
+                str(provider_failure.get("metadata_error_type"))
+                if provider_failure and provider_failure.get("metadata_error_type")
+                else None
+            ),
+            provider_metadata_provider_code=(
+                str(provider_failure.get("metadata_provider_code"))
+                if provider_failure and provider_failure.get("metadata_provider_code")
+                else None
+            ),
             fallback_state="no_ai_proposal",
             reasoning_summary="AI result unavailable; no proposal was created.",
             missing_evidence=errors,
@@ -427,6 +631,7 @@ class AIReasoningService:
         metadata = self.provider.metadata()
         return {
             "enabled": self.enabled,
+            "shadow_enabled": self.shadow_enabled,
             "proposals_enabled": self.proposals_enabled,
             "monitoring_enabled": self.monitoring_enabled,
             "publication_enabled": self.final_decision.publication_enabled if self.final_decision else False,

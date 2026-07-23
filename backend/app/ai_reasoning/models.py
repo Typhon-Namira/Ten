@@ -227,6 +227,12 @@ class AIMarketForecast(ImmutableAIModel):
     retry_count: int = Field(ge=0)
     token_usage: dict[str, int] | None = None
     failure_state: str | None = None
+    failure_phase: str | None = None
+    provider_http_status: int | None = None
+    provider_error_code: str | None = None
+    provider_error_message: str | None = None
+    provider_metadata_error_type: str | None = None
+    provider_metadata_provider_code: str | None = None
     fallback_state: str | None = None
     shadow_only: bool = True
     awaiting_guardrail_validation: bool = True
@@ -461,6 +467,7 @@ class LLMStructuredOutputFailure(ImmutableAIModel):
     raw_output: dict[str, Any] | None = None
     validation_errors: tuple[str, ...]
     failure_state: str
+    provider_failure: dict[str, Any] | None = None
     latency_ms: float | None = Field(default=None, ge=0)
     created_at: datetime
 
