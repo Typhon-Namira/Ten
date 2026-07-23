@@ -236,17 +236,77 @@ class FullSystemIntegrationService:
                 tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis", "liquidity_analysis", "volume_profile", "institutional_flow", "market_regime"), "skipped")
             failure_stage = "economic_calendar"
             outputs.append(("economic_calendar", await self.economic_calendar.context(symbol, as_of=boundary)))
-            if self.ai_centric_shadow_mode and self.unified_market_state is not None:
+            gate_context = {
+                **log_context,
+                "ai_centric_shadow_mode": self.ai_centric_shadow_mode,
+                "unified_market_state_configured": self.unified_market_state is not None,
+                "quantitative_forecasting_configured": self.quantitative_forecasting is not None,
+                "ai_reasoning_configured": self.ai_reasoning is not None,
+            }
+            logger.info("ai_reasoning.gate.entered", extra=gate_context)
+            if not self.ai_centric_shadow_mode:
+                logger.info(
+                    "ai_reasoning.gate.skipped",
+                    extra={**gate_context, "skip_reason": "ai_centric_shadow_mode_disabled"},
+                )
+            elif self.unified_market_state is None:
+                logger.info(
+                    "ai_reasoning.gate.skipped",
+                    extra={**gate_context, "skip_reason": "unified_market_state_service_unavailable"},
+                )
+            else:
                 # Phase 1 is observational only.  A shadow-state capture failure is logged but can
                 # never change legacy scoring, decision gates, or signal publication.
                 try:
                     failure_stage = "unified_market_state"
                     market_state = await self.unified_market_state.capture_cycle(envelope, dict(outputs))
-                    if market_state is not None and self.quantitative_forecasting is not None:
+                    if market_state is None:
+                        logger.info(
+                            "ai_reasoning.gate.skipped",
+                            extra={**gate_context, "skip_reason": "synchronized_market_state_not_ready"},
+                        )
+                    elif self.quantitative_forecasting is None:
+                        logger.info(
+                            "ai_reasoning.gate.skipped",
+                            extra={**gate_context, "skip_reason": "quantitative_forecasting_service_unavailable"},
+                        )
+                    else:
                         failure_stage = "quantitative_forecast"
                         quantitative_forecast = await self.quantitative_forecasting.forecast(market_state)
-                        if quantitative_forecast is not None and self.ai_reasoning is not None:
+                        if quantitative_forecast is None:
+                            logger.info(
+                                "ai_reasoning.gate.skipped",
+                                extra={
+                                    **gate_context,
+                                    "market_state_id": str(getattr(market_state, "state_id", "unknown")),
+                                    "skip_reason": "quantitative_forecast_not_ready",
+                                },
+                            )
+                        elif self.ai_reasoning is None:
+                            logger.info(
+                                "ai_reasoning.gate.skipped",
+                                extra={
+                                    **gate_context,
+                                    "market_state_id": str(getattr(market_state, "state_id", "unknown")),
+                                    "quantitative_forecast_id": str(
+                                        getattr(quantitative_forecast, "result_id", "unknown")
+                                    ),
+                                    "skip_reason": "ai_reasoning_service_unavailable",
+                                },
+                            )
+                        else:
                             failure_stage = "ai_reasoning"
+                            logger.info(
+                                "ai_reasoning.job.enqueued",
+                                extra={
+                                    **gate_context,
+                                    "market_state_id": str(getattr(market_state, "state_id", "unknown")),
+                                    "quantitative_forecast_id": str(
+                                        getattr(quantitative_forecast, "result_id", "unknown")
+                                    ),
+                                    "dispatch_mode": "inline_integration_worker",
+                                },
+                            )
                             await self.ai_reasoning.process(market_state, quantitative_forecast)
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)

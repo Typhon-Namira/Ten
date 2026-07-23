@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+import logging
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -544,7 +545,9 @@ async def test_ai_reasoning_failure_is_isolated_from_scoring_and_publication() -
 
 
 @pytest.mark.asyncio
-async def test_degraded_volume_evidence_continues_through_unified_state_quant_and_ai() -> None:
+async def test_degraded_volume_evidence_continues_through_unified_state_quant_and_ai(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     coordinator = service(bus, repository)
     coordinator.volume_profile = DegradedVolumeAnalysis()
@@ -554,11 +557,22 @@ async def test_degraded_volume_evidence_continues_through_unified_state_quant_an
     coordinator.ai_reasoning = RecordingAIAndFinalDecision(stages)
     coordinator.ai_centric_shadow_mode = True
 
-    await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+    target_logger = logging.getLogger("backend.app.integration.service")
+    target_logger.addHandler(caplog.handler)
+    previous_level = target_logger.level
+    target_logger.setLevel(logging.INFO)
+    try:
+        await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(previous_level)
 
     assert stages == ["unified_market_state", "quant_forecast", "ai_reasoning", "final_decision"]
     assert repository.metrics()["snapshots"] == 1
     assert coordinator.failures == 0
+    events = [record.message for record in caplog.records if record.name == target_logger.name]
+    assert "ai_reasoning.gate.entered" in events
+    assert "ai_reasoning.job.enqueued" in events
 
 
 @pytest.mark.asyncio

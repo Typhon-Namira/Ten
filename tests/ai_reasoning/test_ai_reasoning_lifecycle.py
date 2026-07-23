@@ -30,6 +30,7 @@ from backend.app.ai_reasoning.setup_families import SetupFamilyRegistry
 from backend.app.ai_reasoning.validation import StructuredAIOutputValidator, structural_opportunity_key
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.core.config import YamlConfigRepository
+from backend.app.core.exceptions import OpenRouterFailureDetails, OpenRouterRequestError
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
 from backend.app.market_state import InMemoryUnifiedMarketStateRepository, UnifiedMarketStateService
@@ -196,6 +197,28 @@ class UnavailableProvider(ValidProvider):
         raise RuntimeError("configured LLM unavailable")
 
 
+class TypedUnavailableProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version):
+        self.calls += 1
+        raise OpenRouterRequestError(
+            OpenRouterFailureDetails(
+                reason_code="openrouter_authentication_failed",
+                phase="http_request",
+                endpoint="https://openrouter.ai/api/v1/chat/completions",
+                model=request.model_identifier,
+                request_id=str(request.request_id),
+                cycle_id=str(request.cycle_id),
+                http_status=401,
+                error_code="401",
+                error_message="User not found.",
+                content_type="application/json",
+                body_length=42,
+                elapsed_ms=12.5,
+                exception_class="HTTPStatusError",
+            )
+        )
+
+
 class InvalidProvider(ValidProvider):
     async def reason(self, request, *, prompt_version):
         self.calls += 1
@@ -222,7 +245,7 @@ class UnknownEvidenceProvider(ValidProvider):
         )
 
 
-def build_service(repository, provider, *, proposals=True, monitoring=False, maximum_retries=1):
+def build_service(repository, provider, *, shadow=False, proposals=True, monitoring=False, maximum_retries=1):
     config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig).model_copy(update={"maximum_retries": maximum_retries})
     registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
     return AIReasoningService(
@@ -232,6 +255,7 @@ def build_service(repository, provider, *, proposals=True, monitoring=False, max
         StructuredAIOutputValidator(registry),
         registry,
         config,
+        shadow_enabled=shadow,
         proposals_enabled=proposals,
         monitoring_enabled=monitoring,
         clock=lambda: NOW,
@@ -331,6 +355,34 @@ async def test_llm_unavailability_is_explicit_and_never_fabricates_a_proposal() 
     assert result.forecast.buy_probability is None
     assert provider.calls == 2
     assert len(repository.failures) == 2
+    assert not repository.proposals and not repository.signals
+
+
+@pytest.mark.asyncio
+async def test_shadow_reasoning_runs_without_proposal_or_monitoring_flags_and_persists_typed_failure() -> None:
+    state, quant = await state_and_quant()
+    repository, provider = InMemoryAIReasoningRepository(), TypedUnavailableProvider()
+    result = await build_service(
+        repository,
+        provider,
+        shadow=True,
+        proposals=False,
+        monitoring=False,
+        maximum_retries=0,
+    ).process(state, quant)
+
+    assert result is not None and result.proposal is None
+    assert result.forecast.status == AIResultStatus.UNAVAILABLE
+    assert result.forecast.failure_state == "openrouter_authentication_failed"
+    assert result.forecast.failure_phase == "http_request"
+    assert result.forecast.provider_http_status == 401
+    assert result.forecast.provider_error_code == "401"
+    assert result.forecast.provider_error_message == "User not found."
+    assert provider.calls == 1
+    failure = next(iter(repository.failures.values()))
+    assert failure.failure_state == "openrouter_authentication_failed"
+    assert failure.provider_failure is not None
+    assert failure.provider_failure["http_status"] == 401
     assert not repository.proposals and not repository.signals
 
 

@@ -263,7 +263,10 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             data=forecast,
             record_id=getattr(forecast, "forecast_id", None),
             timestamp=getattr(forecast, "generated_at", None),
-            error_code=getattr(forecast, "failure_state", None),
+            error_code=(
+                getattr(forecast, "provider_error_code", None)
+                or getattr(forecast, "failure_state", None)
+            ),
             retryable=forecast_status == "failed",
         ),
         "ai_proposal": _stage(

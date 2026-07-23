@@ -397,6 +397,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             StructuredAIOutputValidator(setup_family_registry),
             setup_family_registry,
             ai_reasoning_config,
+            shadow_enabled=ai_centric_shadow_mode,
             proposals_enabled=ai_proposals_enabled,
             monitoring_enabled=ai_monitoring_enabled,
             final_decision=app.state.final_decision_service,
