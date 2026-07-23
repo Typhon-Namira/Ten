@@ -8,3 +8,8 @@ flags:
   EnableReplay: true
   EnableMarketRegime: true
   EnableDashboardModules: true
+  ai_centric_shadow_mode: false
+  ai_signal_proposals: false
+  ai_signal_monitoring: false
+  ai_signal_publication: false
+  ai_signal_adjustments: false

@@ -58,6 +58,11 @@ class FailingDecision(FakeDecision):
         raise RuntimeError("decision persistence failed")
 
 
+class UnexpectedShadowCapture:
+    async def capture_cycle(self, *_: object, **__: object) -> None:
+        raise AssertionError("disabled shadow capture must not be invoked")
+
+
 NOW = datetime(2026, 7, 19, 12, 30, tzinfo=UTC)
 
 
@@ -306,6 +311,35 @@ async def test_failed_outbox_item_degrades_health_and_remains_retryable() -> Non
     assert coordinator.health()["ready"] is False
     assert repository.metrics()["outbox_backlog"] == 1
     await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_disabled_ai_centric_shadow_path_cannot_change_legacy_production_result() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    coordinator.unified_market_state = UnexpectedShadowCapture()
+    coordinator.ai_centric_shadow_mode = False
+
+    result = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+
+    assert result is None
+    assert repository.metrics()["snapshots"] == 1
+    assert await repository.signals() == ()
+
+
+@pytest.mark.asyncio
+async def test_shadow_capture_failure_is_isolated_from_legacy_production_result() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    coordinator.unified_market_state = UnexpectedShadowCapture()
+    coordinator.ai_centric_shadow_mode = True
+
+    result = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+
+    assert result is None
+    assert repository.metrics()["snapshots"] == 1
+    assert await repository.signals() == ()
+    assert coordinator.failures == 0
 
 
 @pytest.mark.asyncio

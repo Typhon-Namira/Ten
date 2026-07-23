@@ -59,6 +59,8 @@ from backend.app.integration.stage_tracker import PipelineStageTracker
 from backend.app.ai.openrouter_client.client import HttpOpenRouterClient
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.explainability import ExplainabilityService
+from backend.app.core.feature_flags import FeatureFlag
+from backend.app.market_state import InMemoryUnifiedMarketStateRepository, SqlAlchemyUnifiedMarketStateRepository, UnifiedMarketStateRepository, UnifiedMarketStateService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -308,6 +310,12 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         app.state.pipeline_activity_log.start()
         app.state.pipeline_stage_tracker = PipelineStageTracker()
+        market_state_repository: UnifiedMarketStateRepository = InMemoryUnifiedMarketStateRepository()
+        if app.state.database_session_factory is not None:
+            market_state_repository = SqlAlchemyUnifiedMarketStateRepository(app.state.database_session_factory)
+        app.state.unified_market_state_repository = market_state_repository
+        app.state.unified_market_state_service = UnifiedMarketStateService(market_state_repository)
+        ai_centric_shadow_mode = app.state.engine_registry.context.feature_flags.is_enabled(FeatureFlag.AI_CENTRIC_SHADOW_MODE)
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
             repository=app.state.integration_repository,
@@ -323,6 +331,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             signal_decision=app.state.signal_decision_service,
             repository_mode=integration_mode,
             stage_tracker=app.state.pipeline_stage_tracker,
+            unified_market_state=app.state.unified_market_state_service,
+            ai_centric_shadow_mode=ai_centric_shadow_mode,
         )
         if integration_config.enabled and integration_config.live_pipeline_enabled:
             await app.state.integration_service.start()
