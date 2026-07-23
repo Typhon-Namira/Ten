@@ -6,7 +6,7 @@ from typing import Protocol
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import literal, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -17,6 +17,7 @@ from .models import CanonicalEventEnvelope, DataQualityIssue, IntegrationSnapsho
 
 
 class IntegrationRepository(Protocol):
+    async def persist_event(self, envelope: CanonicalEventEnvelope) -> None: ...
     async def enqueue(self, envelope: CanonicalEventEnvelope) -> OutboxItem: ...
     async def pending(self, now: datetime, limit: int) -> tuple[OutboxItem, ...]: ...
     async def complete(self, outbox_id: UUID, now: datetime) -> None: ...
@@ -34,6 +35,14 @@ class IntegrationRepository(Protocol):
     def metrics(self) -> dict[str, int]: ...
 
 
+class MissingIntegrationEventError(RuntimeError):
+    """A processed marker was requested without its required parent event."""
+
+    def __init__(self, event_id: str) -> None:
+        self.event_id = event_id
+        super().__init__(f"integration event {event_id} must exist before it can be marked processed")
+
+
 class InMemoryIntegrationRepository:
     """Bounded adapter used for development and tests; production uses the durable engine stores."""
 
@@ -48,6 +57,11 @@ class InMemoryIntegrationRepository:
         self._traces: dict[UUID, list[IntegrationTraceRecord]] = defaultdict(list)
         self._issues: list[DataQualityIssue] = []
         self._lock = asyncio.Lock()
+
+    async def persist_event(self, envelope: CanonicalEventEnvelope) -> None:
+        async with self._lock:
+            self._events.setdefault(envelope.event_id, envelope)
+            self._trim()
 
     async def enqueue(self, envelope: CanonicalEventEnvelope) -> OutboxItem:
         async with self._lock:
@@ -81,6 +95,8 @@ class InMemoryIntegrationRepository:
 
     async def mark_processed(self, event_id: str) -> None:
         async with self._lock:
+            if event_id not in self._events:
+                raise MissingIntegrationEventError(event_id)
             self._processed.add(event_id)
 
     async def save_snapshot(self, value: IntegrationSnapshot) -> IntegrationSnapshot:
@@ -139,6 +155,35 @@ class SqlAlchemyIntegrationRepository(ScopedSessionRepository):
         self._metrics = {"events": 0, "outbox_backlog": 0, "processed": 0, "snapshots": 0, "signals": 0, "quality_issues": 0}
 
     @scoped_session
+    async def persist_event(self, envelope: CanonicalEventEnvelope) -> None:
+        try:
+            statement = (
+                insert(IntegrationEventRecord)
+                .values(
+                    event_id=envelope.event_id,
+                    event_type=envelope.event_type,
+                    trace_id=envelope.trace_id,
+                    correlation_id=envelope.correlation_id,
+                    mode=envelope.mode.value,
+                    instrument=envelope.instrument_id,
+                    timeframe=envelope.timeframe,
+                    occurred_at=envelope.occurred_at,
+                    available_at=envelope.available_at,
+                    payload_hash=envelope.payload_hash,
+                    payload=envelope.model_dump(mode="json"),
+                )
+                .on_conflict_do_nothing(index_elements=["event_id"])
+                .returning(IntegrationEventRecord.event_id)
+            )
+            inserted = (await self.session.execute(statement)).scalar_one_or_none()
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
+        if inserted is not None:
+            self._metrics["events"] += 1
+
+    @scoped_session
     async def enqueue(self, envelope: CanonicalEventEnvelope) -> OutboxItem:
         outbox_id = semantic_uuid("outbox", envelope.event_id)
         try:
@@ -186,12 +231,34 @@ class SqlAlchemyIntegrationRepository(ScopedSessionRepository):
     @scoped_session
     async def mark_processed(self, event_id: str) -> None:
         try:
-            await self.session.execute(insert(IntegrationProcessedEventRecord).values(event_id=event_id, processed_at=datetime.now(UTC)).on_conflict_do_nothing(index_elements=["event_id"]))
+            # INSERT .. SELECT makes the parent visibility check and child insert one PostgreSQL
+            # statement. A missing parent produces no child row instead of reaching the FK, while
+            # an already-processed event remains an idempotent no-op.
+            statement = (
+                insert(IntegrationProcessedEventRecord)
+                .from_select(
+                    ["event_id", "processed_at"],
+                    select(
+                        IntegrationEventRecord.event_id,
+                        literal(datetime.now(UTC)),
+                    ).where(IntegrationEventRecord.event_id == event_id),
+                )
+                .on_conflict_do_nothing(index_elements=["event_id"])
+                .returning(IntegrationProcessedEventRecord.event_id)
+            )
+            inserted = (await self.session.execute(statement)).scalar_one_or_none()
+            if inserted is None:
+                parent = await self.session.scalar(
+                    select(IntegrationEventRecord.event_id).where(IntegrationEventRecord.event_id == event_id)
+                )
+                if parent is None:
+                    raise MissingIntegrationEventError(event_id)
             await self.session.commit()
         except Exception:
             await self.session.rollback()
             raise
-        self._metrics["processed"] += 1
+        if inserted is not None:
+            self._metrics["processed"] += 1
 
     @scoped_session
     async def save_snapshot(self, value: IntegrationSnapshot) -> IntegrationSnapshot:

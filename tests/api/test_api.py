@@ -58,6 +58,47 @@ def test_health_and_status_endpoints() -> None:
     assert "database_url" not in str(payload).lower()
 
 
+def test_ai_dashboard_uses_authoritative_phase_endpoints_and_reports_unavailable_data_honestly() -> None:
+    """The redesigned dashboard must read each Phase 2-5 source directly instead of
+    substituting the retired legacy AI score or manufacturing an apparently-live forecast."""
+    with TestClient(create_app()) as client:
+        market = client.get("/api/v1/system/market-intelligence")
+        quant = client.get("/api/v1/quant-forecasts/latest")
+        calibration = client.get("/api/v1/quant-forecasts/calibration/latest")
+        reasoning = client.get("/api/v1/ai-reasoning/latest")
+        reasoning_health = client.get("/api/v1/ai-reasoning/health")
+        diagnostics = client.get("/api/v1/system/diagnostics")
+
+    assert market.status_code == 200
+    assert {"diagnostics", "economic_status", "source_errors"} <= set(market.json())
+
+    assert quant.status_code in {200, 404}
+    if quant.status_code == 404:
+        assert quant.json()["detail"] == "No shadow quantitative forecast is available"
+    assert calibration.status_code in {200, 404}
+    if calibration.status_code == 404:
+        assert calibration.json()["detail"] == "No calibration report is available"
+
+    assert reasoning.status_code == 200
+    reasoning_body = reasoning.json()
+    assert {
+        "forecast",
+        "proposal",
+        "managed_signals",
+        "final_actions",
+        "runtime",
+        "health",
+    } <= set(reasoning_body)
+    assert "guardrails" in reasoning_body["health"]
+    assert reasoning_body["runtime"]["broker_execution_available"] is False
+    assert "ai_score" not in reasoning_body
+
+    assert reasoning_health.status_code == 200
+    assert {"guardrails", "runtime"} <= set(reasoning_health.json())
+    assert diagnostics.status_code == 200
+    assert {"workers", "market", "operational_state"} <= set(diagnostics.json())
+
+
 def test_diagnostics_reports_a_dead_worker_as_degraded_not_healthy() -> None:
     """Regression test for the "market data healthy but SMC-onward chain silent for hours"
     investigation: `operational_state` used to only check `worker["enabled"]` (static config), so
