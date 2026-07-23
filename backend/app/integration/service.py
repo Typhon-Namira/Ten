@@ -101,6 +101,10 @@ class FullSystemIntegrationService:
             raise ValueError("live integration rejects replay envelopes")
         if envelope.schema_version != self.config.policy.schema_version or envelope.event_type != "market.candle.closed":
             raise ValueError("unsupported integration envelope")
+        # Outbox delivery normally guarantees this already. Keeping the invariant at the public
+        # processing boundary also protects direct callers and makes a retry self-healing if an
+        # earlier ingestion transaction committed the envelope but delivery was interrupted.
+        await self.repository.persist_event(envelope)
         if await self.repository.processed(envelope.event_id):
             await self._trace(envelope, TraceStatus.DUPLICATE, "integration", (), ())
             return await self.repository.latest_signal(envelope.instrument_id, envelope.timeframe)
@@ -126,6 +130,20 @@ class FullSystemIntegrationService:
     async def process_historical_candle(self, candle: Candle) -> None:
         """Build persisted replay-mode evidence during bootstrap without a live signal."""
         envelope = CanonicalEventEnvelope.historical_candle(candle, semantic_uuid("bootstrap", candle.symbol, candle.timeframe.value), self.clock())
+        # Historical bootstrap intentionally does not create an outbox item, but it still owns a
+        # canonical integration event. Previously it skipped persistence entirely and later
+        # violated integration_processed_events_event_id_fkey in mark_processed().
+        await self.repository.persist_event(envelope)
+        logger.info(
+            "integration.event.persisted",
+            extra={
+                "event_id": envelope.event_id,
+                "stage": "historical_bootstrap_parent",
+                "symbol": envelope.instrument_id,
+                "timeframe": envelope.timeframe,
+                "mode": envelope.mode.value,
+            },
+        )
         if await self.repository.processed(envelope.event_id):
             return
         assert envelope.instrument_id and envelope.timeframe
@@ -160,6 +178,7 @@ class FullSystemIntegrationService:
             tracker.begin(symbol, timeframe.value, boundary, correlation_id=str(correlation))
             tracker.mark(symbol, timeframe.value, boundary, ("candle_received", "candle_normalized", "stored_in_database"), "success")
         outputs: list[tuple[str, object]] = []
+        failure_stage = "market_data_history"
         # Everything from here through the final `tracker.complete(...)` below is one failure
         # domain: ANY exception in this span — including `market_data.history()` and
         # `repository.save_snapshot()`, which used to sit outside this block — must finalize the
@@ -173,40 +192,50 @@ class FullSystemIntegrationService:
         try:
             candles = await self.market_data.history(symbol, timeframe, end=boundary, limit=self.config.limits.maximum_candles)
             if candles:
+                failure_stage = "smc_analysis"
                 smc_snapshot = await self.smc.analyze_candles(candles, correlation_id=correlation)
                 outputs.append(("smc", smc_snapshot))
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis",), _stage_status(smc_snapshot))
+                failure_stage = "liquidity_analysis"
                 liquidity_snapshot = await self.liquidity.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)
                 outputs.append(("liquidity", liquidity_snapshot))
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("liquidity_analysis",), _stage_status(liquidity_snapshot))
+                failure_stage = "volume_profile"
                 volume_profile_snapshot = await self.volume_profile.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)
                 outputs.append(("volume_profile", volume_profile_snapshot))
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("volume_profile",), _stage_status(volume_profile_snapshot))
+                failure_stage = "institutional_flow"
                 institutional_flow_snapshot = await self.institutional_flow.analyze(symbol, timeframe, end=boundary, correlation_id=correlation)
                 outputs.append(("institutional_flow", institutional_flow_snapshot))
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("institutional_flow",), _stage_status(institutional_flow_snapshot))
+                failure_stage = "market_regime"
                 market_regime_snapshot = await self.market_regime.analyze_snapshot(symbol, timeframe, timestamp=boundary)
                 outputs.append(("market_regime", market_regime_snapshot))
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("market_regime",), _stage_status(market_regime_snapshot))
             elif tracker is not None:
                 tracker.mark(symbol, timeframe.value, boundary, ("smc_analysis", "liquidity_analysis", "volume_profile", "institutional_flow", "market_regime"), "skipped")
+            failure_stage = "economic_calendar"
             outputs.append(("economic_calendar", await self.economic_calendar.context(symbol, as_of=boundary)))
             if self.ai_centric_shadow_mode and self.unified_market_state is not None:
                 # Phase 1 is observational only.  A shadow-state capture failure is logged but can
                 # never change legacy scoring, decision gates, or signal publication.
                 try:
+                    failure_stage = "unified_market_state"
                     market_state = await self.unified_market_state.capture_cycle(envelope, dict(outputs))
                     if market_state is not None and self.quantitative_forecasting is not None:
+                        failure_stage = "quantitative_forecast"
                         quantitative_forecast = await self.quantitative_forecasting.forecast(market_state)
                         if quantitative_forecast is not None and self.ai_reasoning is not None:
+                            failure_stage = "ai_reasoning"
                             await self.ai_reasoning.process(market_state, quantitative_forecast)
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)
+            failure_stage = "evidence_assembly"
             evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]
             for name, value in outputs:
                 identifier = next((getattr(value, key) for key in ("snapshot_id", "id", "context_id") if getattr(value, key, None) is not None), semantic_uuid(name, envelope.event_id))
@@ -216,6 +245,7 @@ class FullSystemIntegrationService:
             evidence_payload = [item.model_dump(mode="json") for item in evidence]
             snapshot_hash = canonical_hash({"event": envelope.event_id, "policy": self.config.policy.version, "evidence": evidence_payload, "missing": missing})
             snapshot = IntegrationSnapshot(snapshot_id=semantic_uuid("snapshot", snapshot_hash), semantic_hash=snapshot_hash, mode=envelope.mode, instrument=symbol, timeframe=timeframe.value, analytical_boundary=boundary, market_event_id=envelope.event_id, evidence=tuple(evidence), missing_required=missing, data_quality_status=envelope.data_quality_status, status=SnapshotStatus.READY if not missing else SnapshotStatus.INSUFFICIENT_DATA, created_at=self.clock())
+            failure_stage = "snapshot_persistence"
             await self.repository.save_snapshot(snapshot)
             if missing:
                 if tracker is not None:
@@ -224,9 +254,11 @@ class FullSystemIntegrationService:
             else:
                 score_mode = ScoreMode.LIVE if envelope.mode == IntegrationMode.LIVE else ScoreMode.REPLAY
                 decision_mode = DecisionMode.LIVE if envelope.mode == IntegrationMode.LIVE else DecisionMode.REPLAY
+                failure_stage = "ai_scoring"
                 score = await self.ai_scoring.calculate(ScoreRequest(instrument=symbol, timeframe=timeframe.value, as_of=boundary, mode=score_mode))
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation"), "success")
+                failure_stage = "signal_decision"
                 decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=decision_mode))
                 self.last_decision_persisted_at = self.clock()
                 logger.info(
@@ -237,12 +269,14 @@ class FullSystemIntegrationService:
                     tracker.mark(symbol, timeframe.value, boundary, ("scenario_decision",), "success")
                     tracker.complete(symbol, timeframe.value, boundary)
         except Exception as exc:
+            exc.__dict__["integration_event_id"] = envelope.event_id
+            exc.__dict__["integration_stage"] = failure_stage
             self.last_cycle_failed_at = self.clock()
             if tracker is not None:
                 tracker.fail_in_flight(symbol, timeframe.value, boundary, exc=exc)
             logger.exception(
                 "snapshot.failed",
-                extra={**log_context, "failure_class": type(exc).__name__, "duration_ms": (perf_counter() - started) * 1000},
+                extra={**log_context, "failure_class": type(exc).__name__, "failure_stage": failure_stage, "duration_ms": (perf_counter() - started) * 1000},
             )
             try:
                 await self._trace(envelope, TraceStatus.FAILED, "full_system", (envelope.event_id,), (), started)
@@ -251,7 +285,9 @@ class FullSystemIntegrationService:
             raise
         try:
             if missing:
+                failure_stage = "mark_processed"
                 await self.repository.mark_processed(envelope.event_id)
+                failure_stage = "trace_blocked"
                 await self._trace(envelope, TraceStatus.BLOCKED, "snapshot_barrier", (envelope.event_id,), (str(snapshot.snapshot_id),), started)
                 self.last_cycle_completed_at = self.clock()
                 logger.warning("snapshot.completed_degraded", extra={**log_context, "snapshot_id": str(snapshot.snapshot_id), "missing": missing, "duration_ms": (perf_counter() - started) * 1000})
@@ -261,23 +297,30 @@ class FullSystemIntegrationService:
             warning_codes = tuple(item.reason_code for item in decision.warnings)
             semantic = canonical_hash({"snapshot": snapshot.semantic_hash, "score": score.metadata.input_fingerprint, "decision": decision.input_fingerprint, "policies": (score.policy_version, decision.decision_policy_version)})
             if not publish_signal or decision.state.value != DecisionState.ELIGIBLE.value:
+                failure_stage = "mark_processed"
                 await self.repository.mark_processed(envelope.event_id)
+                failure_stage = "trace_completed"
                 await self._trace(envelope, TraceStatus.COMPLETED, "full_system", (envelope.event_id,), (str(snapshot.snapshot_id), str(score.snapshot_id), str(decision.decision_id)), started)
                 self.last_cycle_completed_at = self.clock()
                 logger.info("snapshot.completed", extra={**log_context, "snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "decision_status": decision.state.value, "scenario_published": False, "duration_ms": (perf_counter() - started) * 1000})
                 return None
             signal = OperationalSignal(operational_signal_id=semantic_uuid("signal", semantic), semantic_hash=semantic, decision_id=decision.decision_id, ai_score_id=score.snapshot_id, snapshot_id=snapshot.snapshot_id, trace_id=envelope.trace_id, market_event_id=envelope.event_id, instrument=symbol, timeframe=timeframe.value, mode=envelope.mode, direction=decision.direction.value, state=decision.state.value, confidence=decision.confidence_score, effective_at=decision.as_of, expires_at=decision.valid_until, data_quality_status=envelope.data_quality_status, provider_provenance=(envelope.source_name,), evidence=tuple(evidence), blockers=blocker_codes, warnings=warning_codes, ai_scoring_policy_version=score.policy_version, signal_decision_policy_version=decision.decision_policy_version, created_at=self.clock())
+            failure_stage = "signal_persistence"
             signal = await self.repository.save_signal(signal)
             self.last_signal_published_at = self.clock()
             logger.info("scenario.published", extra={"snapshot_id": str(snapshot.snapshot_id), "signal_id": str(signal.operational_signal_id), "symbol": symbol, "timeframe": timeframe.value})
+            failure_stage = "mark_processed"
             await self.repository.mark_processed(envelope.event_id)
+            failure_stage = "trace_completed"
             await self._trace(envelope, TraceStatus.COMPLETED, "full_system", (envelope.event_id,), (str(snapshot.snapshot_id), str(score.snapshot_id), str(decision.decision_id), str(signal.operational_signal_id)), started)
             self.last_cycle_completed_at = self.clock()
             logger.info("snapshot.completed", extra={**log_context, "snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "signal_id": str(signal.operational_signal_id), "decision_status": decision.state.value, "scenario_published": True, "duration_ms": (perf_counter() - started) * 1000})
             return signal
         except Exception as exc:
+            exc.__dict__["integration_event_id"] = envelope.event_id
+            exc.__dict__["integration_stage"] = failure_stage
             self.last_cycle_failed_at = self.clock()
-            logger.exception("snapshot.failed", extra={**log_context, "failure_class": type(exc).__name__, "duration_ms": (perf_counter() - started) * 1000})
+            logger.exception("snapshot.failed", extra={**log_context, "failure_class": type(exc).__name__, "failure_stage": failure_stage, "duration_ms": (perf_counter() - started) * 1000})
             try:
                 await self._trace(envelope, TraceStatus.FAILED, "full_system", (envelope.event_id,), (), started)
             except Exception:

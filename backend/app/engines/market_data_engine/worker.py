@@ -231,7 +231,16 @@ class MarketDataWorker:
     def _failed(self, exc: Exception, event: str, symbol: str, timeframe: Timeframe) -> None:
         self.consecutive_failures += 1
         self.last_error = type(exc).__name__
-        logger.warning(event, extra={"symbol": symbol, "timeframe": timeframe.value, "error_type": self.last_error})
+        logger.warning(
+            event,
+            extra={
+                "symbol": symbol,
+                "timeframe": timeframe.value,
+                "error_type": self.last_error,
+                "event_id": getattr(exc, "integration_event_id", None),
+                "failure_stage": getattr(exc, "integration_stage", None),
+            },
+        )
 
     def status(self) -> dict[str, object]:
         running = self._task is not None and not self._task.done()

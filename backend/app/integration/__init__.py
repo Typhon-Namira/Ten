@@ -19,7 +19,7 @@ from .models import (
     canonical_hash,
     semantic_uuid,
 )
-from .repository import InMemoryIntegrationRepository, IntegrationRepository, SqlAlchemyIntegrationRepository
+from .repository import InMemoryIntegrationRepository, IntegrationRepository, MissingIntegrationEventError, SqlAlchemyIntegrationRepository
 from .service import FullSystemIntegrationService
 from .worker import IntegrationWorker
 
@@ -38,6 +38,7 @@ __all__ = [
     "IntegrationTraceRecord",
     "InMemoryIntegrationRepository",
     "IntegrationRepository",
+    "MissingIntegrationEventError",
     "SqlAlchemyIntegrationRepository",
     "FullSystemIntegrationService",
     "IntegrationWorker",

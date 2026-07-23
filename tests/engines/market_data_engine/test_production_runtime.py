@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.app.engines.market_data_engine import MarketDataWorker, MarketStatusCode, Timeframe
+from backend.app.engines.market_data_engine import Candle, MarketDataWorker, MarketStatusCode, Timeframe
 from backend.app.engines.market_data_engine.sessions import MarketSessionEngine
 
 
@@ -86,6 +86,72 @@ async def test_disabled_worker_never_starts() -> None:
     worker.start()
     assert worker.status()["processing_state"] == "disabled"
     assert worker.status()["running"] is False
+
+
+class BootstrapRecoveryService(StubMarketService):
+    async def history(self, symbol: str, timeframe: Timeframe, **_: object) -> list[Candle]:
+        self.history_calls += 1
+        return [
+            Candle(
+                timestamp=datetime(2026, 7, 23, 10, tzinfo=UTC),
+                ingestion_timestamp=datetime(2026, 7, 23, 10, 16, tzinfo=UTC),
+                symbol=symbol,
+                timeframe=timeframe,
+                open=3300,
+                high=3302,
+                low=3298,
+                close=3301,
+                volume=10,
+                provider="test",
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_recovers_after_one_failed_event_and_logs_identity(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = BootstrapRecoveryService()
+    analyzed: list[Timeframe] = []
+
+    async def historical_analysis(value: Candle) -> None:
+        if not analyzed:
+            analyzed.append(value.timeframe)
+            error = RuntimeError("first historical event failed")
+            error.__dict__["integration_event_id"] = "a" * 64
+            error.__dict__["integration_stage"] = "mark_processed"
+            raise error
+        analyzed.append(value.timeframe)
+
+    worker = MarketDataWorker(
+        service,  # type: ignore[arg-type]
+        enabled=True,
+        symbols=("XAUUSD",),
+        timeframes=(Timeframe.M1, Timeframe.M5),
+        bootstrap_enabled=True,
+        bootstrap_candles=500,
+        poll_seconds=60,
+        historical_analysis=historical_analysis,
+    )
+
+    target_logger = logging.getLogger("backend.app.engines.market_data_engine.worker")
+    target_logger.addHandler(caplog.handler)
+    original_level, original_disabled = target_logger.level, target_logger.disabled
+    target_logger.setLevel(logging.WARNING)
+    target_logger.disabled = False
+    try:
+        await worker._bootstrap()
+    finally:
+        target_logger.removeHandler(caplog.handler)
+        target_logger.setLevel(original_level)
+        target_logger.disabled = original_disabled
+
+    assert service.history_calls == 2
+    assert analyzed == [Timeframe.M1, Timeframe.M5]
+    assert worker.processing_state == "idle"
+    failure = next(record for record in caplog.records if record.message == "market_data.bootstrap.failed")
+    assert failure.event_id == "a" * 64
+    assert failure.failure_stage == "mark_processed"
 
 
 class _FlakySessionsMarketService(StubMarketService):

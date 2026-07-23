@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
@@ -7,7 +8,7 @@ import pytest
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.engines.market_data_engine.events import NewCandle
 from backend.app.events import InMemoryEventBus
-from backend.app.integration import CanonicalEventEnvelope, FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationMode, OperationalSignal, canonical_hash
+from backend.app.integration import CanonicalEventEnvelope, FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationMode, MissingIntegrationEventError, OperationalSignal, canonical_hash
 from backend.app.integration.stage_tracker import PipelineStageTracker
 
 
@@ -263,6 +264,91 @@ async def test_historical_bootstrap_runs_replay_analysis_without_live_signal() -
     assert snapshot.mode == IntegrationMode.REPLAY
     assert repository.metrics()["snapshots"] == 1
     assert await repository.signals() == ()
+
+
+class OrderingRepository(InMemoryIntegrationRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.persistence_order: list[tuple[str, str]] = []
+
+    async def persist_event(self, envelope: CanonicalEventEnvelope) -> None:
+        self.persistence_order.append(("parent", envelope.event_id))
+        await super().persist_event(envelope)
+
+    async def mark_processed(self, event_id: str) -> None:
+        self.persistence_order.append(("processed", event_id))
+        await super().mark_processed(event_id)
+
+
+@pytest.mark.asyncio
+async def test_historical_parent_is_persisted_before_processed_marker() -> None:
+    repository = OrderingRepository()
+    coordinator = service(InMemoryEventBus(), repository)
+
+    await coordinator.process_historical_candle(candle())
+
+    assert [stage for stage, _ in repository.persistence_order] == ["parent", "processed"]
+    assert len({event_id for _, event_id in repository.persistence_order}) == 1
+    assert repository.metrics()["events"] == 1
+    assert repository.metrics()["processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_parent_cannot_be_marked_processed() -> None:
+    repository = InMemoryIntegrationRepository()
+    missing_event_id = "f" * 64
+
+    with pytest.raises(MissingIntegrationEventError, match=missing_event_id):
+        await repository.mark_processed(missing_event_id)
+
+    assert repository.metrics()["processed"] == 0
+
+
+class FailFirstSnapshotRepository(InMemoryIntegrationRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_snapshot = True
+
+    async def save_snapshot(self, value: object) -> object:
+        if self.fail_next_snapshot:
+            self.fail_next_snapshot = False
+            raise RuntimeError("simulated snapshot rollback")
+        return await super().save_snapshot(value)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_failed_historical_cycle_retries_idempotently_without_orphan_marker() -> None:
+    repository = FailFirstSnapshotRepository()
+    coordinator = service(InMemoryEventBus(), repository)
+
+    with pytest.raises(RuntimeError, match="simulated snapshot rollback"):
+        await coordinator.process_historical_candle(candle())
+
+    assert repository.metrics()["events"] == 1
+    assert repository.metrics()["processed"] == 0
+    assert repository.metrics()["snapshots"] == 0
+
+    await coordinator.process_historical_candle(candle())
+    await coordinator.process_historical_candle(candle())
+
+    assert repository.metrics()["events"] == 1
+    assert repository.metrics()["processed"] == 1
+    assert repository.metrics()["snapshots"] == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_historical_duplicate_delivery_is_safe() -> None:
+    repository = InMemoryIntegrationRepository()
+    coordinator = service(InMemoryEventBus(), repository)
+
+    await asyncio.gather(
+        coordinator.process_historical_candle(candle()),
+        coordinator.process_historical_candle(candle()),
+    )
+
+    assert repository.metrics()["events"] == 1
+    assert repository.metrics()["processed"] == 1
+    assert repository.metrics()["snapshots"] == 1
 
 
 @pytest.mark.asyncio
