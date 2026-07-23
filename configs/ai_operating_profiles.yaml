@@ -1,0 +1,23 @@
+profiles:
+  safe_test:
+    ai_centric_shadow_mode: true
+    ai_signal_proposals: true
+    ai_signal_monitoring: true
+    ai_signal_publication: false
+    ai_signal_adjustments: false
+    analytical_only: true
+  shadow:
+    ai_centric_shadow_mode: true
+    ai_signal_proposals: true
+    ai_signal_monitoring: true
+    ai_signal_publication: false
+    ai_signal_adjustments: false
+    analytical_only: true
+  analytical_live:
+    ai_centric_shadow_mode: true
+    ai_signal_proposals: true
+    ai_signal_monitoring: true
+    ai_signal_publication: true
+    ai_signal_adjustments: true
+    analytical_only: true
+    broker_execution: false

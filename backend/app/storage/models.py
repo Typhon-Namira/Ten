@@ -1160,3 +1160,102 @@ class LLMStructuredOutputFailureRecord(Base):
     failure_state: Mapped[str] = mapped_column(String(64), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class HardGateVersionRecord(Base):
+    __tablename__ = "hard_gate_versions"
+
+    gate_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    gate_version: Mapped[str] = mapped_column(String(32), primary_key=True)
+    registry_version: Mapped[str] = mapped_column(String(64), index=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class FinalSystemActionRecord(Base):
+    __tablename__ = "final_system_actions"
+    __table_args__ = (Index("ix_final_system_actions_signal_created", "managed_signal_id", "created_at"),)
+
+    final_action_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    ai_proposal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_signal_proposals.proposal_id", ondelete="RESTRICT"), index=True)
+    managed_signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("managed_signals.signal_id", ondelete="CASCADE"), index=True)
+    market_state_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"), index=True)
+    quantitative_forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("quantitative_forecasts.result_id", ondelete="RESTRICT"), index=True)
+    ai_forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_market_forecasts.forecast_id", ondelete="RESTRICT"), index=True)
+    action: Mapped[str] = mapped_column(String(48), index=True)
+    approval_state: Mapped[str] = mapped_column(String(32), index=True)
+    publication_state: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class GuardrailEvaluationRecord(Base):
+    __tablename__ = "guardrail_evaluations"
+    __table_args__ = (Index("ux_guardrail_evaluation_action_gate", "final_action_id", "gate_id", unique=True),)
+
+    evaluation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    final_action_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("final_system_actions.final_action_id", ondelete="CASCADE"), index=True)
+    gate_id: Mapped[str] = mapped_column(String(96), index=True)
+    gate_version: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class PublishedAnalyticalSignalRecord(Base):
+    __tablename__ = "published_analytical_signals"
+    __table_args__ = (Index("ux_published_analytical_signal_signal", "signal_id", unique=True),)
+
+    publication_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("managed_signals.signal_id", ondelete="CASCADE"), index=True)
+    final_action_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("final_system_actions.final_action_id", ondelete="RESTRICT"), unique=True, index=True)
+    proposal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_signal_proposals.proposal_id", ondelete="RESTRICT"), index=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    direction: Mapped[str] = mapped_column(String(16), index=True)
+    setup_family: Mapped[str] = mapped_column(String(64), index=True)
+    lifecycle_state: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class LLMUsageMetricRecord(Base):
+    __tablename__ = "llm_usage_metrics"
+    __table_args__ = (Index("ix_llm_usage_metrics_date_model", "usage_date", "model_identifier"),)
+
+    metric_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    usage_date: Mapped[str] = mapped_column(String(10), index=True)
+    request_hash: Mapped[str] = mapped_column(String(64), index=True)
+    market_state_hash: Mapped[str] = mapped_column(String(64), index=True)
+    model_identifier: Mapped[str] = mapped_column(String(128), index=True)
+    success: Mapped[bool] = mapped_column(Boolean, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class DetailedSignalOutcomeRecord(Base):
+    __tablename__ = "detailed_signal_outcomes"
+
+    outcome_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("managed_signals.signal_id", ondelete="CASCADE"), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AIPerformanceReportRecord(Base):
+    __tablename__ = "ai_performance_reports"
+
+    report_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    sample_count: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AIProductionReadinessReportRecord(Base):
+    __tablename__ = "ai_production_readiness_reports"
+
+    report_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    sample_count: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
