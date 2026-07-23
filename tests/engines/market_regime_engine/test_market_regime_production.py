@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.engines.market_regime_engine import (
@@ -296,9 +297,12 @@ async def test_in_memory_repository_complete_contract_and_checkpoint_integrity()
     snapshot = BaselineMarketRegimeAnalyzer().analyze_snapshot(MarketRegimeContext(candles(), rich()))
     await repo.save_snapshot(snapshot)
     await repo.save_snapshot(snapshot)
+    same_boundary = snapshot.model_copy(update={"snapshot_id": uuid4()})
+    await repo.save_snapshot(same_boundary)
     await repo.save_evidence(snapshot)
     assert await repo.get_latest_snapshot("XAU/USD", Timeframe.M15) == snapshot
     assert await repo.get_snapshot(snapshot.snapshot_id) == snapshot
+    assert await repo.get_snapshot(same_boundary.snapshot_id) is None
     assert await repo.list_snapshots("XAUUSD", Timeframe.M15) == (snapshot,)
     assert await repo.list_evidence("XAUUSD", Timeframe.M15)
     transition = RegimeTransition(transition_id=uuid4(), symbol="XAUUSD", timeframe=Timeframe.M15, from_regime=DominantRegime.BALANCED, to_regime=DominantRegime.TRENDING_BULL, started_at=BASE, state=TransitionState.WATCH, confidence=0.5, ambiguity=0.5, reasoning_summary="Probabilistic transition watch.")
@@ -509,6 +513,9 @@ async def test_sqlalchemy_repository_contract_with_fake_session() -> None:
     session = Session()
     repo = SqlAlchemyMarketRegimeRepository(FakeSessionFactory(session))  # type: ignore[arg-type]
     await repo.save_snapshot(snapshot)
+    snapshot_insert = session.execute.await_args_list[0].args[0]
+    snapshot_sql = " ".join(str(snapshot_insert.compile(dialect=postgresql.dialect())).split())
+    assert "ON CONFLICT (symbol, timeframe, analysis_timestamp, configuration_version) DO NOTHING" in snapshot_sql
     await repo.save_evidence(snapshot)
     await repo.save_transition(transition)
     await repo.save_checkpoint(snapshot)
