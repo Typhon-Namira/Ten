@@ -44,6 +44,17 @@ class FakeAnalysis:
         return SimpleNamespace(context_id=uuid4(), as_of=NOW, engine_version="1.0.0")
 
 
+class DegradedVolumeAnalysis(FakeAnalysis):
+    async def analyze(self, *_: object, **__: object) -> object:
+        return SimpleNamespace(
+            id=uuid4(),
+            analysis_timestamp=NOW,
+            engine_version="1.0.0",
+            status=SimpleNamespace(value="degraded"),
+            degraded_reasons=("insufficient_volume_profile_data",),
+        )
+
+
 class FakeScore:
     async def calculate(self, request: object) -> object:
         return SimpleNamespace(snapshot_id=uuid4(), metadata=SimpleNamespace(input_fingerprint="a" * 64), policy_version="1.0.0")
@@ -529,6 +540,24 @@ async def test_ai_reasoning_failure_is_isolated_from_scoring_and_publication() -
     assert result is None
     assert repository.metrics()["snapshots"] == 1
     assert await repository.signals() == ()
+    assert coordinator.failures == 0
+
+
+@pytest.mark.asyncio
+async def test_degraded_volume_evidence_continues_through_unified_state_quant_and_ai() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    coordinator.volume_profile = DegradedVolumeAnalysis()
+    stages: list[str] = []
+    coordinator.unified_market_state = RecordingUnifiedState(stages)
+    coordinator.quantitative_forecasting = RecordingQuantForecast(stages)
+    coordinator.ai_reasoning = RecordingAIAndFinalDecision(stages)
+    coordinator.ai_centric_shadow_mode = True
+
+    await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+
+    assert stages == ["unified_market_state", "quant_forecast", "ai_reasoning", "final_decision"]
+    assert repository.metrics()["snapshots"] == 1
     assert coordinator.failures == 0
 
 

@@ -14,7 +14,7 @@ from .config import AIReasoningConfig
 from .models import AIReasoningRequest, AIMarketForecast, AISignalProposal, ManagedSignal, MarketMemorySummary
 
 
-_MAX_AI_COLLECTION_ITEMS = 2
+_MAX_AI_COLLECTION_ITEMS = 1
 _MAX_AI_STRING_CHARACTERS = 2_000
 
 
@@ -24,7 +24,7 @@ def _bounded_value(value: Any) -> Any:
     Unified Market State remains the complete authoritative record. Engines can legitimately
     persist thousands of historical zones/levels in one snapshot; serializing those collections
     repeatedly into the LLM request produced payloads larger than the provider context. Long
-    collections are represented by deterministic edge samples and their exact count. The
+    collections are represented by a deterministic latest sample and their exact count. The
     enclosing evidence ID already commits to the complete unabridged value. Every scalar and
     every top-level engine field remains present.
     """
@@ -34,16 +34,12 @@ def _bounded_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         if len(value) <= _MAX_AI_COLLECTION_ITEMS:
             return [_bounded_value(item) for item in value]
-        edge = _MAX_AI_COLLECTION_ITEMS // 2
         return {
             "collection_summary": {
                 "total_count": len(value),
-                "sampling": "first_and_latest",
+                "sampling": "latest",
             },
-            "items": [
-                *(_bounded_value(item) for item in value[:edge]),
-                *(_bounded_value(item) for item in value[-edge:]),
-            ],
+            "items": [_bounded_value(value[-1])],
         }
     if isinstance(value, str) and len(value) > _MAX_AI_STRING_CHARACTERS:
         return {

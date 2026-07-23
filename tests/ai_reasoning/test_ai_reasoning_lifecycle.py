@@ -303,7 +303,7 @@ async def test_reasoning_request_bounds_large_engine_collections_without_changin
     assert len(encoded) < 500_000
     assert smc_raw["summary"]["bias"] == "bullish"
     assert smc_raw["zones"]["collection_summary"]["total_count"] == 5_000
-    assert [item["zone_id"] for item in smc_raw["zones"]["items"]] == [0, 4_999]
+    assert [item["zone_id"] for item in smc_raw["zones"]["items"]] == [4_999]
     assert source.raw_value["structure"]["direction"] == "bullish"
 
 

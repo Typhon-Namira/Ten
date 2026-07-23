@@ -37,8 +37,18 @@ class HttpOpenRouterClient(OpenRouterClient):
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
-        except (httpx.HTTPError, KeyError, IndexError, json.JSONDecodeError) as exc:
-            raise ExternalServiceError("OpenRouter returned an invalid scoring response") from exc
+        except httpx.HTTPStatusError as exc:
+            # Status only: never persist the provider response body because it may contain
+            # account, prompt, or policy details.
+            raise ExternalServiceError(
+                f"OpenRouter request rejected with HTTP {exc.response.status_code}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ExternalServiceError(
+                f"OpenRouter transport failed: {type(exc).__name__}"
+            ) from exc
+        except (KeyError, IndexError, json.JSONDecodeError) as exc:
+            raise ExternalServiceError("OpenRouter returned malformed JSON") from exc
         if not isinstance(parsed, dict):
             raise ExternalServiceError("OpenRouter scoring response must be a JSON object")
         return parsed
