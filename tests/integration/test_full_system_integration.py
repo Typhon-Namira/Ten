@@ -546,7 +546,7 @@ async def test_ai_reasoning_failure_is_isolated_from_scoring_and_publication() -
 
 @pytest.mark.asyncio
 async def test_degraded_volume_evidence_continues_through_unified_state_quant_and_ai(
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     coordinator = service(bus, repository)
@@ -558,19 +558,19 @@ async def test_degraded_volume_evidence_continues_through_unified_state_quant_an
     coordinator.ai_centric_shadow_mode = True
 
     target_logger = logging.getLogger("backend.app.integration.service")
-    target_logger.addHandler(caplog.handler)
-    previous_level = target_logger.level
-    target_logger.setLevel(logging.INFO)
-    try:
-        await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
-    finally:
-        target_logger.removeHandler(caplog.handler)
-        target_logger.setLevel(previous_level)
+    events: list[str] = []
+    original_info = target_logger.info
+
+    def capture_info(message: object, *args: object, **kwargs: object) -> None:
+        events.append(str(message))
+        original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(target_logger, "info", capture_info)
+    await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
 
     assert stages == ["unified_market_state", "quant_forecast", "ai_reasoning", "final_decision"]
     assert repository.metrics()["snapshots"] == 1
     assert coordinator.failures == 0
-    events = [record.message for record in caplog.records if record.name == target_logger.name]
     assert "ai_reasoning.gate.entered" in events
     assert "ai_reasoning.job.enqueued" in events
 
