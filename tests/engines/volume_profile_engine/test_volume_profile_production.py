@@ -22,6 +22,7 @@ from backend.app.engines.volume_profile_engine import (
     ProfileAnchor,
     ProfileLifecycleState,
     ProfileLifecycleTransition,
+    ProfileSkipReason,
     ProfileType,
     SessionVolumeProfile,
     VolumeProfileBucket,
@@ -185,6 +186,48 @@ def test_empty_insufficient_missing_tick_anchor_periods_and_no_lookahead() -> No
     assert prefix.profiles == replay.profiles and prefix.confluences == replay.confluences and prefix.migrations == replay.migrations
     assert prefix.analysis_timestamp < extended.analysis_timestamp
     assert all(x.availability_timestamp <= prefix.analysis_timestamp for x in prefix.profiles)
+
+
+def test_empty_periods_are_typed_non_fatal_and_structured(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.app.engines.volume_profile_engine import analyzer as analyzer_module
+
+    analyzer = BaselineVolumeProfileAnalyzer()
+    logs: list[dict[str, object]] = []
+    monkeypatch.setattr(analyzer_module.logger, "warning", lambda _message, **kwargs: logs.append(kwargs["extra"]))
+
+    zero = analyzer.analyze_snapshot(context([]))
+    assert zero.status == AnalysisStatus.INSUFFICIENT_HISTORY
+    assert zero.degraded_reasons == (ProfileSkipReason.INSUFFICIENT_VOLUME_PROFILE_DATA,)
+
+    one = analyzer.analyze_snapshot(context(series(1)))
+    assert one.status == AnalysisStatus.INSUFFICIENT_HISTORY
+    assert one.profiles == ()
+
+    malformed = [item.model_copy(update={"volume": float("nan")}) for item in series(3)]
+    filtered = analyzer.analyze_snapshot(context(malformed))
+    assert filtered.status == AnalysisStatus.DEGRADED
+    assert filtered.profiles == ()
+    assert filtered.volume_data_quality.invalid_observations == 3
+
+    daily = series(4, start=datetime(2026, 1, 5, 22, tzinfo=UTC), timeframe=Timeframe.H1)
+    daily = [*daily[:2], *(item.model_copy(update={"volume": 0.0}) for item in daily[2:])]
+    daily_snapshot = analyzer.analyze_snapshot(context(daily))
+    assert daily_snapshot.status == AnalysisStatus.DEGRADED
+    assert any(item.profile_type == ProfileType.DAILY and item.usable_count == 0 for item in daily_snapshot.skipped_periods)
+    assert any(item.profile_type == ProfileType.FIXED_RANGE for item in daily_snapshot.profiles)
+
+    weekend = series(3, start=datetime(2026, 1, 3, 7, tzinfo=UTC), timeframe=Timeframe.H1)
+    session_snapshot = analyzer.analyze_snapshot(context(weekend))
+    session_skip = next(item for item in session_snapshot.skipped_periods if item.profile_type == ProfileType.SESSION)
+    assert session_skip.reason == ProfileSkipReason.EMPTY_PROFILE_PERIOD
+    assert session_snapshot.status == AnalysisStatus.DEGRADED
+
+    record = next(item for item in logs if item["volume_profile_skipped_period"] == str(daily[2].timestamp.date()))
+    assert record["volume_profile_symbol"] == "XAUUSD"
+    assert record["volume_profile_timeframe"] == "H1"
+    assert record["volume_profile_input_count"] == 2
+    assert record["volume_profile_usable_count"] == 0
+    assert record["volume_profile_skip_reason"] == "insufficient_volume_profile_data"
 
 
 def test_nodes_shelves_gaps_shapes_migrations_and_cross_engine_confluence() -> None:
@@ -360,6 +403,27 @@ class SMC:
 class Liquidity:
     async def state(self, *_: object) -> object:
         return SimpleNamespace(pools=(SimpleNamespace(id=uuid4()),))
+
+
+@pytest.mark.asyncio
+async def test_new_database_cold_start_persists_non_fatal_snapshot() -> None:
+    repository = InMemoryVolumeProfileRepository()
+    service = VolumeProfileService(
+        cast(Any, Market([])),
+        SMC(),
+        Liquidity(),
+        InMemoryEventBus(),
+        InMemoryFeatureStore(),
+        VolumeProfileConfig(default_volume_source="exchange"),
+        repository,
+    )
+
+    snapshot = await service.analyze("XAUUSD", Timeframe.M1)
+
+    assert snapshot.status == AnalysisStatus.INSUFFICIENT_HISTORY
+    assert snapshot.degraded_reasons == (ProfileSkipReason.INSUFFICIENT_VOLUME_PROFILE_DATA,)
+    assert await repository.latest("XAUUSD", Timeframe.M1) == snapshot
+    assert service.metrics.analyses_completed == 1
 
 
 @pytest.mark.asyncio
