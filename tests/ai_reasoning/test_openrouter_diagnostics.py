@@ -141,7 +141,9 @@ async def test_http_200_result_is_logged_without_payload(caplog: pytest.LogCaptu
 
     assert result == {"result": "private-value"}
     completed = next(record for record in caplog.records if record.message == "openrouter.request.http_completed")
+    received = next(record for record in caplog.records if record.message == "openrouter.response.received")
     assert completed.http_status == 200
+    assert received.http_status == 200
     assert completed.response_content_type == "application/json"
     assert completed.response_body_length > 0
     assert "secret-key" not in caplog.text

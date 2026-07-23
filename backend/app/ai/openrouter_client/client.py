@@ -218,6 +218,19 @@ class HttpOpenRouterClient(OpenRouterClient):
                 "failure_phase": None,
             },
         )
+        logger.info(
+            "openrouter.response.received",
+            extra={
+                "request_id": request_id,
+                "cycle_id": cycle_id,
+                "model": model,
+                "endpoint": endpoint,
+                "http_status": response.status_code,
+                "response_content_type": _safe_text(response.headers.get("content-type"), limit=128),
+                "response_body_length": len(response.content),
+                "elapsed_ms": (perf_counter() - started) * 1000,
+            },
+        )
         try:
             content = response.json()["choices"][0]["message"]["content"]
             parsed = json.loads(content)
