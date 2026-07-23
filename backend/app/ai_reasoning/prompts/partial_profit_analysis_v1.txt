@@ -1,0 +1,1 @@
+Evaluate partial-profit conditions for the supplied active signal. Return strict JSON with "forecast" and "proposal". TAKE_PARTIAL_PROFIT requires referenced evidence and valid persisted lifecycle context. Do not alter execution state or claim guardrail approval.

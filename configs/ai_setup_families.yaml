@@ -1,0 +1,148 @@
+version: "setup_families_v1"
+families:
+  - setup_family_id: "trend_continuation"
+    version: "1.0"
+    applicable_regimes: ["trending", "volatile_trend"]
+    unsuitable_regimes: ["range"]
+    mandatory_evidence: ["market_data", "market_regime"]
+    supporting_evidence: ["smc", "institutional_flow", "volume_profile"]
+    contradictory_evidence: ["regime_reversal"]
+    optional_evidence: ["fvg", "order_block", "liquidity"]
+    entry_model: "continuation_retest"
+    invalidation_model: "trend_structure_break"
+    stop_loss_model: "beyond_protected_structure"
+    target_model: "next_liquidity_or_profile_node"
+    expected_horizon: "3_m5"
+    expiry_policy: "expire_after_expected_horizon"
+    monitoring_policy: "monitor_structure_regime_and_liquidity"
+    minimum_evidence_completeness: 0.55
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "HOLD_EXISTING_SIGNAL", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]
+  - setup_family_id: "pullback_continuation"
+    version: "1.0"
+    applicable_regimes: ["trending", "volatile_trend"]
+    mandatory_evidence: ["market_data", "smc"]
+    supporting_evidence: ["liquidity", "order_block", "fvg"]
+    contradictory_evidence: ["structure_reversal"]
+    optional_evidence: ["volume_profile", "institutional_flow"]
+    entry_model: "pullback_zone"
+    invalidation_model: "protected_structure_break"
+    stop_loss_model: "beyond_pullback_anchor"
+    target_model: "trend_liquidity_target"
+    expected_horizon: "3_m5"
+    expiry_policy: "expire_if_zone_not_reached"
+    monitoring_policy: "monitor_pullback_depth_and_structure"
+    minimum_evidence_completeness: 0.55
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "ADJUST_ENTRY", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]
+  - setup_family_id: "liquidity_sweep_reversal"
+    version: "1.0"
+    applicable_regimes: ["range", "transition", "volatile"]
+    mandatory_evidence: ["market_data", "liquidity"]
+    supporting_evidence: ["smc", "displacement", "volume_profile"]
+    contradictory_evidence: ["trend_continuation"]
+    optional_evidence: ["order_block", "fvg"]
+    entry_model: "post_sweep_reclaim"
+    invalidation_model: "sweep_extreme_break"
+    stop_loss_model: "beyond_sweep_extreme"
+    target_model: "opposite_liquidity"
+    expected_horizon: "10_m1"
+    expiry_policy: "expire_after_reclaim_window"
+    monitoring_policy: "monitor_reclaim_and_displacement"
+    minimum_evidence_completeness: 0.50
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]
+  - setup_family_id: "breakout_retest"
+    version: "1.0"
+    applicable_regimes: ["transition", "trending", "volatile"]
+    mandatory_evidence: ["market_data", "smc"]
+    supporting_evidence: ["liquidity", "displacement", "volume_profile"]
+    contradictory_evidence: ["failed_breakout"]
+    optional_evidence: ["fvg", "institutional_flow"]
+    entry_model: "breakout_level_retest"
+    invalidation_model: "close_back_inside_structure"
+    stop_loss_model: "beyond_retest_structure"
+    target_model: "measured_move_or_liquidity"
+    expected_horizon: "3_m5"
+    expiry_policy: "expire_without_retest"
+    monitoring_policy: "monitor_acceptance_and_retest"
+    minimum_evidence_completeness: 0.55
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "ADJUST_ENTRY", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]
+  - setup_family_id: "order_block_retest"
+    version: "1.0"
+    applicable_regimes: ["trending", "transition"]
+    mandatory_evidence: ["market_data", "order_block"]
+    supporting_evidence: ["smc", "liquidity", "displacement"]
+    contradictory_evidence: ["order_block_invalidated"]
+    optional_evidence: ["fvg", "volume_profile"]
+    entry_model: "order_block_zone"
+    invalidation_model: "order_block_boundary_break"
+    stop_loss_model: "beyond_order_block"
+    target_model: "external_liquidity"
+    expected_horizon: "3_m5"
+    expiry_policy: "expire_on_block_invalidation"
+    monitoring_policy: "monitor_block_mitigation"
+    minimum_evidence_completeness: 0.50
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "ADJUST_ENTRY", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]
+  - setup_family_id: "fvg_continuation"
+    version: "1.0"
+    applicable_regimes: ["trending", "volatile_trend"]
+    mandatory_evidence: ["market_data", "fvg"]
+    supporting_evidence: ["smc", "displacement", "liquidity"]
+    contradictory_evidence: ["fvg_invalidated"]
+    optional_evidence: ["order_block", "institutional_flow"]
+    entry_model: "fvg_mitigation"
+    invalidation_model: "fvg_full_invalidation"
+    stop_loss_model: "beyond_fvg_origin"
+    target_model: "continuation_liquidity"
+    expected_horizon: "10_m1"
+    expiry_policy: "expire_after_mitigation_window"
+    monitoring_policy: "monitor_gap_mitigation"
+    minimum_evidence_completeness: 0.50
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "ADJUST_ENTRY", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]
+  - setup_family_id: "displacement_continuation"
+    version: "1.0"
+    applicable_regimes: ["trending", "volatile"]
+    mandatory_evidence: ["market_data", "displacement"]
+    supporting_evidence: ["smc", "fvg", "liquidity"]
+    contradictory_evidence: ["displacement_failure"]
+    optional_evidence: ["volume_profile", "institutional_flow"]
+    entry_model: "displacement_origin_retest"
+    invalidation_model: "origin_break"
+    stop_loss_model: "beyond_displacement_origin"
+    target_model: "next_external_liquidity"
+    expected_horizon: "10_m1"
+    expiry_policy: "expire_after_momentum_decay"
+    monitoring_policy: "monitor_momentum_and_structure"
+    minimum_evidence_completeness: 0.50
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]
+  - setup_family_id: "range_boundary_reversal"
+    version: "1.0"
+    applicable_regimes: ["range"]
+    unsuitable_regimes: ["trending"]
+    mandatory_evidence: ["market_data", "market_regime"]
+    supporting_evidence: ["liquidity", "volume_profile", "smc"]
+    contradictory_evidence: ["range_breakout"]
+    optional_evidence: ["order_block", "institutional_flow"]
+    entry_model: "range_boundary_rejection"
+    invalidation_model: "range_acceptance_outside"
+    stop_loss_model: "beyond_range_boundary"
+    target_model: "range_midpoint_then_opposite_boundary"
+    expected_horizon: "3_m5"
+    expiry_policy: "expire_on_range_break"
+    monitoring_policy: "monitor_boundary_acceptance"
+    minimum_evidence_completeness: 0.50
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]
+  - setup_family_id: "session_breakout"
+    version: "1.0"
+    applicable_regimes: ["transition", "volatile", "trending"]
+    mandatory_evidence: ["market_data", "session"]
+    supporting_evidence: ["liquidity", "displacement", "smc"]
+    contradictory_evidence: ["session_breakout_failure"]
+    optional_evidence: ["volume_profile", "economic_calendar"]
+    entry_model: "session_range_break_retest"
+    invalidation_model: "return_inside_session_range"
+    stop_loss_model: "beyond_session_range"
+    target_model: "session_measured_move"
+    expected_horizon: "3_m5"
+    expiry_policy: "expire_at_session_end"
+    monitoring_policy: "monitor_session_acceptance_and_events"
+    minimum_evidence_completeness: 0.50
+    permitted_signal_actions: ["BUY", "SELL", "WAIT", "CANCEL_SETUP", "INVALIDATE_SIGNAL"]

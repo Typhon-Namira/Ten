@@ -73,6 +73,16 @@ class FailingQuantForecast:
         raise RuntimeError("shadow model failed")
 
 
+class SuccessfulQuantForecast:
+    async def forecast(self, _: object) -> object:
+        return object()
+
+
+class FailingAIReasoning:
+    async def process(self, _state: object, _forecast: object) -> None:
+        raise RuntimeError("AI reasoning failed")
+
+
 NOW = datetime(2026, 7, 19, 12, 30, tzinfo=UTC)
 
 
@@ -358,6 +368,23 @@ async def test_shadow_forecast_failure_is_isolated_from_scoring_and_publication(
     coordinator = service(bus, repository)
     coordinator.unified_market_state = CompleteShadowCapture()
     coordinator.quantitative_forecasting = FailingQuantForecast()
+    coordinator.ai_centric_shadow_mode = True
+
+    result = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+
+    assert result is None
+    assert repository.metrics()["snapshots"] == 1
+    assert await repository.signals() == ()
+    assert coordinator.failures == 0
+
+
+@pytest.mark.asyncio
+async def test_ai_reasoning_failure_is_isolated_from_scoring_and_publication() -> None:
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    coordinator.unified_market_state = CompleteShadowCapture()
+    coordinator.quantitative_forecasting = SuccessfulQuantForecast()
+    coordinator.ai_reasoning = FailingAIReasoning()
     coordinator.ai_centric_shadow_mode = True
 
     result = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))

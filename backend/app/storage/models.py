@@ -1008,3 +1008,155 @@ class QuantCalibrationBucketRecord(Base):
     horizon_id: Mapped[str] = mapped_column(String(24), index=True)
     dimension: Mapped[str] = mapped_column(String(48), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class AIReasoningRequestRecord(Base):
+    __tablename__ = "ai_reasoning_requests"
+
+    request_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    market_state_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("unified_market_states.state_id", ondelete="CASCADE"), index=True)
+    quantitative_forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("quantitative_forecasts.result_id", ondelete="RESTRICT"), index=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    analysis_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    prompt_version: Mapped[str] = mapped_column(String(64), index=True)
+    model_identifier: Mapped[str] = mapped_column(String(128), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AIMarketForecastRecord(Base):
+    __tablename__ = "ai_market_forecasts"
+
+    forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_reasoning_requests.request_id", ondelete="CASCADE"), unique=True, index=True)
+    market_state_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("unified_market_states.state_id", ondelete="CASCADE"), index=True)
+    quantitative_forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("quantitative_forecasts.result_id", ondelete="RESTRICT"), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    dominant_direction: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    selected_setup_family: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AIForecastScenarioRecord(Base):
+    __tablename__ = "ai_forecast_scenarios"
+
+    forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_market_forecasts.forecast_id", ondelete="CASCADE"), primary_key=True)
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scenario_name: Mapped[str] = mapped_column(String(128), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class AIForecastEvidenceLinkRecord(Base):
+    __tablename__ = "ai_forecast_evidence_links"
+
+    forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_market_forecasts.forecast_id", ondelete="CASCADE"), primary_key=True)
+    evidence_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("evidence_items.evidence_id", ondelete="RESTRICT"), primary_key=True)
+    role: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
+class AISignalProposalRecord(Base):
+    __tablename__ = "ai_signal_proposals"
+    __table_args__ = (Index("ix_ai_signal_proposals_opportunity_created", "structural_opportunity_key", "created_at"),)
+
+    proposal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_market_forecasts.forecast_id", ondelete="CASCADE"), index=True)
+    market_state_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("unified_market_states.state_id", ondelete="CASCADE"), index=True)
+    structural_opportunity_key: Mapped[str] = mapped_column(String(64), index=True)
+    recommended_action: Mapped[str] = mapped_column(String(48), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AISetupFamilyVersionRecord(Base):
+    __tablename__ = "ai_setup_family_versions"
+
+    setup_family_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    version: Mapped[str] = mapped_column(String(32), primary_key=True)
+    registry_version: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class ManagedSignalRecord(Base):
+    __tablename__ = "managed_signals"
+
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    structural_opportunity_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    setup_family: Mapped[str] = mapped_column(String(64), index=True)
+    direction: Mapped[str] = mapped_column(String(16), index=True)
+    state: Mapped[str] = mapped_column(String(32), index=True)
+    current_proposal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_signal_proposals.proposal_id", ondelete="RESTRICT"), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class SignalStateTransitionRecord(Base):
+    __tablename__ = "signal_state_transitions"
+
+    transition_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("managed_signals.signal_id", ondelete="CASCADE"), index=True)
+    previous_state: Mapped[str] = mapped_column(String(32), index=True)
+    new_state: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class SignalLevelRevisionRecord(Base):
+    __tablename__ = "signal_level_revisions"
+
+    revision_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("managed_signals.signal_id", ondelete="CASCADE"), index=True)
+    level_type: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class SignalMonitoringEvaluationRecord(Base):
+    __tablename__ = "signal_monitoring_evaluations"
+
+    evaluation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("managed_signals.signal_id", ondelete="CASCADE"), index=True)
+    forecast_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_market_forecasts.forecast_id", ondelete="CASCADE"), index=True)
+    thesis_valid: Mapped[bool] = mapped_column(Boolean, index=True)
+    recommended_action: Mapped[str] = mapped_column(String(48), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ManagedSignalOutcomeRecord(Base):
+    __tablename__ = "managed_signal_outcomes"
+
+    outcome_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("managed_signals.signal_id", ondelete="CASCADE"), unique=True, index=True)
+    final_state: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class MarketMemoryEntryRecord(Base):
+    __tablename__ = "market_memory_entries"
+    __table_args__ = (Index("ix_market_memory_entries_series_time", "instrument", "occurred_at"),)
+
+    entry_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    market_state_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("unified_market_states.state_id", ondelete="CASCADE"), index=True)
+    category: Mapped[str] = mapped_column(String(48), index=True)
+    opportunity_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    signal_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("managed_signals.signal_id", ondelete="SET NULL"), nullable=True, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class LLMStructuredOutputFailureRecord(Base):
+    __tablename__ = "llm_structured_output_failures"
+
+    failure_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_reasoning_requests.request_id", ondelete="CASCADE"), index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    model_identifier: Mapped[str] = mapped_column(String(128), index=True)
+    failure_state: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

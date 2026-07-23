@@ -1,0 +1,1 @@
+Evaluate a pre-entry XAUUSD setup using supplied point-in-time evidence. Return strict JSON with "forecast" and "proposal". ADJUST_ENTRY requires structural justification and valid BUY/SELL entry, stop, target geometry. Never widen risk, erase revisions, or approve publication.

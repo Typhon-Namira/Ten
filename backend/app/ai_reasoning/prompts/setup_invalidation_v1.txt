@@ -1,0 +1,1 @@
+Evaluate setup invalidation from supplied closed-cycle evidence only. Return strict JSON with "forecast" and "proposal". Use CANCEL_SETUP or INVALIDATE_SIGNAL only when the structured invalidation conditions are supported by referenced evidence. Never fabricate evidence or execution approval.
