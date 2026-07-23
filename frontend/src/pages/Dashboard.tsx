@@ -10,6 +10,7 @@ import { PipelineStageTracker } from '../components/PipelineStageTracker'
 import { PublicationDistancePanel } from '../components/PublicationDistancePanel'
 import { RejectionReasonPanel } from '../components/RejectionReasonPanel'
 import { SignalTable } from '../components/SignalTable'
+import { ShadowForecastPanel } from '../components/ShadowForecastPanel'
 import { Sparkline } from '../components/widgets/Widgets'
 import { ChartFocusProvider } from '../lib/ChartFocusContext'
 import { useActiveSelection } from '../hooks/useActiveSelection'
@@ -19,6 +20,7 @@ import { useDashboard } from '../hooks/useDashboard'
 import { useEventStream } from '../hooks/useEventStream'
 import { useExplain } from '../hooks/useExplain'
 import { useLiveDashboard } from '../hooks/useLiveDashboard'
+import { useQuantForecast } from '../hooks/useQuantForecast'
 import { tenApi } from '../services/api'
 
 export function Dashboard() {
@@ -27,6 +29,7 @@ export function Dashboard() {
   const { status: streamStatus, events } = useEventStream()
   const { stages, rejections, marketIntelligence, performance, lastUpdated } = useLiveDashboard(selection.instrument, selection.timeframe)
   const aiScoreHistory = useAiScoreHistory(selection.instrument, selection.timeframe)
+  const { forecast: quantForecast, calibration: quantCalibration, outcomes: quantOutcomes } = useQuantForecast(selection.instrument)
   // Same call the chart makes for its default (unchanged) timeframe — reused here so the
   // liquidity distribution widget shows real per-pool strength data instead of the single
   // `latest_price` scalar that's all `MarketIntelligence.liquidity.state` carries.
@@ -89,6 +92,7 @@ export function Dashboard() {
       <div className="workspace-grid__main">
         <section className="panel" id="stages"><div className="panel__head"><div><p className="eyebrow">PIPELINE STAGES</p><h2>Live stage tracker</h2></div><span>updates every 5s</span></div><div className="panel-body"><PipelineStageTracker data={stages} /></div></section>
         <section className="panel" id="intelligence"><div className="panel__head"><div><p className="eyebrow">MARKET INTELLIGENCE</p><h2>Live market state</h2></div><span>updates every 5s</span></div><div className="panel-body"><MarketIntelligencePanel data={marketIntelligence} liquidityPools={overlays?.liquidity_pools ?? []} /></div></section>
+        <section className="panel" id="shadow-forecast"><div className="panel__head"><div><p className="eyebrow">QUANTITATIVE RESEARCH</p><h2>Multi-horizon forecast</h2></div><span>shadow only</span></div><div className="panel-body"><ShadowForecastPanel forecast={quantForecast} calibration={quantCalibration} outcomes={quantOutcomes} /></div></section>
         <section className="panel" id="signals">
           <div className="panel__head"><div><p className="eyebrow">SCENARIO FEED</p><h2>Current signals</h2></div><span>{signals.length} scenarios</span></div>
           {signals.length === 0 ? <PublicationDistancePanel intelligence={marketIntelligence} rejections={rejections} /> : <SignalTable signals={signals} />}

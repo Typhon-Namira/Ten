@@ -1,0 +1,23 @@
+version: "1.0"
+feature_schema_version: "quant_features_xauusd_v1"
+model_name: "deterministic_xauusd_baseline"
+model_version: "1.0.0"
+minimum_numeric_features: 9
+neutral_band: 0.0001
+horizons:
+  - horizon_id: "3_m1"
+    timeframe: "M1"
+    candle_count: 3
+    duration_seconds: 180
+  - horizon_id: "5_m1"
+    timeframe: "M1"
+    candle_count: 5
+    duration_seconds: 300
+  - horizon_id: "10_m1"
+    timeframe: "M1"
+    candle_count: 10
+    duration_seconds: 600
+  - horizon_id: "3_m5"
+    timeframe: "M5"
+    candle_count: 3
+    duration_seconds: 900

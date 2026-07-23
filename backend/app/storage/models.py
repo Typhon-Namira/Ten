@@ -865,3 +865,146 @@ class UnifiedMarketStateEvidenceLinkRecord(Base):
         primary_key=True,
     )
     ordinal: Mapped[int] = mapped_column(Integer)
+
+
+class QuantModelMetadataRecord(Base):
+    __tablename__ = "quant_forecast_model_metadata"
+
+    model_name: Mapped[str] = mapped_column(String(96), primary_key=True)
+    model_version: Mapped[str] = mapped_column(String(48), primary_key=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class QuantFeatureVectorRecord(Base):
+    __tablename__ = "quant_feature_vectors"
+    __table_args__ = (Index("ix_quant_feature_vectors_series_boundary", "instrument", "point_in_time"),)
+
+    vector_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    market_state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    point_in_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    schema_version: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class QuantFeatureReferenceRecord(Base):
+    __tablename__ = "quant_feature_references"
+
+    vector_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quant_feature_vectors.vector_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    feature_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    evidence_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("evidence_items.evidence_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    source_paths: Mapped[list[str]] = mapped_column(JSONB)
+
+
+class QuantForecastRequestRecord(Base):
+    __tablename__ = "quant_forecast_requests"
+    __table_args__ = (Index("ix_quant_forecast_requests_series_boundary", "instrument", "point_in_time"),)
+
+    request_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    market_state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="CASCADE"),
+        index=True,
+    )
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    point_in_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    model_name: Mapped[str] = mapped_column(String(96), index=True)
+    model_version: Mapped[str] = mapped_column(String(48))
+    mode: Mapped[str] = mapped_column(String(16), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class QuantForecastResultRecord(Base):
+    __tablename__ = "quantitative_forecasts"
+    __table_args__ = (Index("ix_quantitative_forecasts_series_boundary", "instrument", "point_in_time"),)
+
+    result_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quant_forecast_requests.request_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    market_state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="CASCADE"),
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    point_in_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    model_name: Mapped[str] = mapped_column(String(96), index=True)
+    model_version: Mapped[str] = mapped_column(String(48))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class QuantForecastHorizonRecord(Base):
+    __tablename__ = "quantitative_forecast_horizons"
+
+    result_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quantitative_forecasts.result_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    horizon_id: Mapped[str] = mapped_column(String(24), primary_key=True)
+    duration_seconds: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class QuantForecastOutcomeRecord(Base):
+    __tablename__ = "quant_forecast_outcomes"
+    __table_args__ = (Index("ux_quant_forecast_outcomes_result_horizon", "result_id", "horizon_id", unique=True),)
+
+    outcome_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    result_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quantitative_forecasts.result_id", ondelete="CASCADE"),
+        index=True,
+    )
+    horizon_id: Mapped[str] = mapped_column(String(24), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class QuantCalibrationReportRecord(Base):
+    __tablename__ = "quant_calibration_runs"
+
+    report_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    model_name: Mapped[str] = mapped_column(String(96), index=True)
+    model_version: Mapped[str] = mapped_column(String(48), index=True)
+    sample_count: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class QuantCalibrationBucketRecord(Base):
+    __tablename__ = "quant_calibration_buckets"
+
+    report_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quant_calibration_runs.report_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    horizon_id: Mapped[str] = mapped_column(String(24), index=True)
+    dimension: Mapped[str] = mapped_column(String(48), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)

@@ -1,4 +1,4 @@
-import type { ActiveSelection, AIScoreSnapshot, ChartOverlays, ChatTurn, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { ActiveSelection, AIScoreSnapshot, ChartOverlays, ChatTurn, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
 
@@ -62,6 +62,9 @@ export const tenApi = {
   performance: (instrument: string, timeframe: string) => request<PerformanceMetrics>(`/api/v1/system/performance?${scoped(instrument, timeframe)}`),
   aiScoreHistory: (instrument: string, timeframe: string, limit = 40) => request<AIScoreSnapshot[]>(`/ai-scoring/history?${scoped(instrument, timeframe)}&limit=${limit}`),
   chartOverlays: (instrument: string, timeframe: string, limit = 300) => request<ChartOverlays>(`/api/v1/chart/overlays?${scoped(instrument, timeframe)}&limit=${limit}`),
+  latestQuantForecast: (instrument: string) => requestOptional<QuantForecastResult>(`/api/v1/quant-forecasts/latest?instrument=${encodeURIComponent(instrument)}`),
+  latestQuantCalibration: () => requestOptional<QuantCalibrationReport>('/api/v1/quant-forecasts/calibration/latest'),
+  quantForecastOutcomes: (resultId: string) => request<QuantForecastOutcome[]>(`/api/v1/quant-forecasts/${encodeURIComponent(resultId)}/outcomes`),
   // Explainability: every AI-authored answer here is prose over a context TEN itself assembled —
   // the AI never fetches its own data, so a chat answer can never disagree with these same panels.
   explainCurrent: (instrument: string, timeframe: string) => request<ExplainResponse>(`/api/v1/explain/current?${scoped(instrument, timeframe)}`),

@@ -19,6 +19,7 @@ from .stream import router as stream_router
 from .pipeline import router as pipeline_router
 from .chart import router as chart_router
 from .explain import router as explain_router
+from .quant_forecasting import router as quant_forecasting_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -40,3 +41,4 @@ api_router.include_router(stream_router)
 api_router.include_router(pipeline_router)
 api_router.include_router(chart_router)
 api_router.include_router(explain_router)
+api_router.include_router(quant_forecasting_router)

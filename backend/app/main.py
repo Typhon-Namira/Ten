@@ -61,6 +61,11 @@ from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.explainability import ExplainabilityService
 from backend.app.core.feature_flags import FeatureFlag
 from backend.app.market_state import InMemoryUnifiedMarketStateRepository, SqlAlchemyUnifiedMarketStateRepository, UnifiedMarketStateRepository, UnifiedMarketStateService
+from backend.app.quant_forecasting.config import QuantForecastingConfig
+from backend.app.quant_forecasting.features import PointInTimeFeatureExtractor
+from backend.app.quant_forecasting.provider import DeterministicBaselineProvider
+from backend.app.quant_forecasting.repository import InMemoryQuantForecastRepository, QuantForecastRepository, SqlAlchemyQuantForecastRepository
+from backend.app.quant_forecasting.service import QuantForecastService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -316,6 +321,19 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         app.state.unified_market_state_repository = market_state_repository
         app.state.unified_market_state_service = UnifiedMarketStateService(market_state_repository)
         ai_centric_shadow_mode = app.state.engine_registry.context.feature_flags.is_enabled(FeatureFlag.AI_CENTRIC_SHADOW_MODE)
+        quant_config = configs.load_model("quant_forecasting", QuantForecastingConfig)
+        quant_repository: QuantForecastRepository = InMemoryQuantForecastRepository()
+        if app.state.database_session_factory is not None:
+            quant_repository = SqlAlchemyQuantForecastRepository(app.state.database_session_factory)
+        quant_provider = DeterministicBaselineProvider(quant_config)
+        app.state.quant_forecast_repository = quant_repository
+        app.state.quant_forecast_service = QuantForecastService(
+            quant_repository,
+            quant_provider,
+            PointInTimeFeatureExtractor(quant_config.feature_schema_version),
+            quant_config,
+            enabled=ai_centric_shadow_mode,
+        )
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
             repository=app.state.integration_repository,
@@ -332,6 +350,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             repository_mode=integration_mode,
             stage_tracker=app.state.pipeline_stage_tracker,
             unified_market_state=app.state.unified_market_state_service,
+            quantitative_forecasting=app.state.quant_forecast_service,
             ai_centric_shadow_mode=ai_centric_shadow_mode,
         )
         if integration_config.enabled and integration_config.live_pipeline_enabled:
