@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 import logging
+import os
 from time import perf_counter
 from typing import Any
 
@@ -145,6 +146,15 @@ class FullSystemIntegrationService:
             },
         )
         if await self.repository.processed(envelope.event_id):
+            logger.info(
+                "integration.bootstrap.already_persisted",
+                extra={
+                    "event_id": envelope.event_id,
+                    "symbol": envelope.instrument_id,
+                    "timeframe": envelope.timeframe,
+                    "mode": envelope.mode.value,
+                },
+            )
             return
         assert envelope.instrument_id and envelope.timeframe
         self.config.instrument(candle.symbol)
@@ -161,6 +171,7 @@ class FullSystemIntegrationService:
         boundary = envelope.available_at
         self.last_cycle_started_at = self.clock()
         log_context = {
+            "event_id": envelope.event_id,
             "correlation_id": str(envelope.correlation_id),
             "cycle_id": str(envelope.trace_id),
             "candle_id": envelope.event_id,
@@ -170,6 +181,10 @@ class FullSystemIntegrationService:
             "canonical_timeframe": timeframe.value,
             "mode": envelope.mode.value,
             "candle_timestamp": boundary.isoformat(),
+            "boundary_timestamp": boundary.isoformat(),
+            "logical_identity": f"{symbol}:{timeframe.value}:{boundary.isoformat()}:{envelope.mode.value}",
+            "worker_id": f"{os.getenv('RAILWAY_REPLICA_ID') or os.getenv('HOSTNAME') or 'local'}:{os.getpid()}",
+            "git_sha": os.getenv("RAILWAY_GIT_COMMIT_SHA") or os.getenv("GIT_SHA"),
         }
         logger.info("snapshot.started", extra=log_context)
         tracker = self.stage_tracker
@@ -276,7 +291,18 @@ class FullSystemIntegrationService:
                 tracker.fail_in_flight(symbol, timeframe.value, boundary, exc=exc)
             logger.exception(
                 "snapshot.failed",
-                extra={**log_context, "failure_class": type(exc).__name__, "failure_stage": failure_stage, "duration_ms": (perf_counter() - started) * 1000},
+                extra={
+                    **log_context,
+                    "engine": failure_stage,
+                    "pipeline_stage": failure_stage,
+                    "repository_method": failure_stage,
+                    "constraint_name": None,
+                    "attempt": 1,
+                    "exception_class": type(exc).__name__,
+                    "failure_class": type(exc).__name__,
+                    "failure_stage": failure_stage,
+                    "duration_ms": (perf_counter() - started) * 1000,
+                },
             )
             try:
                 await self._trace(envelope, TraceStatus.FAILED, "full_system", (envelope.event_id,), (), started)
@@ -320,7 +346,21 @@ class FullSystemIntegrationService:
             exc.__dict__["integration_event_id"] = envelope.event_id
             exc.__dict__["integration_stage"] = failure_stage
             self.last_cycle_failed_at = self.clock()
-            logger.exception("snapshot.failed", extra={**log_context, "failure_class": type(exc).__name__, "failure_stage": failure_stage, "duration_ms": (perf_counter() - started) * 1000})
+            logger.exception(
+                "snapshot.failed",
+                extra={
+                    **log_context,
+                    "engine": failure_stage,
+                    "pipeline_stage": failure_stage,
+                    "repository_method": failure_stage,
+                    "constraint_name": None,
+                    "attempt": 1,
+                    "exception_class": type(exc).__name__,
+                    "failure_class": type(exc).__name__,
+                    "failure_stage": failure_stage,
+                    "duration_ms": (perf_counter() - started) * 1000,
+                },
+            )
             try:
                 await self._trace(envelope, TraceStatus.FAILED, "full_system", (envelope.event_id,), (), started)
             except Exception:

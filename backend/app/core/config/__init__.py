@@ -2,7 +2,7 @@ from .settings import Settings
 from .yaml import YamlConfigRepository
 
 
-def get_settings():
+def get_settings() -> Settings:
     from .settings import get_settings as _get_settings
 
     return _get_settings()

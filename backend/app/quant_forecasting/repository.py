@@ -67,13 +67,19 @@ class InMemoryQuantForecastRepository:
 
     async def save_features(self, value: QuantFeatureVector) -> QuantFeatureVector:
         async with self._lock:
-            self.features[value.vector_id] = value
-        return value
+            existing = self.features.get(value.market_state_id)
+            if existing is not None:
+                return existing
+            self.features[value.market_state_id] = value
+            return value
 
     async def save_result(self, value: QuantForecastResult) -> QuantForecastResult:
         async with self._lock:
-            self.results[value.result_id] = value
-        return value
+            existing = self.results.get(value.request_id)
+            if existing is not None:
+                return existing
+            self.results[value.request_id] = value
+            return value
 
     async def latest_result(self, instrument: str) -> QuantForecastResult | None:
         async with self._lock:
@@ -145,7 +151,7 @@ class SqlAlchemyQuantForecastRepository(ScopedSessionRepository):
 
     @scoped_session
     async def save_features(self, value: QuantFeatureVector) -> QuantFeatureVector:
-        await self.session.execute(
+        statement = (
             insert(QuantFeatureVectorRecord)
             .values(
                 vector_id=value.vector_id,
@@ -156,14 +162,28 @@ class SqlAlchemyQuantForecastRepository(ScopedSessionRepository):
                 payload=value.model_dump(mode="json"),
                 created_at=value.created_at,
             )
-            .on_conflict_do_nothing(index_elements=["vector_id"])
+            .on_conflict_do_nothing(index_elements=["market_state_id"])
+            .returning(QuantFeatureVectorRecord.vector_id)
         )
-        for feature in value.features:
+        vector_id = (await self.session.execute(statement)).scalar_one_or_none()
+        persisted = value
+        if vector_id is None:
+            record = (
+                await self.session.scalars(
+                    select(QuantFeatureVectorRecord).where(QuantFeatureVectorRecord.market_state_id == value.market_state_id).limit(1)
+                )
+            ).first()
+            if record is None:
+                await self.session.rollback()
+                raise RuntimeError("quant feature-vector conflict did not resolve to a persisted row")
+            vector_id = record.vector_id
+            persisted = QuantFeatureVector.model_validate(record.payload)
+        for feature in persisted.features:
             for evidence_id in feature.source_evidence_ids:
                 await self.session.execute(
                     insert(QuantFeatureReferenceRecord)
                     .values(
-                        vector_id=value.vector_id,
+                        vector_id=vector_id,
                         feature_name=feature.name,
                         evidence_id=evidence_id,
                         source_paths=list(feature.source_paths),
@@ -171,11 +191,11 @@ class SqlAlchemyQuantForecastRepository(ScopedSessionRepository):
                     .on_conflict_do_nothing(index_elements=["vector_id", "feature_name", "evidence_id"])
                 )
         await self.session.commit()
-        return value
+        return persisted
 
     @scoped_session
     async def save_result(self, value: QuantForecastResult) -> QuantForecastResult:
-        await self.session.execute(
+        statement = (
             insert(QuantForecastResultRecord)
             .values(
                 result_id=value.result_id,
@@ -189,13 +209,27 @@ class SqlAlchemyQuantForecastRepository(ScopedSessionRepository):
                 payload=value.model_dump(mode="json"),
                 generated_at=value.generated_at,
             )
-            .on_conflict_do_nothing(index_elements=["result_id"])
+            .on_conflict_do_nothing(index_elements=["request_id"])
+            .returning(QuantForecastResultRecord.result_id)
         )
-        for prediction in value.predictions:
+        result_id = (await self.session.execute(statement)).scalar_one_or_none()
+        persisted = value
+        if result_id is None:
+            record = (
+                await self.session.scalars(
+                    select(QuantForecastResultRecord).where(QuantForecastResultRecord.request_id == value.request_id).limit(1)
+                )
+            ).first()
+            if record is None:
+                await self.session.rollback()
+                raise RuntimeError("quant forecast conflict did not resolve to a persisted row")
+            result_id = record.result_id
+            persisted = QuantForecastResult.model_validate(record.payload)
+        for prediction in persisted.predictions:
             await self.session.execute(
                 insert(QuantForecastHorizonRecord)
                 .values(
-                    result_id=value.result_id,
+                    result_id=result_id,
                     horizon_id=prediction.horizon.horizon_id,
                     duration_seconds=prediction.horizon.duration_seconds,
                     payload=prediction.model_dump(mode="json"),
@@ -203,7 +237,7 @@ class SqlAlchemyQuantForecastRepository(ScopedSessionRepository):
                 .on_conflict_do_nothing(index_elements=["result_id", "horizon_id"])
             )
         await self.session.commit()
-        return value
+        return persisted
 
     @scoped_session
     async def latest_result(self, instrument: str) -> QuantForecastResult | None:

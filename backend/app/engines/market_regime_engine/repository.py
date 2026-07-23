@@ -1,6 +1,5 @@
 import asyncio
 from abc import ABC, abstractmethod
-from datetime import datetime
 from hashlib import sha256
 
 from sqlalchemy import delete, select
@@ -10,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from backend.app.engines.market_data_engine import Timeframe
 from backend.app.engines.market_data_engine.models import canonical_symbol
 from backend.app.storage.batching import bounded_insert_chunks
+from backend.app.storage.logical_identity import analytical_snapshot_boundary, ensure_analytical_determinism, returned_identity
 from backend.app.storage.models import MarketRegimeCheckpointRecord, MarketRegimeEvidenceRecord, MarketRegimeSnapshotRecord, MarketRegimeTransitionRecord
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
@@ -18,7 +18,7 @@ from .models import MarketRegimeEvidence, MarketRegimeSnapshot, RegimeTransition
 
 class MarketRegimeRepository(ABC):
     @abstractmethod
-    async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> None: ...
+    async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> MarketRegimeSnapshot: ...
     @abstractmethod
     async def get_latest_snapshot(self, symbol: str, timeframe: Timeframe) -> MarketRegimeSnapshot | None: ...
     @abstractmethod
@@ -49,27 +49,25 @@ class InMemoryMarketRegimeRepository(MarketRegimeRepository):
     def __init__(self) -> None:
         self._snapshots: dict[object, MarketRegimeSnapshot] = {}
         self._series: dict[tuple[str, Timeframe], list[object]] = {}
-        self._snapshot_boundaries: set[tuple[str, Timeframe, datetime, str]] = set()
+        self._snapshot_boundaries: dict[tuple[str, ...], MarketRegimeSnapshot] = {}
         self._evidence: dict[object, MarketRegimeEvidence] = {}
         self._transitions: dict[object, RegimeTransition] = {}
         self._checkpoints: dict[tuple[str, Timeframe], tuple[MarketRegimeSnapshot, str]] = {}
         self._lock = asyncio.Lock()
 
-    async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> None:
+    async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> MarketRegimeSnapshot:
         async with self._lock:
-            boundary = (
-                canonical_symbol(snapshot.symbol),
-                snapshot.timeframe,
-                snapshot.analysis_timestamp,
-                snapshot.configuration_version,
-            )
-            if boundary in self._snapshot_boundaries:
-                return
+            boundary = analytical_snapshot_boundary(snapshot, include_processing_mode=False)
+            existing = self._snapshot_boundaries.get(boundary)
+            if existing is not None:
+                ensure_analytical_determinism(existing, snapshot, entity_type="market_regime_snapshot", include_processing_mode=False)
+                return existing
             self._snapshots[snapshot.snapshot_id] = snapshot
-            self._snapshot_boundaries.add(boundary)
+            self._snapshot_boundaries[boundary] = snapshot
             key = (canonical_symbol(snapshot.symbol), snapshot.timeframe)
             self._series.setdefault(key, []).append(snapshot.snapshot_id)
             self._series[key].sort(key=lambda identifier: self._snapshots[identifier].analysis_timestamp)
+            return snapshot
 
     async def get_latest_snapshot(self, symbol: str, timeframe: Timeframe) -> MarketRegimeSnapshot | None:
         async with self._lock:
@@ -143,14 +141,7 @@ class InMemoryMarketRegimeRepository(MarketRegimeRepository):
             for identifier in removed:
                 snapshot = self._snapshots.pop(identifier, None)
                 if snapshot is not None:
-                    self._snapshot_boundaries.discard(
-                        (
-                            canonical_symbol(snapshot.symbol),
-                            snapshot.timeframe,
-                            snapshot.analysis_timestamp,
-                            snapshot.configuration_version,
-                        )
-                    )
+                    self._snapshot_boundaries.pop(analytical_snapshot_boundary(snapshot, include_processing_mode=False), None)
             return len(removed)
 
 
@@ -159,9 +150,9 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository, ScopedSessionRepo
         ScopedSessionRepository.__init__(self, session_factory)
 
     @scoped_session
-    async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> None:
+    async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> MarketRegimeSnapshot:
         try:
-            await self.session.execute(
+            insert_result = await self.session.execute(
                 insert(MarketRegimeSnapshotRecord)
                 .values(
                     id=snapshot.snapshot_id,
@@ -182,8 +173,32 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository, ScopedSessionRepo
                         MarketRegimeSnapshotRecord.configuration_version,
                     ]
                 )
+                .returning(MarketRegimeSnapshotRecord.id)
+            )
+            inserted_id = returned_identity(insert_result, snapshot.snapshot_id)
+            persisted_snapshot = snapshot
+            if inserted_id is None:
+                persisted_record = (
+                    await self.session.scalars(
+                        select(MarketRegimeSnapshotRecord).where(
+                            MarketRegimeSnapshotRecord.symbol == canonical_symbol(snapshot.symbol),
+                            MarketRegimeSnapshotRecord.timeframe == snapshot.timeframe.value,
+                            MarketRegimeSnapshotRecord.analysis_timestamp == snapshot.analysis_timestamp,
+                            MarketRegimeSnapshotRecord.configuration_version == snapshot.configuration_version,
+                        )
+                    )
+                ).first()
+                if persisted_record is None:
+                    raise RuntimeError("market regime snapshot insert did not resolve a canonical row")
+                persisted_snapshot = MarketRegimeSnapshot.model_validate(persisted_record.payload)
+            ensure_analytical_determinism(
+                persisted_snapshot,
+                snapshot,
+                entity_type="market_regime_snapshot",
+                include_processing_mode=False,
             )
             await self.session.commit()
+            return persisted_snapshot
         except Exception:
             await self.session.rollback()
             raise

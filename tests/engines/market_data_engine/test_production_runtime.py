@@ -146,12 +146,14 @@ async def test_bootstrap_recovers_after_one_failed_event_and_logs_identity(
         target_logger.setLevel(original_level)
         target_logger.disabled = original_disabled
 
-    assert service.history_calls == 2
-    assert analyzed == [Timeframe.M1, Timeframe.M5]
+    assert service.history_calls == 3
+    assert analyzed == [Timeframe.M1, Timeframe.M1, Timeframe.M5]
     assert worker.processing_state == "idle"
-    failure = next(record for record in caplog.records if record.message == "market_data.bootstrap.failed")
+    failure = next(record for record in caplog.records if record.message == "market_data.bootstrap.unit_failed")
     assert failure.event_id == "a" * 64
     assert failure.failure_stage == "mark_processed"
+    retry = next(record for record in caplog.records if record.message == "market_data.bootstrap.retry_scheduled")
+    assert retry.next_attempt == 2
 
 
 class _FlakySessionsMarketService(StubMarketService):

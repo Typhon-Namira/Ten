@@ -36,7 +36,10 @@ export function useLiveDashboard(instrument: string, timeframe: string): LiveDas
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const latest = useRef({ stages, rejections, marketIntelligence, performance })
-  latest.current = { stages, rejections, marketIntelligence, performance }
+
+  useEffect(() => {
+    latest.current = { stages, rejections, marketIntelligence, performance }
+  }, [stages, rejections, marketIntelligence, performance])
 
   const refresh = useCallback(async () => {
     const current = latest.current

@@ -101,6 +101,10 @@ class MarketDataWorker:
                 # failures; this only fires if something outside that boundary breaks. Bootstrap
                 # failing must never prevent the recurring poll loop below from ever starting.
                 logger.exception("market_data.bootstrap.crashed", extra={"worker": "market_data", "error_type": type(exc).__name__})
+        logger.info(
+            "market_data.live_processing.started",
+            extra={"symbols": self.symbols, "timeframes": tuple(item.value for item in self.timeframes)},
+        )
         while not self._stop.is_set():
             market_open = True
             try:
@@ -150,24 +154,59 @@ class MarketDataWorker:
         )
         for symbol in self.symbols:
             for timeframe in self.timeframes:
-                try:
-                    candles = await self.service.history(symbol, timeframe, limit=self.bootstrap_candles, refresh=True)
-                    self.loaded_candles += len(candles)
-                    self.last_success_at = datetime.now(UTC)
-                    self.last_error = None
-                    self.consecutive_failures = 0
+                for attempt in range(1, 4):
                     logger.info(
-                        "market_data.bootstrap.completed",
-                        extra={"symbol": symbol, "timeframe": timeframe.value, "candle_count": len(candles), "latest_candle_at": candles[-1].timestamp.isoformat() if candles else None},
+                        "market_data.bootstrap.unit_started",
+                        extra={"symbol": symbol, "timeframe": timeframe.value, "attempt": attempt},
                     )
-                    if candles and self.historical_analysis is not None:
-                        await self.historical_analysis(candles[-1])
-                    if candles:
-                        key = (symbol, timeframe)
-                        self._last_candle_timestamp[key] = candles[-1].timestamp
-                        self._next_poll_at[key] = candles[-1].timestamp + timeframe.duration * 2
-                except Exception as exc:
-                    self._failed(exc, "market_data.bootstrap.failed", symbol, timeframe)
+                    try:
+                        candles = await self.service.history(symbol, timeframe, limit=self.bootstrap_candles, refresh=True)
+                        self.loaded_candles += len(candles)
+                        self.last_success_at = datetime.now(UTC)
+                        self.last_error = None
+                        self.consecutive_failures = 0
+                        logger.info(
+                            "market_data.bootstrap.unit_completed",
+                            extra={
+                                "symbol": symbol,
+                                "timeframe": timeframe.value,
+                                "candle_count": len(candles),
+                                "boundary_timestamp": candles[-1].timestamp.isoformat() if candles else None,
+                                "attempt": attempt,
+                            },
+                        )
+                        if candles and self.historical_analysis is not None:
+                            await self.historical_analysis(candles[-1])
+                        if candles:
+                            key = (symbol, timeframe)
+                            self._last_candle_timestamp[key] = candles[-1].timestamp
+                            self._next_poll_at[key] = candles[-1].timestamp + timeframe.duration * 2
+                        break
+                    except Exception as exc:
+                        self._failed(exc, "market_data.bootstrap.unit_failed", symbol, timeframe)
+                        if attempt == 3:
+                            break
+                        delay_seconds = float(2 ** (attempt - 1))
+                        logger.warning(
+                            "market_data.bootstrap.retry_scheduled",
+                            extra={
+                                "symbol": symbol,
+                                "timeframe": timeframe.value,
+                                "attempt": attempt,
+                                "next_attempt": attempt + 1,
+                                "delay_seconds": delay_seconds,
+                                "error_class": type(exc).__name__,
+                            },
+                        )
+                        await asyncio.sleep(delay_seconds)
+        logger.info(
+            "market_data.bootstrap.completed",
+            extra={
+                "symbols": self.symbols,
+                "timeframes": tuple(item.value for item in self.timeframes),
+                "loaded_candles": self.loaded_candles,
+            },
+        )
         self.processing_state = "idle"
 
     async def _poll(self, symbol: str, timeframe: Timeframe, *, now: datetime | None = None) -> None:

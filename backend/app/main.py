@@ -50,7 +50,7 @@ from backend.app.engines.replay_engine import (
     dataset_manifest_hash,
     production_replay_registry,
 )
-from backend.app.core.database import prepare_database_schema
+from backend.app.core.database import SCHEMA_HEAD_REVISION, prepare_database_schema
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
 from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, IntegrationWorker, SqlAlchemyIntegrationRepository
@@ -275,13 +275,13 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         app.state.economic_calendar_service = EconomicCalendarService(app.state.pipeline_manager.event_bus, app.state.pipeline_manager.feature_store, calendar_config, calendar_repository, calendar_providers, calendar_mode)
         await app.state.economic_calendar_service.start()
         ai_config = configs.load_model("ai_scoring", AIScoringConfig)
-        ai_repository: AIScoringRepository = InMemoryAIScoringRepository()
+        ai_scoring_repository: AIScoringRepository = InMemoryAIScoringRepository()
         ai_mode = "memory"
         if app.state.database_session_factory is not None:
-            ai_repository = SqlAlchemyAIScoringRepository(app.state.database_session_factory)
+            ai_scoring_repository = SqlAlchemyAIScoringRepository(app.state.database_session_factory)
             ai_mode = "postgresql"
         app.state.ai_scoring_service = AIScoringService(
-            ai_repository,
+            ai_scoring_repository,
             app.state.pipeline_manager.event_bus,
             app.state.pipeline_manager.feature_store,
             ai_config,
@@ -479,9 +479,55 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         app.state.market_data_worker.start()
         if settings.integration_worker_enabled and integration_config.enabled and integration_config.live_pipeline_enabled:
             app.state.integration_worker.start()
+        enabled_workers = [
+            name
+            for name, enabled in (
+                ("market_data", settings.market_data_worker_enabled),
+                (
+                    "integration",
+                    settings.integration_worker_enabled
+                    and integration_config.enabled
+                    and integration_config.live_pipeline_enabled,
+                ),
+                ("replay", replay_config.worker.enabled and replay_config.worker.embedded_api_worker),
+            )
+            if enabled
+        ]
+        instance_identity = (
+            os.getenv("RAILWAY_REPLICA_ID")
+            or os.getenv("RAILWAY_SERVICE_ID")
+            or os.getenv("COMPUTERNAME")
+            or os.getenv("HOSTNAME")
+            or "unknown"
+        )
+        logger.info(
+            "service.startup.ready",
+            extra={
+                "service_role": os.getenv("TEN_SERVICE_ROLE", "api_with_embedded_workers"),
+                "worker_identity": f"{instance_identity}:{os.getpid()}",
+                "instance_identity": instance_identity,
+                "deployment_id": os.getenv("RAILWAY_DEPLOYMENT_ID"),
+                "git_sha": os.getenv("RAILWAY_GIT_COMMIT_SHA") or os.getenv("GIT_SHA"),
+                "process_id": os.getpid(),
+                "enabled_workers": tuple(enabled_workers),
+                "enabled_schedulers": ("replay",) if replay_config.worker.enabled else (),
+                "symbols": settings.market_data_symbols,
+                "timeframes": settings.market_data_timeframes,
+                "database_revision": SCHEMA_HEAD_REVISION if app.state.database_session_factory is not None else None,
+                "repository_mode": "postgresql" if app.state.database_session_factory is not None else "memory",
+            },
+        )
         try:
             yield
         finally:
+            logger.info(
+                "service.shutdown.started",
+                extra={
+                    "instance_identity": instance_identity,
+                    "process_id": os.getpid(),
+                    "enabled_workers": tuple(enabled_workers),
+                },
+            )
             app.state.pipeline_activity_log.stop()
             await app.state.market_data_worker.stop()
             await app.state.integration_worker.stop()
@@ -498,6 +544,10 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             # connection pool) needs disposing.
             if app.state.smc_database_engine is not None:
                 await app.state.smc_database_engine.dispose()
+            logger.info(
+                "service.shutdown.completed",
+                extra={"instance_identity": instance_identity, "process_id": os.getpid()},
+            )
 
     application = FastAPI(
         title="TEN Market Intelligence API",

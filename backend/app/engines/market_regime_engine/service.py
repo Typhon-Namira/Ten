@@ -228,7 +228,7 @@ class MarketRegimeService:
             previous = await self.repository.get_latest_snapshot(context.candles[-1].symbol, context.candles[-1].timeframe)
         try:
             snapshot = self.analyzer.analyze_snapshot(context, mode, previous, self.repository_mode, self.recovery_state)
-            await self.repository.save_snapshot(snapshot)
+            snapshot = await self.repository.save_snapshot(snapshot)
             await self.repository.save_evidence(snapshot)
             await self.repository.save_checkpoint(snapshot)
             transition = self._transition(snapshot)

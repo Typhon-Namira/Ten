@@ -37,7 +37,10 @@ export function useDashboard(instrument: string, timeframe: string): DashboardSt
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const latest = useRef({ signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics })
-  latest.current = { signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics }
+
+  useEffect(() => {
+    latest.current = { signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics }
+  }, [signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -66,9 +69,15 @@ export function useDashboard(instrument: string, timeframe: string): DashboardSt
   }, [instrument, timeframe])
 
   useEffect(() => {
-    void refresh()
+    let active = true
+    queueMicrotask(() => {
+      if (active) void refresh()
+    })
     const timer = window.setInterval(() => void refresh(), 30_000)
-    return () => window.clearInterval(timer)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
   }, [refresh])
 
   return { signals, engines, market, aiScore, signalDecision, operationalSignal, replays, diagnostics, loading, error, refresh }

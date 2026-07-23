@@ -260,6 +260,8 @@ async def test_in_memory_repository_idempotency_history_and_checkpoints() -> Non
     second = analyzer.analyze_snapshot(InstitutionalFlowContext(candles(6)))
     await repository.save(first)
     await repository.save(first)
+    await repository.save(first.model_copy(update={"id": uuid4()}))
+    await repository.save(first.model_copy(update={"id": uuid4(), "engine_version": "divergent"}))
     await repository.save(second)
     assert await repository.latest("XAUUSD", Timeframe.M15) == second
     assert await repository.at("XAU/USD", Timeframe.M15, first.analysis_timestamp) == first

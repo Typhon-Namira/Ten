@@ -299,6 +299,7 @@ async def test_in_memory_repository_complete_contract_and_checkpoint_integrity()
     await repo.save_snapshot(snapshot)
     same_boundary = snapshot.model_copy(update={"snapshot_id": uuid4()})
     await repo.save_snapshot(same_boundary)
+    await repo.save_snapshot(snapshot.model_copy(update={"snapshot_id": uuid4(), "engine_version": "divergent"}))
     await repo.save_evidence(snapshot)
     assert await repo.get_latest_snapshot("XAU/USD", Timeframe.M15) == snapshot
     assert await repo.get_snapshot(snapshot.snapshot_id) == snapshot

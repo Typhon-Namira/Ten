@@ -163,7 +163,7 @@ class InMemoryReplayRepository(ReplayRepository):
         async with self._lock:
             for output in outputs:
                 values = self._outputs.setdefault(output.replay_id, [])
-                if not any(item.output_id == output.output_id for item in values):
+                if not any(item.fingerprint == output.fingerprint for item in values):
                     values.append(output)
 
     async def list_outputs(self, replay_id: UUID, output_type: str | None = None, offset: int = 0, limit: int = 200) -> tuple[ReplayOutputReference, ...]:
@@ -334,7 +334,11 @@ class SqlAlchemyReplayRepository(ReplayRepository, ScopedSessionRepository):
         values = [{"id": item.output_id, "replay_id": item.replay_id, "output_type": item.output_type, "source_engine": item.source_engine, "as_of": item.as_of, "fingerprint": item.fingerprint, "payload": item.model_dump(mode="json")} for item in outputs]
         try:
             for chunk in bounded_insert_chunks(values):
-                await self.session.execute(insert(ReplayOutputRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
+                await self.session.execute(
+                    insert(ReplayOutputRecord)
+                    .values(list(chunk))
+                    .on_conflict_do_nothing(index_elements=["replay_id", "fingerprint"])
+                )
             await self.session.commit()
         except Exception:
             await self.session.rollback()

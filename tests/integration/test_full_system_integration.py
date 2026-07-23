@@ -435,19 +435,39 @@ async def test_market_data_failure_finalizes_the_stage_tracker_cycle_instead_of_
 
 
 @pytest.mark.asyncio
-async def test_failed_outbox_item_degrades_health_and_remains_retryable() -> None:
+async def test_failed_outbox_item_degrades_health_and_is_not_hot_retried() -> None:
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     coordinator = service(bus, repository)
     coordinator.market_data = FailingHistoryMarketData(candle())
     await coordinator.start()
     await bus.publish(NewCandle(correlation_id=uuid4(), source="market_data", payload=candle().model_dump(mode="json")))
 
-    assert await coordinator.process_outbox_once() == 1
     assert coordinator.last_batch_failures == 1
     assert coordinator.health()["status"] == "degraded"
     assert coordinator.health()["ready"] is False
+    # Embedded delivery already attempted the row while publishing the event. A failure releases
+    # the lease but schedules a bounded retry instead of allowing a tight retry loop.
+    assert await coordinator.process_outbox_once() == 0
     assert repository.metrics()["outbox_backlog"] == 1
     await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_outbox_claim_is_exclusive_until_lease_expiry() -> None:
+    repository = InMemoryIntegrationRepository()
+    envelope = CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW)
+    item = await repository.enqueue(envelope)
+
+    first_claim = await repository.pending(NOW, 10)
+    concurrent_claim = await repository.pending(NOW, 10)
+    recovered_claim = await repository.pending(NOW + timedelta(minutes=16), 10)
+
+    assert tuple(value.outbox_id for value in first_claim) == (item.outbox_id,)
+    assert concurrent_claim == ()
+    assert tuple(value.outbox_id for value in recovered_claim) == (item.outbox_id,)
+
+    await repository.complete(item.outbox_id, NOW + timedelta(minutes=16))
+    assert await repository.pending(NOW + timedelta(minutes=32), 10) == ()
 
 
 @pytest.mark.asyncio

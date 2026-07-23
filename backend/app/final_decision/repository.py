@@ -74,8 +74,12 @@ class InMemoryFinalDecisionRepository:
 
     async def save_evaluation(self, value: GateEvaluation) -> GateEvaluation:
         async with self._lock:
-            self.evaluations[value.evaluation_id] = value
-        return value
+            boundary = (value.final_action_id, value.gate_id)
+            existing = self.evaluations.get(boundary)
+            if existing is not None:
+                return existing
+            self.evaluations[boundary] = value
+            return value
 
     async def save_publication(self, value: PublishedAnalyticalSignal) -> PublishedAnalyticalSignal:
         async with self._lock:
@@ -191,7 +195,7 @@ class SqlAlchemyFinalDecisionRepository(ScopedSessionRepository):
                 payload=value.model_dump(mode="json"),
                 evaluated_at=value.evaluated_at,
             )
-            .on_conflict_do_nothing(index_elements=["evaluation_id"])
+            .on_conflict_do_nothing(index_elements=["final_action_id", "gate_id"])
         )
         await self.session.commit()
         return value
