@@ -36,7 +36,7 @@ def _is_active(item: Any) -> bool:
     return lifecycle is None or lifecycle.value not in INACTIVE_LIFECYCLE
 
 
-def _most_recent(items: tuple, timestamp_attr: str, *, where: Any = None) -> Any:
+def _most_recent(items: tuple[Any, ...], timestamp_attr: str, *, where: Any = None) -> Any:
     candidates = [item for item in items if where is None or where(item)]
     active = [item for item in candidates if _is_active(item)]
     pool = active or candidates
@@ -58,7 +58,7 @@ def _freshness(age_seconds: float | None) -> str:
 def _snapshot_timestamp(snapshot: Any, timestamp_attrs: tuple[str, ...]) -> datetime | None:
     for attr in timestamp_attrs:
         value = getattr(snapshot, attr, None)
-        if value is not None:
+        if isinstance(value, datetime):
             return value
     return None
 
@@ -150,7 +150,7 @@ def build_market_intelligence(
     instrument: str,
     timeframe: str,
     now: datetime,
-    session,
+    session: Any,
     candle: Any,
     spread_supported: bool | None,
     smc: Any,

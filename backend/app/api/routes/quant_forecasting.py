@@ -1,6 +1,6 @@
 """Read-only observability API for Phase 2 shadow forecasts."""
 
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -13,11 +13,11 @@ router = APIRouter(prefix="/api/v1/quant-forecasts", tags=["quantitative-forecas
 
 
 def get_service(request: Request) -> QuantForecastService:
-    return request.app.state.quant_forecast_service
+    return cast(QuantForecastService, request.app.state.quant_forecast_service)
 
 
 def get_repository(request: Request) -> QuantForecastRepository:
-    return request.app.state.quant_forecast_repository
+    return cast(QuantForecastRepository, request.app.state.quant_forecast_repository)
 
 
 Service = Annotated[QuantForecastService, Depends(get_service)]

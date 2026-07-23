@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Annotated
 from uuid import UUID
 
@@ -130,7 +131,9 @@ async def rejections_recent(
     active_session = session_status.active_session if session_status else None
     items = []
     for item in rejected:
-        score, score_error = await safe_call(lambda item=item: app.state.ai_scoring_service.repository.get_snapshot(item.ai_score_snapshot_id))
+        score, score_error = await safe_call(
+            partial(app.state.ai_scoring_service.repository.get_snapshot, item.ai_score_snapshot_id)
+        )
         diagnostics = build_rejection_diagnostics(item, score, active_session)
         items.append(
             {

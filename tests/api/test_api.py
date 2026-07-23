@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -97,6 +98,92 @@ def test_ai_dashboard_uses_authoritative_phase_endpoints_and_reports_unavailable
     assert {"guardrails", "runtime"} <= set(reasoning_health.json())
     assert diagnostics.status_code == 200
     assert {"workers", "market", "operational_state"} <= set(diagnostics.json())
+
+
+def test_dashboard_aggregate_returns_typed_reasons_without_expected_404s() -> None:
+    """A fresh or disabled deployment is an authoritative state, not a missing HTTP route."""
+    with TestClient(create_app()) as client:
+        response = client.get("/api/v1/dashboard/latest", params={"instrument": " XAU/USD "})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["instrument"] == "XAUUSD"
+    assert body["status"] == "pending"
+    assert body["cycle"] is None
+    assert body["stages"]["market_state"]["status"] == "not_available"
+    assert body["stages"]["market_state"]["reason"] == "ai_centric_shadow_mode_disabled"
+    assert body["stages"]["quant_forecast"]["reason"] == "awaiting_unified_market_state"
+    assert body["stages"]["publication"]["reason"] == "ai_signal_publication_disabled"
+    assert body["reasoning"]["runtime"]["operating_profile"] == "safe_test"
+
+
+def test_dashboard_aggregate_queries_every_stage_at_one_market_state_boundary() -> None:
+    boundary = datetime(2026, 7, 23, 15, 0, tzinfo=UTC)
+    state_id = uuid4()
+    cycle_id = uuid4()
+    quant_id = uuid4()
+    forecast_id = uuid4()
+    state = SimpleNamespace(
+        state_id=state_id,
+        cycle_id=cycle_id,
+        status=SimpleNamespace(value="available"),
+        market_data_boundary=boundary,
+        knowledge_cutoff=boundary,
+        evidence=(),
+        model_dump=lambda **_: {
+            "state_id": str(state_id),
+            "cycle_id": str(cycle_id),
+            "status": "available",
+            "market_data_boundary": boundary.isoformat(),
+            "knowledge_cutoff": boundary.isoformat(),
+            "evidence": [],
+        },
+    )
+    quant = SimpleNamespace(
+        result_id=quant_id,
+        market_state_id=state_id,
+        status=SimpleNamespace(value="available"),
+        generated_at=boundary,
+        reason_codes=(),
+        model_dump=lambda **_: {
+            "result_id": str(quant_id),
+            "market_state_id": str(state_id),
+            "status": "available",
+            "generated_at": boundary.isoformat(),
+        },
+    )
+    forecast = SimpleNamespace(
+        forecast_id=forecast_id,
+        market_state_id=state_id,
+        status=SimpleNamespace(value="available"),
+        generated_at=boundary,
+        failure_state=None,
+        model_dump=lambda **_: {
+            "forecast_id": str(forecast_id),
+            "market_state_id": str(state_id),
+            "status": "available",
+            "generated_at": boundary.isoformat(),
+        },
+    )
+
+    with TestClient(create_app()) as client:
+        client.app.state.unified_market_state_repository.latest_state = AsyncMock(return_value=state)
+        client.app.state.quant_forecast_repository.result_for_state = AsyncMock(return_value=quant)
+        client.app.state.ai_reasoning_repository.forecast_for_state = AsyncMock(return_value=forecast)
+        client.app.state.ai_reasoning_repository.proposal_for_state = AsyncMock(return_value=None)
+        client.app.state.final_decision_repository.action_for_state = AsyncMock(return_value=None)
+        response = client.get("/api/v1/dashboard/latest")
+
+        client.app.state.quant_forecast_repository.result_for_state.assert_awaited_once_with(state_id)
+        client.app.state.ai_reasoning_repository.forecast_for_state.assert_awaited_once_with(state_id)
+        client.app.state.ai_reasoning_repository.proposal_for_state.assert_awaited_once_with(state_id)
+        client.app.state.final_decision_repository.action_for_state.assert_awaited_once_with(state_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cycle"]["market_state_id"] == str(state_id)
+    assert body["stages"]["quant_forecast"]["data"]["market_state_id"] == str(state_id)
+    assert body["stages"]["ai_reasoning"]["data"]["market_state_id"] == str(state_id)
 
 
 def test_diagnostics_reports_a_dead_worker_as_degraded_not_healthy() -> None:

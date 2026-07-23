@@ -51,6 +51,33 @@ test('data hook retains last good backend values and marks missing market eviden
   assert.doesNotMatch(hook, /setIntelligence\(null\)/)
 })
 
+test('dashboard uses one authoritative AI aggregate with bounded visibility-aware polling', async () => {
+  const hook = await source('src/hooks/useAIDashboardData.ts')
+  const api = await source('src/services/api.ts')
+  assert.match(api, /dashboardLatest/)
+  assert.match(api, /\/api\/v1\/dashboard\/latest/)
+  assert.match(hook, /tenApi\.dashboardLatest/)
+  assert.doesNotMatch(hook, /tenApi\.latestQuantForecast/)
+  assert.doesNotMatch(hook, /tenApi\.latestQuantCalibration/)
+  assert.doesNotMatch(hook, /tenApi\.latestAIReasoning/)
+  assert.match(hook, /if \(inFlight\.current\)/)
+  assert.match(hook, /document\.hidden/)
+  assert.match(hook, /MAX_BACKOFF_MS/)
+  assert.match(api, /isDashboardAggregate/)
+  assert.match(api, /dashboard response schema mismatch/)
+})
+
+test('empty analytical stages render backend-derived reason codes', async () => {
+  const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
+  const pipeline = await source('src/lib/aiDashboard.ts')
+  assert.match(dashboard, /stages\.quant_forecast\.reason/)
+  assert.match(dashboard, /stages\.ai_reasoning\.reason/)
+  assert.match(dashboard, /stages\.guardrails\.reason/)
+  assert.match(dashboard, /stages\.publication\.reason/)
+  assert.match(dashboard, /stages\.monitoring\.reason/)
+  assert.match(pipeline, /humanize\(stage\.reason\)/)
+})
+
 test('theme is light, responsive, accessible, and motion-safe', async () => {
   const css = await source('src/styles.css')
   assert.match(css, /--surface:\s*#fff/i)

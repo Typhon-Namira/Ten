@@ -12,14 +12,14 @@ function gateCounts(action: FinalSystemAction | null) {
   }
 }
 
-export function GuardrailSummary({ data }: { data: AIReasoningDashboard | null }) {
+export function GuardrailSummary({ data, unavailableReason }: { data: AIReasoningDashboard | null; unavailableReason?: string }) {
   const action = latestFinalAction(data)
   const counts = gateCounts(action)
   const blocker = action?.gate_evaluations.find(item => item.status === 'failed' || item.status === 'unavailable')
   const categories = ['technical', 'execution', 'risk']
   return <section className="ai-card">
     <SectionHeader eyebrow="Deterministic safety" title="Guardrail decision" action={<ShieldCheck size={19} />} />
-    {!action ? <EmptyState title="Guardrails not evaluated" detail="A validated AI proposal is required before deterministic review." /> : <>
+    {!action ? <EmptyState title="Guardrails not evaluated" detail={humanize(unavailableReason ?? 'awaiting_ai_proposal')} /> : <>
       <div className="guardrail-result">
         <div className={`guardrail-result__mark guardrail-result__mark--${counts.failed ? 'negative' : 'positive'}`}><ShieldCheck size={23} /></div>
         <div><strong>{humanize(action.approval_state)}</strong><span>{blocker ? `${humanize(blocker.gate_id)} · ${humanize(blocker.reason_codes[0])}` : 'All required gates passed'}</span></div>
@@ -51,12 +51,12 @@ function recordValue(record: Record<string, unknown> | undefined, key: string): 
   return 'Unavailable'
 }
 
-export function ActiveSignalMonitor({ data, market }: { data: AIReasoningDashboard | null; market: MarketIntelligence | null }) {
+export function ActiveSignalMonitor({ data, market, unavailableReason }: { data: AIReasoningDashboard | null; market: MarketIntelligence | null; unavailableReason?: string }) {
   const signal = activeSignal(data)
   const publication = activePublication(data)
   if (!signal || !publication) return <section className="ai-card ai-card--wide">
     <SectionHeader eyebrow="Persistent monitoring" title="Active analytical signal" action={<Signal size={19} />} />
-    <EmptyState title="No active analytical signal" detail="The system is monitoring current market conditions. Unpublished proposals are not treated as active signals." />
+    <EmptyState title="No active analytical signal" detail={humanize(unavailableReason ?? 'no_managed_signal_for_latest_cycle')} />
   </section>
   const history = data?.signal_histories[signal.signal_id]
   const revision = history?.revisions.at(-1)
@@ -105,7 +105,7 @@ function performanceComparison(data: AIReasoningDashboard | null): Record<string
   return report.comparison as Record<string, Record<string, unknown>>
 }
 
-export function ValidationSummary({ data }: { data: AIReasoningDashboard | null }) {
+export function ValidationSummary({ data, unavailableReason }: { data: AIReasoningDashboard | null; unavailableReason?: string }) {
   const readiness = data?.production_readiness
   const comparison = performanceComparison(data)
   const approved = comparison.guardrail_approved ?? {}
@@ -122,7 +122,7 @@ export function ValidationSummary({ data }: { data: AIReasoningDashboard | null 
       <div className="readiness">
         <div className="readiness__head"><StatusBadge tone={readiness?.status === 'ready_for_analytical_live' ? 'positive' : 'negative'}>{humanize(readiness?.status ?? 'not evaluated')}</StatusBadge><span>{readiness ? `${Object.values(readiness.measured_checks).filter(check => check.passed).length}/${Object.keys(readiness.measured_checks).length} checks passed` : 'No readiness report'}</span></div>
         <p>{readiness?.status === 'ready_for_analytical_live' ? 'Backend validation has approved analytical-live eligibility.' : 'Publication remains ineligible until backend readiness blockers and sample requirements pass.'}</p>
-        <ul>{readiness?.blockers.slice(0, 4).map(blocker => <li key={blocker}><TimerReset size={14} />{humanize(blocker)}</li>) ?? <li><TimerReset size={14} />Readiness report unavailable</li>}</ul>
+        <ul>{readiness?.blockers.slice(0, 4).map(blocker => <li key={blocker}><TimerReset size={14} />{humanize(blocker)}</li>) ?? <li><TimerReset size={14} />{humanize(unavailableReason ?? 'insufficient_validated_sample')}</li>}</ul>
       </div>
     </div>
     <DetailDrawer label="Compare validation systems">

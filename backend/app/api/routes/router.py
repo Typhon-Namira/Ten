@@ -21,6 +21,7 @@ from .chart import router as chart_router
 from .explain import router as explain_router
 from .quant_forecasting import router as quant_forecasting_router
 from .ai_reasoning import router as ai_reasoning_router
+from .dashboard import router as dashboard_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -44,3 +45,4 @@ api_router.include_router(chart_router)
 api_router.include_router(explain_router)
 api_router.include_router(quant_forecasting_router)
 api_router.include_router(ai_reasoning_router)
+api_router.include_router(dashboard_router)

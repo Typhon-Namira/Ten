@@ -1,6 +1,6 @@
 """Read-only Phase 3/4 AI reasoning and managed-signal observability."""
 
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Request
 
@@ -29,11 +29,11 @@ def _runtime_state(request: Request) -> dict[str, Any]:
 
 
 def get_service(request: Request) -> AIReasoningService:
-    return request.app.state.ai_reasoning_service
+    return cast(AIReasoningService, request.app.state.ai_reasoning_service)
 
 
 def get_repository(request: Request) -> AIReasoningRepository:
-    return request.app.state.ai_reasoning_repository
+    return cast(AIReasoningRepository, request.app.state.ai_reasoning_repository)
 
 
 Service = Annotated[AIReasoningService, Depends(get_service)]
@@ -41,11 +41,11 @@ Repository = Annotated[AIReasoningRepository, Depends(get_repository)]
 
 
 def get_final_service(request: Request) -> FinalDecisionService:
-    return request.app.state.final_decision_service
+    return cast(FinalDecisionService, request.app.state.final_decision_service)
 
 
 def get_final_repository(request: Request) -> FinalDecisionRepository:
-    return request.app.state.final_decision_repository
+    return cast(FinalDecisionRepository, request.app.state.final_decision_repository)
 
 
 FinalService = Annotated[FinalDecisionService, Depends(get_final_service)]
@@ -71,7 +71,7 @@ async def latest(
     signals = await repository.active_signals(instrument)
     histories = {
         str(signal.signal_id): {
-            key: [item.model_dump(mode="json") for item in values]
+            key: [cast(Any, item).model_dump(mode="json") for item in values]
             for key, values in (await repository.signal_history(signal.signal_id)).items()
         }
         for signal in signals

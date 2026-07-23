@@ -118,9 +118,19 @@ def build_engine_registry(
     """Composition root driven entirely by discovered registrations and YAML."""
 
     resolved_configs = configs or YamlConfigRepository()
-    flags = FeatureFlagService.from_yaml(resolved_configs)
+    resolved_settings = settings or get_settings()
+    flags = FeatureFlagService.from_yaml(
+        resolved_configs,
+        {
+            FeatureFlag.AI_CENTRIC_SHADOW_MODE: resolved_settings.ai_centric_shadow_mode,
+            FeatureFlag.AI_SIGNAL_PROPOSALS: resolved_settings.ai_signal_proposals,
+            FeatureFlag.AI_SIGNAL_MONITORING: resolved_settings.ai_signal_monitoring,
+            FeatureFlag.AI_SIGNAL_PUBLICATION: resolved_settings.ai_signal_publication,
+            FeatureFlag.AI_SIGNAL_ADJUSTMENTS: resolved_settings.ai_signal_adjustments,
+        },
+    )
     factory = EngineFactory()
     EngineLoader(factory).discover()
-    context = EngineBuildContext(settings=settings or get_settings(), configs=resolved_configs, feature_flags=flags, plugins=plugins or PluginRegistry())
+    context = EngineBuildContext(settings=resolved_settings, configs=resolved_configs, feature_flags=flags, plugins=plugins or PluginRegistry())
     registry_config = resolved_configs.load_model("engine_registry", EngineRegistryConfig)
     return EngineRegistry(factory, context, registry_config)

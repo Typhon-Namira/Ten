@@ -44,10 +44,10 @@ export function MarketStateSummary({ data }: { data: MarketIntelligence | null }
   </section>
 }
 
-export function QuantForecastSummary({ forecast, calibration }: { forecast: QuantForecastResult | null; calibration: QuantCalibrationReport | null }) {
+export function QuantForecastSummary({ forecast, calibration, unavailableReason }: { forecast: QuantForecastResult | null; calibration: QuantCalibrationReport | null; unavailableReason?: string }) {
   return <section className="ai-card">
     <SectionHeader eyebrow="Quantitative forecast" title="Multi-horizon outlook" action={<Sigma size={19} />} />
-    {!forecast || forecast.status !== 'available' ? <EmptyState title="Forecast unavailable" detail={forecast?.reason_codes.join(', ') || 'The quantitative model has not produced an available point-in-time result.'} /> : <>
+    {!forecast || forecast.status !== 'available' ? <EmptyState title="Forecast unavailable" detail={humanize(forecast?.reason_codes[0] ?? unavailableReason ?? 'awaiting_first_completed_cycle')} /> : <>
       <div className="horizon-stack">
         {forecast.predictions.map(item => <article className="horizon" key={item.horizon.horizon_id}>
           <div className="horizon__head"><div><strong>{item.horizon.horizon_id.replaceAll('_', ' × ')}</strong><span>{item.horizon.duration_seconds / 60} minute horizon</span></div><StatusBadge tone="neutral">{humanize(forecast.calibration_status)}</StatusBadge></div>
@@ -68,12 +68,12 @@ export function QuantForecastSummary({ forecast, calibration }: { forecast: Quan
   </section>
 }
 
-export function AIReasoningSummary({ data }: { data: AIReasoningDashboard | null }) {
+export function AIReasoningSummary({ data, unavailableReason }: { data: AIReasoningDashboard | null; unavailableReason?: string }) {
   const forecast = data?.forecast
   const proposal = data?.proposal
   return <section className="ai-card">
     <SectionHeader eyebrow="AI analysis" title="Market reasoning" action={<BrainCircuit size={19} />} />
-    {!forecast || forecast.status === 'unavailable' || forecast.status === 'failed' || forecast.status === 'invalid' ? <EmptyState title="AI reasoning unavailable" detail="No validated structured AI forecast is available. No proposal can be published." /> : <>
+    {!forecast || forecast.status === 'unavailable' || forecast.status === 'failed' || forecast.status === 'invalid' ? <EmptyState title="AI reasoning unavailable" detail={humanize(forecast?.failure_state ?? unavailableReason ?? 'awaiting_quant_forecast')} /> : <>
       <div className="reasoning-lead">
         <span className={`direction-mark direction-mark--${forecast.dominant_direction?.toLowerCase() ?? 'neutral'}`}><Sparkles size={16} />{forecast.dominant_direction ?? 'NEUTRAL'}</span>
         <div><strong>{forecast.dominant_scenario ?? 'Scenario unavailable'}</strong><small>{forecast.generated_at ? new Date(forecast.generated_at).toLocaleString() : 'Timestamp unavailable'}</small></div>

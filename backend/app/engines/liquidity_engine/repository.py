@@ -74,7 +74,7 @@ class SqlAlchemyLiquidityRepository(LiquidityRepository, ScopedSessionRepository
             await self.session.rollback()
             raise
 
-    async def _save(self, snapshot: LiquidityAnalysisSnapshot, payload: dict) -> None:
+    async def _save(self, snapshot: LiquidityAnalysisSnapshot, payload: dict[str, object]) -> None:
         insert_result = await self.session.execute(
             insert(LiquiditySnapshotRecord)
             .values(

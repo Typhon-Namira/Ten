@@ -1,5 +1,5 @@
 import { ArrowDownRight, ArrowUpRight, RefreshCw, ShieldCheck } from 'lucide-react'
-import type { AIReasoningDashboard, MarketIntelligence, QuantForecastResult } from '../../types'
+import type { AIReasoningDashboard, DashboardAggregate, MarketIntelligence, QuantForecastResult } from '../../types'
 import {
   actionTone,
   activePublication,
@@ -64,9 +64,13 @@ export function DashboardHeader({
 export function FinalDecisionHero({
   intelligence,
   reasoning,
+  unavailableReason,
+  publicationReason,
 }: {
   intelligence: MarketIntelligence | null
   reasoning: AIReasoningDashboard | null
+  unavailableReason?: string
+  publicationReason?: string
 }) {
   const action = latestFinalAction(reasoning)
   const signal = activeSignal(reasoning)
@@ -81,10 +85,10 @@ export function FinalDecisionHero({
         <span className="decision-hero__icon"><Icon size={28} /></span>
         <h1 id="current-decision-title" key={action?.final_action_id ?? 'none'}>{decisionHeadline(action)}</h1>
       </div>
-      <p className="decision-hero__explanation">{decisionExplanation(action)}</p>
+      <p className="decision-hero__explanation">{action ? decisionExplanation(action) : humanize(unavailableReason ?? 'awaiting_guardrail_evaluation')}</p>
       <div className="decision-hero__badges">
         <StatusBadge tone={tone}>{humanize(action?.approval_state ?? 'unavailable')}</StatusBadge>
-        <StatusBadge tone={publication ? 'positive' : 'neutral'}>{publication ? 'Published analytical signal' : 'Not published'}</StatusBadge>
+        <StatusBadge tone={publication ? 'positive' : 'neutral'}>{publication ? 'Published analytical signal' : humanize(publicationReason ?? 'publication_not_available')}</StatusBadge>
         <StatusBadge tone="neutral">{signal ? humanize(signal.state) : 'No active signal'}</StatusBadge>
       </div>
     </div>
@@ -108,12 +112,14 @@ export function DecisionPipeline({
   intelligence,
   quant,
   reasoning,
+  stages,
 }: {
   intelligence: MarketIntelligence | null
   quant: QuantForecastResult | null
   reasoning: AIReasoningDashboard | null
+  stages?: DashboardAggregate['stages']
 }) {
-  const steps = pipelineSteps(reasoning, intelligence != null, quant?.status ?? null)
+  const steps = pipelineSteps(reasoning, intelligence != null, quant?.status ?? null, stages)
   return <section className="decision-pipeline" aria-label="AI decision pipeline">
     {steps.map((step, index) => <div className={`decision-pipeline__step decision-pipeline__step--${step.status}`} key={step.id}>
       <span className="decision-pipeline__index">{index + 1}</span>

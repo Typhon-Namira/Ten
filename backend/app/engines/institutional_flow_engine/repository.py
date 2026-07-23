@@ -77,7 +77,7 @@ class SqlAlchemyInstitutionalFlowRepository(InstitutionalFlowRepository, ScopedS
             await self.session.rollback()
             raise
 
-    async def _save(self, snapshot: InstitutionalFlowAnalysisSnapshot, payload: dict) -> None:
+    async def _save(self, snapshot: InstitutionalFlowAnalysisSnapshot, payload: dict[str, object]) -> None:
         insert_result = await self.session.execute(
             insert(InstitutionalFlowSnapshotRecord)
             .values(
