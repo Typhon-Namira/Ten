@@ -1,5 +1,6 @@
 import asyncio
 from abc import ABC, abstractmethod
+from datetime import datetime
 from hashlib import sha256
 
 from sqlalchemy import delete, select
@@ -48,6 +49,7 @@ class InMemoryMarketRegimeRepository(MarketRegimeRepository):
     def __init__(self) -> None:
         self._snapshots: dict[object, MarketRegimeSnapshot] = {}
         self._series: dict[tuple[str, Timeframe], list[object]] = {}
+        self._snapshot_boundaries: set[tuple[str, Timeframe, datetime, str]] = set()
         self._evidence: dict[object, MarketRegimeEvidence] = {}
         self._transitions: dict[object, RegimeTransition] = {}
         self._checkpoints: dict[tuple[str, Timeframe], tuple[MarketRegimeSnapshot, str]] = {}
@@ -55,9 +57,16 @@ class InMemoryMarketRegimeRepository(MarketRegimeRepository):
 
     async def save_snapshot(self, snapshot: MarketRegimeSnapshot) -> None:
         async with self._lock:
-            if snapshot.snapshot_id in self._snapshots:
+            boundary = (
+                canonical_symbol(snapshot.symbol),
+                snapshot.timeframe,
+                snapshot.analysis_timestamp,
+                snapshot.configuration_version,
+            )
+            if boundary in self._snapshot_boundaries:
                 return
             self._snapshots[snapshot.snapshot_id] = snapshot
+            self._snapshot_boundaries.add(boundary)
             key = (canonical_symbol(snapshot.symbol), snapshot.timeframe)
             self._series.setdefault(key, []).append(snapshot.snapshot_id)
             self._series[key].sort(key=lambda identifier: self._snapshots[identifier].analysis_timestamp)
@@ -132,7 +141,16 @@ class InMemoryMarketRegimeRepository(MarketRegimeRepository):
             removed = values[:-keep] if keep else values[:]
             self._series[key] = values[-keep:] if keep else []
             for identifier in removed:
-                self._snapshots.pop(identifier, None)
+                snapshot = self._snapshots.pop(identifier, None)
+                if snapshot is not None:
+                    self._snapshot_boundaries.discard(
+                        (
+                            canonical_symbol(snapshot.symbol),
+                            snapshot.timeframe,
+                            snapshot.analysis_timestamp,
+                            snapshot.configuration_version,
+                        )
+                    )
             return len(removed)
 
 
@@ -156,7 +174,14 @@ class SqlAlchemyMarketRegimeRepository(MarketRegimeRepository, ScopedSessionRepo
                     payload=snapshot.model_dump(mode="json"),
                     created_at=snapshot.created_at,
                 )
-                .on_conflict_do_nothing(index_elements=["id"])
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        MarketRegimeSnapshotRecord.symbol,
+                        MarketRegimeSnapshotRecord.timeframe,
+                        MarketRegimeSnapshotRecord.analysis_timestamp,
+                        MarketRegimeSnapshotRecord.configuration_version,
+                    ]
+                )
             )
             await self.session.commit()
         except Exception:

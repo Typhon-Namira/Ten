@@ -7,7 +7,9 @@ import pytest
 
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.engines.market_data_engine.events import NewCandle
+from backend.app.engines.market_regime_engine import InMemoryMarketRegimeRepository, MarketRegimeService
 from backend.app.events import InMemoryEventBus
+from backend.app.features import InMemoryFeatureStore
 from backend.app.integration import CanonicalEventEnvelope, FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationMode, MissingIntegrationEventError, OperationalSignal, canonical_hash
 from backend.app.integration.stage_tracker import PipelineStageTracker
 
@@ -17,6 +19,9 @@ class FakeMarketData:
         self.candle = candle
 
     async def history(self, *_: object, **__: object) -> list[Candle]:
+        return [self.candle] * 40
+
+    async def replay(self, *_: object, **__: object) -> list[Candle]:
         return [self.candle] * 40
 
 
@@ -82,6 +87,32 @@ class SuccessfulQuantForecast:
 class FailingAIReasoning:
     async def process(self, _state: object, _forecast: object) -> None:
         raise RuntimeError("AI reasoning failed")
+
+
+class RecordingUnifiedState:
+    def __init__(self, stages: list[str]) -> None:
+        self.stages = stages
+
+    async def capture_cycle(self, *_: object, **__: object) -> object:
+        self.stages.append("unified_market_state")
+        return object()
+
+
+class RecordingQuantForecast:
+    def __init__(self, stages: list[str]) -> None:
+        self.stages = stages
+
+    async def forecast(self, _: object) -> object:
+        self.stages.append("quant_forecast")
+        return object()
+
+
+class RecordingAIAndFinalDecision:
+    def __init__(self, stages: list[str]) -> None:
+        self.stages = stages
+
+    async def process(self, _state: object, _forecast: object) -> None:
+        self.stages.extend(("ai_reasoning", "final_decision"))
 
 
 NOW = datetime(2026, 7, 19, 12, 30, tzinfo=UTC)
@@ -479,6 +510,58 @@ async def test_ai_reasoning_failure_is_isolated_from_scoring_and_publication() -
     assert repository.metrics()["snapshots"] == 1
     assert await repository.signals() == ()
     assert coordinator.failures == 0
+
+
+@pytest.mark.asyncio
+async def test_market_regime_retry_is_idempotent_and_reaches_the_full_shadow_decision_path() -> None:
+    class FailFirstDecision(FakeDecision):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def evaluate(self, request: object) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("fail after market-regime persistence")
+            return await super().evaluate(request)
+
+    bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, repository)
+    regime_repository = InMemoryMarketRegimeRepository()
+    coordinator.market_regime = MarketRegimeService(
+        coordinator.market_data,
+        None,
+        None,
+        None,
+        None,
+        bus,
+        InMemoryFeatureStore(),
+        repository=regime_repository,
+    )
+    stages: list[str] = []
+    coordinator.unified_market_state = RecordingUnifiedState(stages)
+    coordinator.quantitative_forecasting = RecordingQuantForecast(stages)
+    coordinator.ai_reasoning = RecordingAIAndFinalDecision(stages)
+    coordinator.ai_centric_shadow_mode = True
+    decision = FailFirstDecision()
+    coordinator.signal_decision = decision
+    envelope = CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW)
+
+    with pytest.raises(RuntimeError, match="fail after market-regime persistence"):
+        await coordinator.process(envelope)
+    assert repository.metrics()["processed"] == 0
+
+    result = await coordinator.process(envelope)
+
+    assert result is None
+    assert len(await regime_repository.list_snapshots("XAUUSD", Timeframe.M15)) == 1
+    assert repository.metrics()["processed"] == 1
+    assert decision.calls == 2
+    assert stages == [
+        "unified_market_state",
+        "quant_forecast",
+        "ai_reasoning",
+        "final_decision",
+    ] * 2
 
 
 @pytest.mark.asyncio
