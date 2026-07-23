@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 import json
+import logging
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -245,6 +246,40 @@ class UnknownEvidenceProvider(ValidProvider):
         )
 
 
+class SimplifiedWaitProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version):
+        self.calls += 1
+        return AIProviderResponse(
+            raw_output={
+                "forecast": "WAIT",
+                "proposal": {
+                    "horizon": "M1",
+                    "timestamp": request.analysis_timestamp.isoformat(),
+                    "setup_family": "WAIT",
+                    "execution_levels": None,
+                },
+            },
+            provider="openrouter",
+            model_identifier=request.model_identifier,
+            latency_ms=3,
+            token_usage=None,
+        )
+
+
+class OptionalProposalFieldInvalidProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version):
+        response = await super().reason(request, prompt_version=prompt_version)
+        proposal = dict(response.raw_output["proposal"])
+        proposal["risk_notes"] = [object()]
+        return AIProviderResponse(
+            raw_output={"forecast": response.raw_output["forecast"], "proposal": proposal},
+            provider=response.provider,
+            model_identifier=response.model_identifier,
+            latency_ms=response.latency_ms,
+            token_usage=None,
+        )
+
+
 def build_service(repository, provider, *, shadow=False, proposals=True, monitoring=False, maximum_retries=1):
     config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig).model_copy(update={"maximum_retries": maximum_retries})
     registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
@@ -399,6 +434,23 @@ async def test_invalid_output_is_stored_and_cannot_create_proposal() -> None:
 
 
 @pytest.mark.asyncio
+async def test_first_structured_validation_error_is_logged_with_field_and_fragment(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+
+    with caplog.at_level(logging.ERROR, logger="backend.app.ai_reasoning.service"):
+        await build_service(repository, InvalidProvider(), maximum_retries=0).process(state, quant)
+
+    failure = next(record for record in caplog.records if record.message == "ai_reasoning.request.failed")
+    assert failure.field_path == "forecast.status"
+    assert failure.expected_type
+    assert failure.validator_name == "missing"
+    assert failure.offending_json_fragment == "null"
+
+
+@pytest.mark.asyncio
 async def test_unknown_evidence_reference_cannot_create_proposal() -> None:
     state, quant = await state_and_quant()
     repository = InMemoryAIReasoningRepository()
@@ -406,6 +458,43 @@ async def test_unknown_evidence_reference_cannot_create_proposal() -> None:
     assert result is not None and result.proposal is None
     assert result.forecast.status == AIResultStatus.INVALID
     assert any("unknown_evidence_reference" in error for failure in repository.failures.values() for error in failure.validation_errors)
+
+
+@pytest.mark.asyncio
+async def test_production_simplified_wait_shape_is_recovered_as_degraded_non_actionable_output() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    result = await build_service(repository, SimplifiedWaitProvider(), maximum_retries=0).process(state, quant)
+
+    assert result is not None and result.proposal is not None
+    assert result.forecast.status == AIResultStatus.NON_ACTIONABLE
+    assert result.forecast.validation_passed is False
+    assert result.forecast.fallback_state == "recovered_simplified_wait"
+    assert result.proposal.recommended_action == ProposalAction.WAIT
+    assert result.proposal.entry_zone is None
+    assert result.proposal.take_profit_levels == ()
+    assert result.degraded_validation is True
+    assert repository.forecasts and repository.proposals
+    assert not repository.failures
+
+
+@pytest.mark.asyncio
+async def test_invalid_optional_proposal_field_preserves_valid_forecast_as_degraded() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    result = await build_service(
+        repository,
+        OptionalProposalFieldInvalidProvider(),
+        maximum_retries=0,
+    ).process(state, quant)
+
+    assert result is not None and result.proposal is None
+    assert result.forecast.status == AIResultStatus.AVAILABLE
+    assert result.forecast.validation_passed is False
+    assert result.forecast.failure_state == "degraded_structured_output"
+    assert result.validation_issues
+    assert repository.forecasts
+    assert not repository.failures and not repository.proposals
 
 
 @pytest.mark.asyncio

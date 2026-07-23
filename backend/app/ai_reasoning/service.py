@@ -190,13 +190,41 @@ class AIReasoningService:
                 forecast = candidate.forecast.model_copy(
                     update={
                         "latency_ms": response.latency_ms,
-                        "validation_passed": True,
+                        "validation_passed": not candidate.degraded_validation,
                         "retry_count": attempt,
                         "token_usage": response.token_usage,
+                        "failure_state": (
+                            "degraded_structured_output"
+                            if candidate.degraded_validation
+                            else candidate.forecast.failure_state
+                        ),
+                        "failure_phase": (
+                            "structured_output_validation"
+                            if candidate.degraded_validation
+                            else candidate.forecast.failure_phase
+                        ),
                     }
                 )
-                validated = ValidatedAIOutput(forecast=forecast, proposal=candidate.proposal)
-                self.last_validation_passed = True
+                validated = ValidatedAIOutput(
+                    forecast=forecast,
+                    proposal=candidate.proposal,
+                    validation_issues=candidate.validation_issues,
+                    repaired_fields=candidate.repaired_fields,
+                )
+                logger.info(
+                    "structured_validation.completed",
+                    extra={
+                        **worker_context,
+                        "request_id": str(request.request_id),
+                        "validation_status": (
+                            "degraded" if candidate.degraded_validation else "valid"
+                        ),
+                        "validation_issue_count": len(candidate.validation_issues),
+                        "repaired_fields": candidate.repaired_fields,
+                        "proposal_preserved": candidate.proposal is not None,
+                    },
+                )
+                self.last_validation_passed = not candidate.degraded_validation
                 self.last_retry_count = attempt
                 self.last_failure_state = None
                 self._provider_failure_streak = 0
@@ -223,6 +251,13 @@ class AIReasoningService:
                         "failed_during_structured_output_validation": True,
                         "failed_during_domain_parsing": False,
                         "failed_during_persistence": False,
+                        "field_path": exc.first_issue.field_path if exc.first_issue else None,
+                        "expected_type": exc.first_issue.expected_type if exc.first_issue else None,
+                        "actual_value": exc.first_issue.actual_value if exc.first_issue else None,
+                        "validator_name": exc.first_issue.validator_name if exc.first_issue else None,
+                        "offending_json_fragment": (
+                            exc.first_issue.offending_json_fragment if exc.first_issue else None
+                        ),
                     },
                 )
             except OpenRouterRequestError as exc:
@@ -341,6 +376,19 @@ class AIReasoningService:
         if proposal is not None:
             if self.proposals_enabled or existing_signal is not None:
                 await self.repository.save_proposal(proposal)
+                logger.info(
+                    "proposal.generated",
+                    extra={
+                        **worker_context,
+                        "request_id": str(request.request_id),
+                        "proposal_id": str(proposal.proposal_id),
+                        "recommended_action": proposal.recommended_action.value,
+                        "proposal_confidence": proposal.proposal_confidence,
+                        "validation_status": (
+                            "degraded" if validated.degraded_validation else "valid"
+                        ),
+                    },
+                )
             if self.proposals_enabled or (
                 existing_signal is not None
                 and proposal.structural_opportunity_key == existing_signal.structural_opportunity_key
