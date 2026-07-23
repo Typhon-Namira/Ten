@@ -12,6 +12,22 @@ from backend.app.final_decision.service import FinalDecisionService
 router = APIRouter(prefix="/api/v1/ai-reasoning", tags=["ai-reasoning"])
 
 
+def _runtime_state(request: Request) -> dict[str, Any]:
+    flags = request.app.state.engine_registry.context.feature_flags.snapshot()
+    if flags.get("ai_signal_publication", False):
+        profile = "analytical_live"
+    elif flags.get("ai_centric_shadow_mode", False):
+        profile = "shadow"
+    else:
+        profile = "safe_test"
+    return {
+        "operating_profile": profile,
+        "feature_flags": flags,
+        "analytical_only": True,
+        "broker_execution_available": False,
+    }
+
+
 def get_service(request: Request) -> AIReasoningService:
     return request.app.state.ai_reasoning_service
 
@@ -37,12 +53,13 @@ FinalRepository = Annotated[FinalDecisionRepository, Depends(get_final_repositor
 
 
 @router.get("/health")
-async def health(service: Service, final_service: FinalService) -> dict[str, object]:
-    return {**service.health(), "guardrails": final_service.health()}
+async def health(request: Request, service: Service, final_service: FinalService) -> dict[str, object]:
+    return {**service.health(), "guardrails": final_service.health(), "runtime": _runtime_state(request)}
 
 
 @router.get("/latest")
 async def latest(
+    request: Request,
     repository: Repository,
     service: Service,
     final_repository: FinalRepository,
@@ -96,5 +113,6 @@ async def latest(
         },
         "performance": performance.model_dump(mode="json") if performance else None,
         "production_readiness": readiness.model_dump(mode="json") if readiness else None,
+        "runtime": _runtime_state(request),
         "health": {**service.health(), "guardrails": final_service.health()},
     }

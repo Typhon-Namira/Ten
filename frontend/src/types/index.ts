@@ -628,6 +628,7 @@ export interface AIMarketForecast {
   forecast_confidence: number | null
   uncertainty: number | null
   setup_readiness: string | null
+  reasoning_summary: string | null
   generated_at: string
   shadow_only: true
   awaiting_guardrail_validation: true
@@ -695,6 +696,12 @@ export interface AIReasoningDashboard {
     warnings: string[]
     measured_checks: Record<string, { passed: boolean; threshold: unknown }>
   } | null
+  runtime: {
+    operating_profile: 'safe_test' | 'shadow' | 'analytical_live'
+    feature_flags: Record<string, boolean>
+    analytical_only: true
+    broker_execution_available: false
+  }
   health: {
     enabled: boolean
     proposals_enabled: boolean
@@ -726,6 +733,9 @@ export interface AIReasoningDashboard {
       publications_failed: number
       publication_failure_rate: number
       policy_versions: Record<string, string>
+      daily_request_allowance: number
+      daily_token_allowance: number
+      llm_concurrency_limit: number
     }
   }
 }
@@ -742,7 +752,7 @@ export interface FinalSystemAction {
   final_risk_to_reward: number | null
   final_expiry: string | null
   final_risk_classification: string
-  gate_evaluations: { gate_id: string; status: string; reason_codes: string[] }[]
+  gate_evaluations: { gate_id: string; category: string; status: string; reason_codes: string[] }[]
   modifications: {
     field_name: string
     original_value: unknown

@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from backend.app.ai_reasoning.models import ManagedSignalState, ProposalAction
 from backend.app.ai_reasoning.repository import InMemoryAIReasoningRepository
 from backend.app.core.config import YamlConfigRepository
+from backend.app.api.routes.ai_reasoning import _runtime_state
 from backend.app.final_decision import (
     DeterministicReplayAdapter,
     EvaluationCandle,
@@ -66,6 +68,37 @@ def final_service(*, publication: bool, adjustments: bool = False):
         ),
         repository,
     )
+
+
+def test_dashboard_runtime_metadata_is_observational_and_explicitly_analytical_only() -> None:
+    flags = {
+        "ai_centric_shadow_mode": True,
+        "ai_signal_publication": False,
+    }
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                engine_registry=SimpleNamespace(
+                    context=SimpleNamespace(
+                        feature_flags=SimpleNamespace(snapshot=lambda: flags),
+                    ),
+                ),
+            ),
+        ),
+    )
+    runtime = _runtime_state(request)
+    assert runtime == {
+        "operating_profile": "shadow",
+        "feature_flags": flags,
+        "analytical_only": True,
+        "broker_execution_available": False,
+    }
+
+    service, _ = final_service(publication=False)
+    health = service.health()
+    assert health["daily_request_allowance"] == service.config.maximum_daily_llm_requests
+    assert health["daily_token_allowance"] == service.config.maximum_daily_llm_tokens
+    assert health["llm_concurrency_limit"] == service.config.llm_concurrency_limit
 
 
 def context(state, quant, proposal, signal, **updates):

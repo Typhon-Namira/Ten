@@ -485,4 +485,7 @@ class FinalDecisionService:
             "publication_failure_rate": self.publications_failed / total_publications if total_publications else 0.0,
             "last_failure": self.last_failure,
             "policy_versions": self.policy_versions(),
+            "daily_request_allowance": self.config.maximum_daily_llm_requests,
+            "daily_token_allowance": self.config.maximum_daily_llm_tokens,
+            "llm_concurrency_limit": self.config.llm_concurrency_limit,
         }

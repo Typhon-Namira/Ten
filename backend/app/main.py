@@ -93,6 +93,9 @@ SPA_ROUTES = frozenset(
     {
         "/",
         "/signals",
+        "/performance",
+        "/calibration",
+        "/system",
         "/market",
         "/smc",
         "/liquidity",
