@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AIAnalysisPage, ConfigurationPage, EngineStatusPage, InstitutionalFlowPage, LiquidityPage, LogsPage, MarketRegimePage, VolumeProfilePage } from '../pages/ModulePages'
-import { Dashboard } from '../pages/Dashboard'
+import { AICalibrationPage, AIPerformancePage, AISignalsPage, AISystemPage, Dashboard } from '../pages/Dashboard'
 import { MarketPage } from '../pages/MarketPage'
 import { ReplaySessionsPage } from '../pages/ReplaySessionsPage'
 import { CurrentSignalsPage } from '../pages/CurrentSignalsPage'
@@ -27,13 +27,17 @@ const routes: Record<string, () => React.JSX.Element> = {
   '/market-regime': MarketRegimePage,
   '/economic-calendar': EconomicCalendarEnginePage,
   '/ai-analysis': AIAnalysisPage,
-  '/signals': CurrentSignalsPage,
+  '/signals': AISignalsPage,
   '/signals/rejected': RejectedSignalsPage,
   '/signals/history': SignalHistoryPage,
   '/signals/decision-tree': SignalDecisionTreePage,
   '/assistant': AssistantPage,
   '/pipeline': PipelinePage,
-  '/performance': PerformancePage,
+  '/performance': AIPerformancePage,
+  '/calibration': AICalibrationPage,
+  '/system': AISystemPage,
+  '/legacy/signals': CurrentSignalsPage,
+  '/legacy/performance': PerformancePage,
   '/logs': LogsPage,
   '/diagnostics': DiagnosticsPage,
   '/engine-status': EngineStatusPage,
