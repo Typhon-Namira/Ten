@@ -159,7 +159,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         smc_config = configs.load_model("smc", SMCConfig)
         app.state.smc_database_engine = None
-        # A single shared `async_sessionmaker` — never a pre-created `Session` — is stored once
+        # A single shared `async_sessionmaker` ? never a pre-created `Session` ? is stored once
         # and handed to every repository. Each repository opens and closes its own `AsyncSession`
         # per call (see `backend/app/storage/scoped_session.py`); no session is ever held for the
         # process lifetime or shared across concurrent callers. This directly fixes production
@@ -397,6 +397,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             StructuredAIOutputValidator(setup_family_registry),
             setup_family_registry,
             ai_reasoning_config,
+            shadow_enabled=ai_centric_shadow_mode,
             proposals_enabled=ai_proposals_enabled,
             monitoring_enabled=ai_monitoring_enabled,
             final_decision=app.state.final_decision_service,
@@ -539,7 +540,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             await app.state.economic_calendar_service.stop()
             await app.state.market_data_service.close()
             await app.state.pipeline_manager.event_bus.drain()
-            # No per-engine sessions to close — every repository call already closed its own
+            # No per-engine sessions to close ? every repository call already closed its own
             # ephemeral session on return (see `scoped_session`). Only the shared engine (and its
             # connection pool) needs disposing.
             if app.state.smc_database_engine is not None:
@@ -571,7 +572,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
 
     @application.exception_handler(TenError)
     async def handle_ten_error(request: Request, exc: TenError) -> JSONResponse:
-        # This app has no order-execution surface (see the FastAPI description above) — every
+        # This app has no order-execution surface (see the FastAPI description above) ? every
         # route is read-only analysis/observability. A GET request that fails must degrade to a
         # graceful, per-endpoint `status: "error"` body at 200, not an opaque failure, so the
         # dashboard never has to special-case a non-200 response just to render "unavailable".
@@ -584,14 +585,14 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
     async def handle_unhandled_exception(request: Request, exc: Exception) -> Response:
         # Catches everything NOT already handled above or by FastAPI's own HTTPException/
         # RequestValidationError handlers (Starlette dispatches to the most specific registered
-        # type, so those keep their existing behaviour untouched) — e.g. a raw AttributeError,
+        # type, so those keep their existing behaviour untouched) ? e.g. a raw AttributeError,
         # KeyError, or SQLAlchemy driver error bubbling out of a repository/engine call that was
         # never wrapped in a try/except. Root cause this closes: dozens of observability GET
         # endpoints called services/repositories directly with no guard at all, so any of those
         # exception types propagated straight to FastAPI's default 500 handler.
         #
         # A handler registered for the bare `Exception` class is dispatched by Starlette's
-        # outermost `ServerErrorMiddleware`, not the inner `ExceptionMiddleware` — which always
+        # outermost `ServerErrorMiddleware`, not the inner `ExceptionMiddleware` ? which always
         # re-raises after sending the response (so the exception still surfaces in server logs /
         # `TestClient(raise_server_exceptions=True)`), and does not tolerate the handler itself
         # raising. So POST/PUT/DELETE failing closed is expressed as an explicit 500 response
