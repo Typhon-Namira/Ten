@@ -39,11 +39,12 @@ export function DashboardHeader({
   onRefresh: () => Promise<void>
 }) {
   const profile = reasoning?.runtime.operating_profile ?? 'safe_test'
-  // `provider_available` only means the OpenRouter client is configured and reachable at the
-  // transport level — it stays `true` even while every request is failing authentication (see
-  // `health.failure_state`/`health.failed_requests`). A badge driven by `provider_available` alone
-  // showed "AI online" in green at the same time the decision pipeline below showed "AI Reasoning:
-  // FAILED" in red for the identical cause — this reconciles the two instead of contradicting.
+  // `provider_available` is false for any failure category where no usable response was ever
+  // received (auth/rate-limit/timeout/unknown) and true only on success or a response that was
+  // received but rejected by our own schema validation (`structured_output_invalid`) -- see
+  // `_PROVIDER_REACHABLE_FAILURE_STATES` in ai_reasoning/service.py. That split is what separates
+  // "offline" (provider/transport-level failure) from "degraded" (provider responded, our
+  // validation caught a problem) below, instead of collapsing every failure into one bucket.
   const health = reasoning?.health
   const aiState: 'online' | 'degraded' | 'offline' | 'not_called' = !health
     ? 'not_called'

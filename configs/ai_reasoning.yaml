@@ -8,10 +8,12 @@ maximum_memory_entries: 20
 maximum_retries: 1
 temperature: 0.1
 max_tokens: 3200
-# Must stay comfortably above HttpOpenRouterClient's own httpx timeout (30s) so a slow-but-live
-# response is reported by httpx's typed timeout (caught as OpenRouterRequestError) instead of
-# racing asyncio.wait_for's untyped TimeoutError, which used to get mislabeled "llm_unavailable".
-request_timeout_seconds: 45.0
+# Must stay comfortably above HttpOpenRouterClient's own httpx timeout (wired in main.py as
+# this value minus 5s) so a slow-but-live response is reported by httpx's typed timeout (caught
+# as OpenRouterRequestError) instead of racing asyncio.wait_for's untyped TimeoutError. Raised
+# from 45s -> 60s after production observed structured-output completions genuinely running past
+# 45s under the larger response-contract prompt payload.
+request_timeout_seconds: 60.0
 llm_concurrency_limit: 1
 provider_backoff_initial_seconds: 5.0
 provider_backoff_max_seconds: 300.0

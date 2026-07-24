@@ -37,6 +37,13 @@ from .validation import StructuredAIOutputError, StructuredAIOutputValidator, Va
 
 logger = logging.getLogger(__name__)
 
+# failure_state values where the provider demonstrably returned a response over the transport --
+# our own schema validation was what rejected it. Every other failure_state (any
+# OpenRouterRequestError reason_code such as an auth/rate-limit/timeout HTTP outcome,
+# "ai_reasoning_request_timeout", or the generic "llm_unavailable" catch-all) means no usable
+# response was received, so the provider itself should be reported unavailable.
+_PROVIDER_REACHABLE_FAILURE_STATES = frozenset({"structured_output_invalid"})
+
 
 class AIReasoningService:
     def __init__(
@@ -707,7 +714,9 @@ class AIReasoningService:
             "monitoring_enabled": self.monitoring_enabled,
             "publication_enabled": self.final_decision.publication_enabled if self.final_decision else False,
             "adjustments_enabled": self.final_decision.adjustments_enabled if self.final_decision else False,
-            "provider_available": self.last_failure_state != "llm_unavailable" if self.requests else None,
+            "provider_available": (
+                self.last_failure_state is None or self.last_failure_state in _PROVIDER_REACHABLE_FAILURE_STATES
+            ) if self.requests else None,
             "provider": metadata["provider"],
             "model_identifier": metadata["model_identifier"],
             "prompt_version": self.config.prompt_version_new_market,

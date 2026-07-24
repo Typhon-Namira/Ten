@@ -313,7 +313,15 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             repository_mode=decision_mode,
         )
         await app.state.signal_decision_service.start()
-        app.state.llm_client = HttpOpenRouterClient(settings.openrouter_api_key, settings.openrouter_base_url)
+        ai_reasoning_config = configs.load_model("ai_reasoning", AIReasoningConfig)
+        # Kept below ai_reasoning_config.request_timeout_seconds so httpx's own typed timeout
+        # fires first and is converted to OpenRouterRequestError, instead of racing the outer
+        # asyncio.wait_for in AIReasoningService.process() and losing to it on slow responses.
+        app.state.llm_client = HttpOpenRouterClient(
+            settings.openrouter_api_key,
+            settings.openrouter_base_url,
+            timeout_seconds=max(1.0, ai_reasoning_config.request_timeout_seconds - 5.0),
+        )
         app.state.explainability_service = ExplainabilityService(
             app.state.llm_client,
             PromptLoader(Path(__file__).resolve().parent / "explainability" / "prompts"),
@@ -358,7 +366,6 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             quant_config,
             enabled=ai_centric_shadow_mode,
         )
-        ai_reasoning_config = configs.load_model("ai_reasoning", AIReasoningConfig)
         setup_family_registry = SetupFamilyRegistry.from_yaml(configs)
         ai_repository: AIReasoningRepository = InMemoryAIReasoningRepository()
         if app.state.database_session_factory is not None:

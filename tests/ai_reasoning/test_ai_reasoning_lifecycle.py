@@ -420,6 +420,31 @@ async def test_provider_timeout_is_reported_distinctly_not_as_generic_llm_unavai
 
 
 @pytest.mark.asyncio
+async def test_health_reports_provider_unavailable_for_transport_level_failures_not_just_llm_unavailable() -> None:
+    """`provider_available` used to only go false for the literal string "llm_unavailable",
+    so a timeout (or an auth/rate-limit failure) still reported the provider as available and
+    the dashboard badge showed "degraded" instead of "offline". It must go false for any
+    failure category where no usable response was ever received."""
+    state, quant = await state_and_quant()
+
+    timeout_service = build_service(InMemoryAIReasoningRepository(), TimeoutProvider(), maximum_retries=0)
+    await timeout_service.process(state, quant)
+    assert timeout_service.health()["provider_available"] is False
+
+    auth_service = build_service(InMemoryAIReasoningRepository(), TypedUnavailableProvider(), maximum_retries=0)
+    await auth_service.process(state, quant)
+    assert auth_service.health()["provider_available"] is False
+
+    generic_service = build_service(InMemoryAIReasoningRepository(), UnavailableProvider(), maximum_retries=0)
+    await generic_service.process(state, quant)
+    assert generic_service.health()["provider_available"] is False
+
+    healthy_service = build_service(InMemoryAIReasoningRepository(), ValidProvider(), maximum_retries=0)
+    await healthy_service.process(state, quant)
+    assert healthy_service.health()["provider_available"] is True
+
+
+@pytest.mark.asyncio
 async def test_shadow_reasoning_runs_without_proposal_or_monitoring_flags_and_persists_typed_failure() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), TypedUnavailableProvider()
