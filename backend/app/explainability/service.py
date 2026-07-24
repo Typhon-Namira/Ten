@@ -5,7 +5,11 @@ OpenRouter call degrades to a clear error, never a fabricated answer standing in
 
 from __future__ import annotations
 
+from datetime import UTC
+from hashlib import sha256
+import json
 import logging
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -27,18 +31,73 @@ class ExplainabilityService:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
+    async def _complete(
+        self,
+        context: ExplainabilityContext,
+        payload: dict[str, Any],
+        *,
+        trigger: str,
+    ) -> dict[str, Any]:
+        generated_at = context.generated_at.astimezone(UTC)
+        bucket = generated_at.replace(
+            minute=(generated_at.minute // 10) * 10,
+            second=0,
+            microsecond=0,
+        )
+        idempotency_key = sha256(
+            json.dumps(
+                {
+                    "trigger": trigger,
+                    "instrument": context.instrument,
+                    "time_bucket": bucket.isoformat(),
+                    "payload": payload,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        ).hexdigest()
+        call_context = {
+            "trigger": trigger,
+            "instrument": context.instrument,
+            "idempotency_key": idempotency_key,
+            "ten_minute_bucket": bucket.isoformat(),
+        }
+        logger.info("explainability.provider_call.started", extra=call_context)
+        try:
+            raw = await self.client.complete_json(
+                system_prompt=self.prompts.load(PROMPT_VERSION),
+                payload=payload,
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+        except Exception as exc:
+            logger.info(
+                "explainability.provider_call.completed",
+                extra={
+                    **call_context,
+                    "result": "failed",
+                    "exception_class": type(exc).__name__,
+                },
+            )
+            raise
+        logger.info(
+            "explainability.provider_call.completed",
+            extra={**call_context, "result": "success"},
+        )
+        return raw
+
     async def explain(self, context: ExplainabilityContext) -> Explanation:
         """The one call every `/explain/*` endpoint routes through. Never raises for a bad model
         response — an explanation that fails validation is a *degraded* result the caller renders
         as `status: "error"` (matching the rest of TEN's never-500 observability policy), not an
         exception that turns into an opaque 500."""
         payload = context.model_dump(mode="json")
-        raw = await self.client.complete_json(
-            system_prompt=self.prompts.load(PROMPT_VERSION),
-            payload=payload,
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+        raw = await self._complete(
+            context,
+            payload,
+            trigger="explainability_api",
         )
         try:
             return Explanation.model_validate(raw)
@@ -53,11 +112,9 @@ class ExplainabilityService:
         blob keeps the "one JSON in, one JSON out" contract identical to every other explanation."""
         payload = context.model_dump(mode="json")
         payload["conversation_history"] = [turn.model_dump(mode="json") for turn in history]
-        raw = await self.client.complete_json(
-            system_prompt=self.prompts.load(PROMPT_VERSION),
-            payload=payload,
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+        raw = await self._complete(
+            context,
+            payload,
+            trigger="explainability_chat_api",
         )
         return Explanation.model_validate(raw)

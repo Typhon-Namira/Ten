@@ -10,6 +10,38 @@ from backend.app.core.exceptions import OpenRouterRequestError
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", (500, 502, 503, 504))
+async def test_all_http_5xx_failures_are_typed_temporary_provider_unavailable(
+    status: int,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            headers={"content-type": "application/json"},
+            json={"error": {"message": "temporary upstream failure"}},
+            request=request,
+        )
+
+    client = HttpOpenRouterClient(
+        "safe-test-key",
+        "https://openrouter.ai/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(OpenRouterRequestError) as captured:
+        await client.complete_json(
+            system_prompt="system",
+            payload={"input": "test"},
+            model="model",
+            temperature=0,
+            max_tokens=10,
+        )
+
+    assert captured.value.details.reason_code == "provider_unavailable"
+    assert captured.value.details.http_status == status
+
+
+@pytest.mark.asyncio
 async def test_http_402_is_sanitized_logged_and_typed(caplog: pytest.LogCaptureFixture) -> None:
     api_key = "secret-key-that-must-never-be-logged"
     prompt = "sensitive prompt that must never be logged"

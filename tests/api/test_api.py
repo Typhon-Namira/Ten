@@ -147,6 +147,21 @@ def test_dashboard_aggregate_returns_typed_reasons_without_expected_404s() -> No
     assert body["reasoning"]["runtime"]["operating_profile"] == "safe_test"
 
 
+def test_repeated_dashboard_refreshes_never_invoke_ai_provider() -> None:
+    app = create_app()
+    provider_call = AsyncMock(side_effect=AssertionError("dashboard must remain read-only"))
+    app.state.ai_reasoning_service.provider.reason = provider_call
+
+    with TestClient(app) as client:
+        responses = [
+            client.get("/api/v1/dashboard/latest", params={"instrument": "XAUUSD"})
+            for _ in range(5)
+        ]
+
+    assert all(response.status_code == 200 for response in responses)
+    provider_call.assert_not_awaited()
+
+
 def test_dashboard_system_status_is_one_authoritative_thirteen_stage_contract() -> None:
     with TestClient(create_app()) as client:
         response = client.get(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 from typing import Protocol
 
@@ -15,6 +16,7 @@ from backend.app.storage.models import (
     AIForecastScenarioRecord,
     AIMarketForecastRecord,
     AIReasoningRequestRecord,
+    AIReasoningWindowLockRecord,
     AISetupFamilyVersionRecord,
     AISignalProposalRecord,
     LLMStructuredOutputFailureRecord,
@@ -52,6 +54,26 @@ logger = logging.getLogger(__name__)
 
 
 class AIReasoningRepository(Protocol):
+    async def claim_reasoning_window(
+        self,
+        idempotency_key: str,
+        instrument: str,
+        ten_minute_bucket: datetime,
+        market_state_version: str,
+        claimed_at: datetime,
+    ) -> bool: ...
+    async def complete_reasoning_window(
+        self,
+        idempotency_key: str,
+        request_id: object,
+        forecast_id: object,
+        status: str,
+        completed_at: datetime,
+    ) -> None: ...
+    async def result_for_reasoning_window(
+        self,
+        idempotency_key: str,
+    ) -> tuple[AIMarketForecast, AISignalProposal | None] | None: ...
     async def save_setup_family(self, value: SetupFamilyDefinition, registry_version: str) -> SetupFamilyDefinition: ...
     async def save_request(self, value: AIReasoningRequest) -> AIReasoningRequest: ...
     async def save_failure(self, value: LLMStructuredOutputFailure) -> LLMStructuredOutputFailure: ...
@@ -87,7 +109,67 @@ class InMemoryAIReasoningRepository:
         self.monitoring: dict[object, SignalMonitoringEvaluation] = {}
         self.outcomes: dict[object, SignalOutcome] = {}
         self.memory: dict[object, MarketMemoryEntry] = {}
+        self.reasoning_windows: dict[str, dict[str, object]] = {}
         self._lock = asyncio.Lock()
+
+    async def claim_reasoning_window(
+        self,
+        idempotency_key: str,
+        instrument: str,
+        ten_minute_bucket: datetime,
+        market_state_version: str,
+        claimed_at: datetime,
+    ) -> bool:
+        async with self._lock:
+            if idempotency_key in self.reasoning_windows:
+                return False
+            self.reasoning_windows[idempotency_key] = {
+                "instrument": instrument,
+                "ten_minute_bucket": ten_minute_bucket,
+                "market_state_version": market_state_version,
+                "status": "claimed",
+                "claimed_at": claimed_at,
+            }
+            return True
+
+    async def complete_reasoning_window(
+        self,
+        idempotency_key: str,
+        request_id: object,
+        forecast_id: object,
+        status: str,
+        completed_at: datetime,
+    ) -> None:
+        async with self._lock:
+            window = self.reasoning_windows[idempotency_key]
+            window.update(
+                request_id=request_id,
+                forecast_id=forecast_id,
+                status=status,
+                completed_at=completed_at,
+            )
+
+    async def result_for_reasoning_window(
+        self,
+        idempotency_key: str,
+    ) -> tuple[AIMarketForecast, AISignalProposal | None] | None:
+        async with self._lock:
+            window = self.reasoning_windows.get(idempotency_key)
+            if window is None or window.get("status") not in {"completed", "failed"}:
+                return None
+            request_id = window.get("request_id")
+            forecast = self.forecasts.get(request_id)
+            if forecast is None:
+                return None
+            proposal = next(
+                (
+                    item
+                    for item in self.proposals.values()
+                    if item.forecast_id == forecast.forecast_id
+                ),
+                None,
+            )
+            return forecast, proposal
 
     async def save_setup_family(self, value: SetupFamilyDefinition, registry_version: str) -> SetupFamilyDefinition:
         async with self._lock:
@@ -212,6 +294,94 @@ class InMemoryAIReasoningRepository:
 class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         super().__init__(session_factory)
+
+    @scoped_session
+    async def claim_reasoning_window(
+        self,
+        idempotency_key: str,
+        instrument: str,
+        ten_minute_bucket: datetime,
+        market_state_version: str,
+        claimed_at: datetime,
+    ) -> bool:
+        statement = (
+            insert(AIReasoningWindowLockRecord)
+            .values(
+                idempotency_key=idempotency_key,
+                instrument=instrument,
+                ten_minute_bucket=ten_minute_bucket,
+                market_state_version=market_state_version,
+                status="claimed",
+                claimed_at=claimed_at,
+            )
+            .on_conflict_do_nothing(index_elements=["idempotency_key"])
+            .returning(AIReasoningWindowLockRecord.idempotency_key)
+        )
+        claimed = (await self.session.execute(statement)).scalar_one_or_none() is not None
+        await self.session.commit()
+        return claimed
+
+    @scoped_session
+    async def complete_reasoning_window(
+        self,
+        idempotency_key: str,
+        request_id: object,
+        forecast_id: object,
+        status: str,
+        completed_at: datetime,
+    ) -> None:
+        await self.session.execute(
+            update(AIReasoningWindowLockRecord)
+            .where(AIReasoningWindowLockRecord.idempotency_key == idempotency_key)
+            .values(
+                request_id=request_id,
+                forecast_id=forecast_id,
+                status=status,
+                completed_at=completed_at,
+            )
+        )
+        await self.session.commit()
+
+    @scoped_session
+    async def result_for_reasoning_window(
+        self,
+        idempotency_key: str,
+    ) -> tuple[AIMarketForecast, AISignalProposal | None] | None:
+        window = (
+            await self.session.scalars(
+                select(AIReasoningWindowLockRecord)
+                .where(
+                    AIReasoningWindowLockRecord.idempotency_key == idempotency_key,
+                    AIReasoningWindowLockRecord.status.in_(("completed", "failed")),
+                )
+                .limit(1)
+            )
+        ).first()
+        if window is None or window.forecast_id is None:
+            return None
+        forecast_record = (
+            await self.session.scalars(
+                select(AIMarketForecastRecord)
+                .where(AIMarketForecastRecord.forecast_id == window.forecast_id)
+                .limit(1)
+            )
+        ).first()
+        if forecast_record is None:
+            return None
+        proposal_record = (
+            await self.session.scalars(
+                select(AISignalProposalRecord)
+                .where(AISignalProposalRecord.forecast_id == window.forecast_id)
+                .order_by(AISignalProposalRecord.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        return (
+            AIMarketForecast.model_validate(forecast_record.payload),
+            AISignalProposal.model_validate(proposal_record.payload)
+            if proposal_record is not None
+            else None,
+        )
 
     @scoped_session
     async def save_setup_family(self, value: SetupFamilyDefinition, registry_version: str) -> SetupFamilyDefinition:
