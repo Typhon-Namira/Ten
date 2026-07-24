@@ -23,6 +23,11 @@ from .models import (
 )
 
 
+_TERMINAL_ZONE_STATES = frozenset(
+    {LifecycleState.MITIGATED, LifecycleState.INVALIDATED, LifecycleState.EXPIRED, LifecycleState.BROKEN, LifecycleState.SUPERSEDED, LifecycleState.ARCHIVED}
+)
+
+
 class AdvancedSMCAnalyzer:
     """Deterministic production analyzers sharing the candle availability boundary."""
 
@@ -126,7 +131,25 @@ class AdvancedSMCAnalyzer:
                     self._add_zone(context, zones, active, generated, index, ZoneType.LIQUIDITY_VOID, displacement.direction, low, high, (index - 1, index), displacement.id)
             for event in events_by_time.get(candle.timestamp, []):
                 self._order_block(context, zones, active, generated, index, event, by_time.get(candle.timestamp))
-        return tuple(zones[-self.config.processing.maximum_active_objects :])
+        return self._prune_zones(zones, context)
+
+    def _prune_zones(self, zones: list[SMCZone], context: CandleContext) -> tuple[SMCZone, ...]:
+        # `zones` accumulates every zone object created anywhere in this window's replay (slots
+        # are mutated in place, never removed), so a zone that lives for hundreds of candles used
+        # to drag every other long-dead zone from earlier in the window along with it into the
+        # persisted snapshot/evidence payload. A non-terminal zone is always kept; a terminal one
+        # is kept only if it terminated within `evidence_retention_candles` of the window's end.
+        # Full zone-version history remains available via `smc_objects` (a separate append-only
+        # audit table) regardless of what a cycle's snapshot embeds.
+        retention = self.config.processing.evidence_retention_candles
+        cutoff = context.candles[max(0, len(context.candles) - retention)].timestamp
+        kept = [
+            zone
+            for zone in zones
+            if zone.lifecycle_state not in _TERMINAL_ZONE_STATES
+            or (zone.invalidation_timestamp or zone.expiration_timestamp or zone.mitigation_timestamp or zone.confirmation_timestamp) >= cutoff
+        ]
+        return tuple(kept[-self.config.processing.maximum_active_objects :])
 
     def _add_zone(self, context: CandleContext, zones: list[SMCZone], active: dict[object, tuple[int, int]], generated: set[object], index: int, zone_type: ZoneType, direction: StructureDirection, low: float, high: float, source_indices: tuple[int, ...], trigger: object | None, parent: object | None = None) -> None:
         size = high - low

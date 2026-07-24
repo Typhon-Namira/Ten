@@ -21,6 +21,7 @@ processing:
   checkpoint_interval: 100
   maximum_active_objects: 5000
   minimum_input_quality: 60
+  evidence_retention_candles: 50
 displacement:
   minimum_atr_impulse: 0.8
   strong_atr_impulse: 1.5

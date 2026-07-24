@@ -125,6 +125,7 @@ async def diagnostics(request: Request) -> dict[str, object]:
         "workers": {
             "market_data_worker": market_worker,
             "integration_worker": integration_worker,
+            "retention_worker": app.state.retention_worker.status(),
         },
         "event_bus": event_metrics,
         "feature_store": {"status": "healthy", "latest_feature_at": (feature_history[0].created_at if feature_history else None)},
@@ -322,6 +323,7 @@ async def performance(request: Request, instrument: str | None = None, timeframe
         "workers": {
             "market_data_worker": app.state.market_data_worker.status(),
             "integration_worker": app.state.integration_worker.status(settings.integration_worker_enabled),
+            "retention_worker": app.state.retention_worker.status(),
         },
         "event_bus": app.state.pipeline_manager.event_bus.metrics(),
         "feature_store": app.state.pipeline_manager.feature_store.metrics(),

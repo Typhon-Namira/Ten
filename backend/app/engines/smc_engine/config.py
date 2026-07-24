@@ -34,6 +34,12 @@ class ProcessingConfig(BaseModel):
     checkpoint_interval: int = Field(default=100, ge=1)
     maximum_active_objects: int = Field(default=5000, ge=100)
     minimum_input_quality: float = Field(default=60, ge=0, le=100)
+    # A zone that is still ACTIVE/PARTIALLY_MITIGATED is always kept regardless of age — this
+    # only bounds how long a zone stays in the snapshot's `zones` array *after* it terminates
+    # (mitigated/invalidated/expired/superseded). Without this, every snapshot re-embeds every
+    # zone ever produced by the current replay window (up to `maximum_active_objects`), most of
+    # them long-dead, which is what made a single snapshot's evidence payload tens of megabytes.
+    evidence_retention_candles: int = Field(default=50, ge=1)
 
 
 class DisplacementConfig(BaseModel):
