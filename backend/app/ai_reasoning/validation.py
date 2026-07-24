@@ -225,13 +225,14 @@ class StructuredAIOutputValidator:
         repaired: list[str] = []
         issues: list[str] = []
         if "forecast" not in normalized and "decision" in normalized:
-            normalized = self._normalize_compact_response(
+            normalized, compact_repairs, compact_issues = self._normalize_compact_response(
                 normalized,
                 request=request,
                 state=state,
                 quant=quant,
             )
-            repaired.append("compact_response")
+            repaired.extend(("compact_response", *compact_repairs))
+            issues.extend(compact_issues)
         if isinstance(normalized.get("forecast"), str) and str(normalized["forecast"]).strip().upper() == "WAIT":
             normalized = self._simplified_wait(request=request, state=state, quant=quant)
             repaired.extend(("forecast", "proposal"))
@@ -321,9 +322,11 @@ class StructuredAIOutputValidator:
         request: AIReasoningRequest,
         state: UnifiedMarketState,
         quant: QuantForecastResult,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], tuple[str, ...], tuple[str, ...]]:
         """Expand the intentionally small provider response into internal domain models."""
 
+        repaired: list[str] = []
+        issues: list[str] = []
         decision = str(raw.get("decision", "WAIT")).strip().upper()
         if decision not in {"LONG", "SHORT", "WAIT"}:
             decision = "WAIT"
@@ -357,11 +360,25 @@ class StructuredAIOutputValidator:
                 probabilities = (remainder / 2, remainder / 2, confidence)
 
         proposal_raw = raw.get("proposal")
-        setup_family = (
+        supplied_setup_family = (
             str(proposal_raw.get("setup_family"))[:64]
             if isinstance(proposal_raw, dict) and proposal_raw.get("setup_family")
             else None
         )
+        setup_family, family_repaired = self.registry.canonical_id(supplied_setup_family)
+        if family_repaired:
+            repaired.append("proposal.setup_family")
+        if decision != "WAIT" and supplied_setup_family and setup_family is None:
+            issues.append(
+                self._issue(
+                    ("proposal", "setup_family"),
+                    f"one of {[item.setup_family_id for item in self.registry.all()]}",
+                    supplied_setup_family,
+                    "setup_family_registry",
+                    recoverable=True,
+                ).encoded()
+            )
+            risk_flags = (*risk_flags, "unknown_setup_family")[:5]
         forecast = {
             "status": "available" if decision != "WAIT" else "non_actionable",
             "dominant_direction": direction,
@@ -378,17 +395,19 @@ class StructuredAIOutputValidator:
             "setup_family_candidates": [setup_family] if setup_family and decision != "WAIT" else [],
             "supporting_evidence_ids": [],
             "contradicting_evidence_ids": [],
-            "missing_evidence": [],
+            "missing_evidence": (
+                ["valid_setup_family"] if supplied_setup_family and setup_family is None else []
+            ),
             "evidence_completeness": state.evidence_completeness,
             "forecast_confidence": confidence,
-            "execution_confidence": confidence if decision != "WAIT" else 0.0,
-            "setup_readiness": "ready" if decision != "WAIT" else "not_ready",
+            "execution_confidence": confidence if decision != "WAIT" and setup_family else 0.0,
+            "setup_readiness": "ready" if decision != "WAIT" and setup_family else "not_ready",
             "uncertainty": 1.0 - confidence,
             "reasoning_summary": rationale,
             "monitoring_conditions": list(risk_flags),
         }
         proposal: dict[str, Any] | None = None
-        if decision != "WAIT" and isinstance(proposal_raw, dict):
+        if decision != "WAIT" and setup_family is not None and isinstance(proposal_raw, dict):
             entry_low = proposal_raw.get("entry_low")
             entry_high = proposal_raw.get("entry_high")
             targets = proposal_raw.get("take_profit_levels", ())
@@ -404,7 +423,11 @@ class StructuredAIOutputValidator:
                 "risk_notes": list(risk_flags),
                 "reason_codes": ["compact_llm_response"],
             }
-        return {"forecast": forecast, "proposal": proposal}
+        return (
+            {"forecast": forecast, "proposal": proposal},
+            tuple(dict.fromkeys(repaired)),
+            tuple(issues),
+        )
 
     def _simplified_wait(
         self,

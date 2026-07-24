@@ -301,6 +301,30 @@ class OptionalProposalFieldInvalidProvider(ValidProvider):
         )
 
 
+class UnknownCompactSetupFamilyProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version):
+        self.calls += 1
+        return AIProviderResponse(
+            raw_output={
+                "decision": "LONG",
+                "confidence": 0.78,
+                "rationale": "Constructive trend continuation.",
+                "risk_flags": [],
+                "proposal": {
+                    "setup_family": "invented_smart_money_setup",
+                    "entry_low": 3300,
+                    "entry_high": 3301,
+                    "stop_loss": 3295,
+                    "take_profit_levels": [3311, 3320],
+                },
+            },
+            provider="openrouter",
+            model_identifier=request.model_identifier,
+            latency_ms=3,
+            token_usage=None,
+        )
+
+
 def build_service(repository, provider, *, shadow=False, proposals=True, monitoring=False, maximum_retries=0):
     config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig).model_copy(update={"maximum_retries": maximum_retries})
     registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
@@ -554,6 +578,28 @@ async def test_invalid_optional_proposal_field_preserves_valid_forecast_as_degra
     assert result.validation_issues
     assert repository.forecasts
     assert not repository.failures and not repository.proposals
+
+
+@pytest.mark.asyncio
+async def test_unknown_compact_setup_family_persists_reasoning_without_failure_record() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+
+    result = await build_service(
+        repository,
+        UnknownCompactSetupFamilyProvider(),
+        maximum_retries=0,
+    ).process(state, quant)
+
+    assert result is not None
+    assert result.forecast.status == AIResultStatus.AVAILABLE
+    assert result.forecast.failure_state == "degraded_structured_output"
+    assert result.forecast.selected_setup_family is None
+    assert result.proposal is None
+    assert result.degraded_validation is True
+    assert repository.forecasts
+    assert not repository.failures
+    assert not repository.proposals
 
 
 @pytest.mark.asyncio

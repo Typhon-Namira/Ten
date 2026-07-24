@@ -83,6 +83,10 @@ def _provider(
         "maximum_request_cost_usd": config.maximum_request_cost_usd,
         "input_cost_per_million_usd": config.input_cost_per_million_usd,
         "output_cost_per_million_usd": config.output_cost_per_million_usd,
+        "setup_family_ids": tuple(
+            item.setup_family_id
+            for item in SetupFamilyRegistry.from_yaml(YamlConfigRepository()).all()
+        ),
     }
     values.update(overrides)
     return ExistingOpenRouterReasoningProvider(
@@ -276,6 +280,91 @@ async def test_compact_wait_response_and_output_limit() -> None:
     assert validated.proposal is None
     assert client.calls == 1
     assert config.max_tokens == 1_000
+
+
+@pytest.mark.asyncio
+async def test_response_contract_exposes_only_canonical_setup_family_ids() -> None:
+    _, _, config, _ = await _request()
+    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+
+    contract = _provider(CapturingClient(), config)._response_contract()
+
+    assert contract["allowed_setup_families"] == [
+        item.setup_family_id for item in registry.all()
+    ]
+    assert contract["proposal_when_actionable"]["setup_family"] == (
+        "exactly one allowed_setup_families value"
+    )
+    assert len(contract["allowed_setup_families"]) == 9
+
+
+def _actionable_compact_response(setup_family: str) -> dict[str, Any]:
+    return {
+        "decision": "LONG",
+        "confidence": 0.78,
+        "rationale": "Constructive trend continuation.",
+        "risk_flags": [],
+        "proposal": {
+            "setup_family": setup_family,
+            "entry_low": 3300,
+            "entry_high": 3301,
+            "stop_loss": 3295,
+            "take_profit_levels": [3311, 3320],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_known_setup_family_alias_is_repaired_without_weakening_registry_validation() -> None:
+    state, quant, _, request = await _request()
+    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+
+    validated = StructuredAIOutputValidator(registry).validate(
+        _actionable_compact_response("Trend Following"),
+        request=request,
+        state=state,
+        quant=quant,
+    )
+
+    assert validated.forecast.selected_setup_family == "trend_continuation"
+    assert validated.proposal is not None
+    assert "proposal.setup_family" in validated.repaired_fields
+    assert validated.degraded_validation is True
+
+
+@pytest.mark.asyncio
+async def test_unknown_setup_family_preserves_reasoning_but_suppresses_unsafe_proposal() -> None:
+    state, quant, _, request = await _request()
+    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+
+    validated = StructuredAIOutputValidator(registry).validate(
+        _actionable_compact_response("invented_smart_money_setup"),
+        request=request,
+        state=state,
+        quant=quant,
+    )
+
+    assert validated.forecast.dominant_direction.value == "BUY"
+    assert validated.forecast.reasoning_summary == "Constructive trend continuation."
+    assert validated.forecast.selected_setup_family is None
+    assert validated.forecast.setup_readiness.value == "not_ready"
+    assert validated.forecast.execution_confidence == 0
+    assert validated.proposal is None
+    assert validated.degraded_validation is True
+    first_issue = json.loads(validated.validation_issues[0])
+    assert first_issue["field_path"] == "proposal.setup_family"
+    assert first_issue["actual_value"] == "invented_smart_money_setup"
+    assert first_issue["validator_name"] == "setup_family_registry"
+    assert first_issue["recoverable"] is True
+
+
+def test_setup_family_registry_never_fuzzy_maps_unknown_values() -> None:
+    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+
+    assert registry.canonical_id("breakout") == ("breakout_retest", True)
+    assert registry.canonical_id("Trend-Continuation") == ("trend_continuation", True)
+    assert registry.canonical_id("breakout_reversal") == (None, False)
+    assert registry.canonical_id("best setup") == (None, False)
 
 
 @pytest.mark.asyncio
