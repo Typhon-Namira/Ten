@@ -41,6 +41,26 @@ logger = logging.getLogger(__name__)
 _PROVIDER_REACHABLE_FAILURE_STATES = frozenset({"structured_output_invalid"})
 
 
+def _first_validation_issue_fields(issues: tuple[str, ...]) -> dict[str, Any]:
+    fields = {
+        "field_path": None,
+        "expected_type": None,
+        "actual_value": None,
+        "validator_name": None,
+        "offending_json_fragment": None,
+        "recoverable": None,
+    }
+    if not issues:
+        return fields
+    try:
+        issue = json.loads(issues[0])
+    except (json.JSONDecodeError, TypeError):
+        return fields
+    if not isinstance(issue, dict):
+        return fields
+    return {key: issue.get(key) for key in fields}
+
+
 class AIReasoningService:
     def __init__(
         self,
@@ -229,6 +249,7 @@ class AIReasoningService:
                         "validation_issue_count": len(candidate.validation_issues),
                         "repaired_fields": candidate.repaired_fields,
                         "proposal_preserved": candidate.proposal is not None,
+                        **_first_validation_issue_fields(candidate.validation_issues),
                     },
                 )
                 self.last_validation_passed = not candidate.degraded_validation

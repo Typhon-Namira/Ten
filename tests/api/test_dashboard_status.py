@@ -56,6 +56,18 @@ def healthy_ai_health(**overrides):
 # --- ai_reasoning stage ------------------------------------------------------------------------
 
 
+def test_fully_validated_ai_reasoning_is_reported_available_not_degraded():
+    result = derive_ai_reasoning_stage(
+        forecast=forecast(status="available", validation_passed=True),
+        request=None,
+        ai_health=healthy_ai_health(),
+        now=NOW,
+        cycle_available_at=NOW,
+    )
+    assert result.status == "available"
+    assert result.reason == "same_cycle_ai_reasoning_persisted"
+
+
 def test_terminal_provider_failure_reports_failed_not_pending():
     """Item 11 / primary production bug: a forecast row exists with a terminal failure status —
     the stage must report "failed", never fall back to "pending"."""

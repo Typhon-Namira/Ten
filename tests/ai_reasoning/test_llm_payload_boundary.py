@@ -278,6 +278,9 @@ async def test_compact_wait_response_and_output_limit() -> None:
     assert validated.forecast.status.value == "non_actionable"
     assert validated.forecast.dominant_direction is not None
     assert validated.proposal is None
+    assert validated.degraded_validation is False
+    assert validated.repaired_fields == ()
+    assert validated.validation_issues == ()
     assert client.calls == 1
     assert config.max_tokens == 1_000
 
@@ -330,6 +333,25 @@ async def test_known_setup_family_alias_is_repaired_without_weakening_registry_v
     assert validated.proposal is not None
     assert "proposal.setup_family" in validated.repaired_fields
     assert validated.degraded_validation is True
+
+
+@pytest.mark.asyncio
+async def test_canonical_compact_response_is_valid_without_artificial_repair() -> None:
+    state, quant, _, request = await _request()
+    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+
+    validated = StructuredAIOutputValidator(registry).validate(
+        _actionable_compact_response("trend_continuation"),
+        request=request,
+        state=state,
+        quant=quant,
+    )
+
+    assert validated.forecast.selected_setup_family == "trend_continuation"
+    assert validated.proposal is not None
+    assert validated.repaired_fields == ()
+    assert validated.validation_issues == ()
+    assert validated.degraded_validation is False
 
 
 @pytest.mark.asyncio
