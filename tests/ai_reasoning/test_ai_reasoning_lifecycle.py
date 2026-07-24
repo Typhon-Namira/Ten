@@ -325,6 +325,20 @@ class UnknownCompactSetupFamilyProvider(ValidProvider):
         )
 
 
+class CanonicalCompactSetupFamilyProvider(UnknownCompactSetupFamilyProvider):
+    async def reason(self, request, *, prompt_version):
+        response = await super().reason(request, prompt_version=prompt_version)
+        proposal = dict(response.raw_output["proposal"])
+        proposal["setup_family"] = "trend_continuation"
+        return AIProviderResponse(
+            raw_output={**response.raw_output, "proposal": proposal},
+            provider=response.provider,
+            model_identifier=response.model_identifier,
+            latency_ms=response.latency_ms,
+            token_usage=response.token_usage,
+        )
+
+
 def build_service(repository, provider, *, shadow=False, proposals=True, monitoring=False, maximum_retries=0):
     config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig).model_copy(update={"maximum_retries": maximum_retries})
     registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
@@ -562,14 +576,17 @@ async def test_production_simplified_wait_shape_is_recovered_as_degraded_non_act
 
 
 @pytest.mark.asyncio
-async def test_invalid_optional_proposal_field_preserves_valid_forecast_as_degraded() -> None:
+async def test_invalid_optional_proposal_field_preserves_valid_forecast_as_degraded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     state, quant = await state_and_quant()
     repository = InMemoryAIReasoningRepository()
-    result = await build_service(
-        repository,
-        OptionalProposalFieldInvalidProvider(),
-        maximum_retries=0,
-    ).process(state, quant)
+    with caplog.at_level(logging.INFO, logger="backend.app.ai_reasoning.service"):
+        result = await build_service(
+            repository,
+            OptionalProposalFieldInvalidProvider(),
+            maximum_retries=0,
+        ).process(state, quant)
 
     assert result is not None and result.proposal is None
     assert result.forecast.status == AIResultStatus.AVAILABLE
@@ -578,6 +595,49 @@ async def test_invalid_optional_proposal_field_preserves_valid_forecast_as_degra
     assert result.validation_issues
     assert repository.forecasts
     assert not repository.failures and not repository.proposals
+    validation_log = next(
+        record
+        for record in caplog.records
+        if record.message == "structured_validation.completed"
+    )
+    assert validation_log.field_path == "proposal.risk_notes.0"
+    assert validation_log.expected_type
+    assert validation_log.actual_value
+    assert validation_log.validator_name
+    assert validation_log.offending_json_fragment
+    assert validation_log.recoverable is True
+
+
+@pytest.mark.asyncio
+async def test_expected_compact_response_persists_as_fully_validated_and_healthy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+
+    with caplog.at_level(logging.INFO, logger="backend.app.ai_reasoning.service"):
+        result = await build_service(
+            repository,
+            CanonicalCompactSetupFamilyProvider(),
+            maximum_retries=0,
+        ).process(state, quant)
+
+    assert result is not None
+    assert result.forecast.status == AIResultStatus.AVAILABLE
+    assert result.forecast.validation_passed is True
+    assert result.forecast.failure_state is None
+    assert result.proposal is not None
+    assert result.degraded_validation is False
+    assert repository.forecasts and repository.proposals
+    assert not repository.failures
+    validation_log = next(
+        record
+        for record in caplog.records
+        if record.message == "structured_validation.completed"
+    )
+    assert validation_log.validation_status == "valid"
+    assert validation_log.validation_issue_count == 0
+    assert validation_log.repaired_fields == ()
 
 
 @pytest.mark.asyncio

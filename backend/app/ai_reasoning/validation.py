@@ -128,7 +128,12 @@ class StructuredAIOutputValidator:
                     # A malformed proposal must not discard an otherwise useful forecast. The
                     # proposal is omitted and the persisted forecast is explicitly degraded.
                     errors.extend(
-                        self._pydantic_issue("proposal", item, raw["proposal"]).encoded()
+                        self._pydantic_issue(
+                            "proposal",
+                            item,
+                            raw["proposal"],
+                            recoverable=True,
+                        ).encoded()
                         for item in exc.errors()
                     )
 
@@ -231,7 +236,9 @@ class StructuredAIOutputValidator:
                 state=state,
                 quant=quant,
             )
-            repaired.extend(("compact_response", *compact_repairs))
+            # The compact response is the advertised provider wire contract. Expanding it into
+            # TEN's internal domain models is ordinary parsing, not a validation repair.
+            repaired.extend(compact_repairs)
             issues.extend(compact_issues)
         if isinstance(normalized.get("forecast"), str) and str(normalized["forecast"]).strip().upper() == "WAIT":
             normalized = self._simplified_wait(request=request, state=state, quant=quant)
@@ -576,6 +583,8 @@ class StructuredAIOutputValidator:
         prefix: str,
         error: Mapping[str, Any],
         raw: dict[str, Any],
+        *,
+        recoverable: bool = False,
     ) -> StructuredValidationIssue:
         path = tuple(error.get("loc", ()))
         actual: Any = raw
@@ -588,7 +597,13 @@ class StructuredAIOutputValidator:
                 actual = None
                 break
         expected = str(error.get("ctx", {}).get("expected") or error.get("msg") or error.get("type"))
-        return cls._issue((prefix, *path), expected, actual, str(error.get("type", "pydantic")))
+        return cls._issue(
+            (prefix, *path),
+            expected,
+            actual,
+            str(error.get("type", "pydantic")),
+            recoverable=recoverable,
+        )
 
     @staticmethod
     def _available_evidence_kinds(state: UnifiedMarketState) -> set[str]:
