@@ -70,6 +70,31 @@ class Settings(BaseSettings):
     ai_signal_monitoring: bool | None = None
     ai_signal_publication: bool | None = None
     ai_signal_adjustments: bool | None = None
+    # Cross-cutting retention worker (backend/app/core/database/retention.py) — deletes rows
+    # older than these windows from tables that have no engine-specific retention of their own.
+    # ai_scoring_engine/signal_decision_engine/replay_engine already have their own configured
+    # retention (see each engine's `configs/*.yaml` `retention:` section); this worker only
+    # invokes those existing `cleanup()` methods, it does not duplicate their windows.
+    retention_worker_enabled: bool = True
+    retention_interval_seconds: float = Field(default=3600, ge=60, le=86400)
+    retention_batch_size: int = Field(default=500, ge=1, le=10_000)
+    # smc_objects / liquidity_objects / volume_profile_objects / institutional_flow_evidence /
+    # market_regime_evidence — one row per analytical object per cycle it was re-evaluated in.
+    analytical_object_retention_days: int = Field(default=14, ge=1, le=3650)
+    # smc_analysis_snapshots / liquidity_snapshots / volume_profile_snapshots /
+    # institutional_flow_snapshots — one full-payload row per cycle. market_regime_snapshots is
+    # excluded: it already has its own working `prune_history`, called inline after every save.
+    analytical_snapshot_retention_days: int = Field(default=14, ge=1, le=3650)
+    # integration_events (cascades to integration_outbox/integration_processed_events),
+    # integration_event_trace, integration_data_quality_issues, integration_snapshots.
+    integration_audit_retention_days: int = Field(default=14, ge=1, le=3650)
+    # operational_signals — the actually-published trading signals; kept much longer than the
+    # surrounding audit trail since they're the real product output, not diagnostic exhaust.
+    operational_signal_retention_days: int = Field(default=180, ge=1, le=3650)
+    # provider_metrics / market_quality_history / market_gap_history / market_latency_history /
+    # market_synchronization_history / realtime_candles — high-frequency diagnostic exhaust, not
+    # the deterministic OHLCV series (historical_candles is never pruned).
+    market_data_history_retention_days: int = Field(default=7, ge=1, le=3650)
 
     @field_validator("database_url", mode="before")
     @classmethod

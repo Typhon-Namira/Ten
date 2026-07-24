@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, ChevronDown, Circle, Clock3, Info, XCircle } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronDown, Circle, Clock3, Info, Loader2, MinusCircle, ShieldOff, XCircle } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { PipelineStatus, Tone } from '../../lib/aiDashboard'
 
@@ -56,7 +56,13 @@ export function FreshnessIndicator({ stale, timestamp }: { stale: boolean; times
 export function PipelineIcon({ status }: { status: PipelineStatus }) {
   if (status === 'completed') return <CheckCircle2 aria-hidden="true" />
   if (status === 'rejected' || status === 'failed') return <XCircle aria-hidden="true" />
-  if (status === 'unavailable') return <Info aria-hidden="true" />
+  if (status === 'unavailable' || status === 'blocked') return <Info aria-hidden="true" />
+  if (status === 'running') return <Loader2 aria-hidden="true" className="spin" />
+  if (status === 'disabled') return <ShieldOff aria-hidden="true" />
+  // "wait"/"not_required"/"not_applicable" are all legitimate, resolved, non-actionable outcomes
+  // — deliberately a different mark from "waiting" (still in progress) so a viewer doesn't read a
+  // concluded WAIT scenario as a step that just hasn't happened yet.
+  if (status === 'wait' || status === 'not_required' || status === 'not_applicable') return <MinusCircle aria-hidden="true" />
   return <Circle aria-hidden="true" />
 }
 

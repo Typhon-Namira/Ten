@@ -2,6 +2,7 @@ import { Stethoscope } from 'lucide-react'
 import { useActiveSelection } from '../hooks/useActiveSelection'
 import { useDashboard } from '../hooks/useDashboard'
 import { normalizeEngineState } from '../lib/engineState'
+import { bootstrapEstimate, formatEtaMinutes } from '../lib/bootstrap'
 import { StateBadge } from '../components/StateBadge'
 
 const time = (value: string | null) => (value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'never')
@@ -16,6 +17,7 @@ export function DiagnosticsPage() {
   const operationalHealthy = diagnostics.operational_state.startsWith('HEALTHY')
   const marketWorker = diagnostics.workers.market_data_worker
   const integrationWorker = diagnostics.workers.integration_worker
+  const estimate = bootstrapEstimate(diagnostics.history.candle_count, diagnostics.history.required_candle_count, diagnostics.market.timeframe)
 
   return (
     <div className="page">
@@ -36,6 +38,13 @@ export function DiagnosticsPage() {
           <div className="intel-field"><span>Market freshness</span><b>{diagnostics.market.freshness}</b></div>
           <div className="intel-field"><span>History</span><b>{diagnostics.history.candle_count} / {diagnostics.history.required_candle_count}</b></div>
         </div>
+        {!diagnostics.history.initialized && (
+          <p className="intel__reason">
+            Still building initial history — this is expected during startup, not a failure. {estimate.remainingCandles} more {diagnostics.market.timeframe} candles needed
+            (about {formatEtaMinutes(estimate.etaMinutes)} at the current pace). Panels that depend on the full history window will show as unavailable until this completes;
+            panels with a smaller history requirement (most analytical engines) are unaffected.
+          </p>
+        )}
       </section>
       <section className="panel">
         <div className="panel__head"><div><p className="eyebrow">WORKERS</p><h2>Background worker health</h2></div></div>

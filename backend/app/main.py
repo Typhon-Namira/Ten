@@ -51,6 +51,7 @@ from backend.app.engines.replay_engine import (
     production_replay_registry,
 )
 from backend.app.core.database import SCHEMA_HEAD_REVISION, prepare_database_schema
+from backend.app.core.database.retention import RetentionRepository, RetentionWorker
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.app.services import InMemorySignalRepository, PipelineManager, build_engine_registry
 from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, IntegrationWorker, SqlAlchemyIntegrationRepository
@@ -313,7 +314,15 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             repository_mode=decision_mode,
         )
         await app.state.signal_decision_service.start()
-        app.state.llm_client = HttpOpenRouterClient(settings.openrouter_api_key, settings.openrouter_base_url)
+        ai_reasoning_config = configs.load_model("ai_reasoning", AIReasoningConfig)
+        app.state.llm_client = HttpOpenRouterClient(
+            settings.openrouter_api_key,
+            settings.openrouter_base_url,
+            timeout_seconds=max(
+                1.0,
+                ai_reasoning_config.request_timeout_seconds - 5.0,
+            ),
+        )
         app.state.explainability_service = ExplainabilityService(
             app.state.llm_client,
             PromptLoader(Path(__file__).resolve().parent / "explainability" / "prompts"),
@@ -358,7 +367,6 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             quant_config,
             enabled=ai_centric_shadow_mode,
         )
-        ai_reasoning_config = configs.load_model("ai_reasoning", AIReasoningConfig)
         setup_family_registry = SetupFamilyRegistry.from_yaml(configs)
         ai_repository: AIReasoningRepository = InMemoryAIReasoningRepository()
         if app.state.database_session_factory is not None:
@@ -495,6 +503,26 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             app.state.storage_maintenance_worker.start()
         if settings.integration_worker_enabled and integration_config.enabled and integration_config.live_pipeline_enabled:
             app.state.integration_worker.start()
+        app.state.retention_worker = RetentionWorker(
+            RetentionRepository(app.state.database_session_factory),
+            enabled=(
+                settings.retention_worker_enabled
+                and app.state.database_session_factory is not None
+            ),
+            interval_seconds=settings.retention_interval_seconds,
+            batch_size=settings.retention_batch_size,
+            analytical_object_retention_days=settings.analytical_object_retention_days,
+            analytical_snapshot_retention_days=settings.analytical_snapshot_retention_days,
+            integration_audit_retention_days=settings.integration_audit_retention_days,
+            operational_signal_retention_days=settings.operational_signal_retention_days,
+            market_data_history_retention_days=settings.market_data_history_retention_days,
+            cleanable_services=(
+                app.state.ai_scoring_service,
+                app.state.signal_decision_service,
+                app.state.replay_service,
+            ),
+        )
+        app.state.retention_worker.start()
         enabled_workers = [
             name
             for name, enabled in (
@@ -506,6 +534,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                     and integration_config.live_pipeline_enabled,
                 ),
                 ("replay", replay_config.worker.enabled and replay_config.worker.embedded_api_worker),
+                ("storage_maintenance", app.state.storage_maintenance_worker is not None),
+                ("retention", app.state.retention_worker.enabled),
             )
             if enabled
         ]
@@ -549,6 +579,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 await app.state.storage_maintenance_worker.stop()
             await app.state.market_data_worker.stop()
             await app.state.integration_worker.stop()
+            await app.state.retention_worker.stop()
             await app.state.integration_service.stop()
             await app.state.replay_worker.stop()
             await app.state.replay_service.stop()

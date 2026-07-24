@@ -50,6 +50,7 @@ class AIReasoningRepository(Protocol):
     async def save_proposal(self, value: AISignalProposal) -> AISignalProposal: ...
     async def latest_forecast(self, instrument: str) -> AIMarketForecast | None: ...
     async def latest_proposal(self) -> AISignalProposal | None: ...
+    async def request_for_state(self, market_state_id: object) -> AIReasoningRequest | None: ...
     async def forecast_for_state(self, market_state_id: object) -> AIMarketForecast | None: ...
     async def proposal_for_state(self, market_state_id: object) -> AISignalProposal | None: ...
     async def signal_by_opportunity(self, opportunity_key: str) -> ManagedSignal | None: ...
@@ -116,6 +117,11 @@ class InMemoryAIReasoningRepository:
         async with self._lock:
             values = list(self.proposals.values())
         return max(values, key=lambda item: (item.created_at, str(item.proposal_id)), default=None)
+
+    async def request_for_state(self, market_state_id: object) -> AIReasoningRequest | None:
+        async with self._lock:
+            values = [item for item in self.requests.values() if item.market_state_id == market_state_id]
+        return max(values, key=lambda item: (item.created_at, str(item.request_id)), default=None)
 
     async def forecast_for_state(self, market_state_id: object) -> AIMarketForecast | None:
         async with self._lock:
@@ -326,6 +332,17 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
     async def latest_proposal(self) -> AISignalProposal | None:
         record = (await self.session.scalars(select(AISignalProposalRecord).order_by(AISignalProposalRecord.created_at.desc()).limit(1))).first()
         return AISignalProposal.model_validate(record.payload) if record else None
+
+    @scoped_session
+    async def request_for_state(self, market_state_id: object) -> AIReasoningRequest | None:
+        query = (
+            select(AIReasoningRequestRecord)
+            .where(AIReasoningRequestRecord.market_state_id == market_state_id)
+            .order_by(AIReasoningRequestRecord.created_at.desc())
+            .limit(1)
+        )
+        record = (await self.session.scalars(query)).first()
+        return AIReasoningRequest.model_validate(record.payload) if record else None
 
     @scoped_session
     async def forecast_for_state(self, market_state_id: object) -> AIMarketForecast | None:

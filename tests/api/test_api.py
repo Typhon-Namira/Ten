@@ -264,6 +264,82 @@ def test_dashboard_aggregate_queries_every_stage_at_one_market_state_boundary() 
     assert body["stages"]["ai_reasoning"]["data"]["market_state_id"] == str(state_id)
 
 
+def test_dashboard_reports_terminal_ai_failure_not_pending_end_to_end() -> None:
+    """Item 13 / root-cause regression test, at the real HTTP boundary: a persisted forecast row
+    with a terminal failure status must never surface as "pending"/"not yet persisted" -- this is
+    the exact production symptom the fix in dashboard_status.py exists for. Every status here is
+    read straight off the JSON response the backend actually returned; nothing is inferred."""
+    boundary = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    state_id, cycle_id, forecast_id = uuid4(), uuid4(), uuid4()
+    state = SimpleNamespace(
+        state_id=state_id, cycle_id=cycle_id, status=SimpleNamespace(value="available"),
+        market_data_boundary=boundary, knowledge_cutoff=boundary, evidence=(),
+        model_dump=lambda **_: {"state_id": str(state_id), "cycle_id": str(cycle_id), "status": "available", "market_data_boundary": boundary.isoformat(), "knowledge_cutoff": boundary.isoformat(), "evidence": []},
+    )
+    forecast = SimpleNamespace(
+        forecast_id=forecast_id, market_state_id=state_id, status="unavailable", generated_at=boundary,
+        failure_state="openrouter_authentication_failed", missing_evidence=(), provider_http_status=401, validation_passed=False,
+        model_dump=lambda **_: {"forecast_id": str(forecast_id), "market_state_id": str(state_id), "status": "unavailable", "failure_state": "openrouter_authentication_failed"},
+    )
+    with TestClient(create_app()) as client:
+        client.app.state.unified_market_state_repository.latest_state = AsyncMock(return_value=state)
+        client.app.state.quant_forecast_repository.result_for_state = AsyncMock(return_value=None)
+        client.app.state.ai_reasoning_repository.forecast_for_state = AsyncMock(return_value=forecast)
+        client.app.state.ai_reasoning_repository.proposal_for_state = AsyncMock(return_value=None)
+        client.app.state.final_decision_repository.action_for_state = AsyncMock(return_value=None)
+        response = client.get("/api/v1/dashboard/latest")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stages"]["ai_reasoning"]["status"] == "failed"
+    assert body["stages"]["ai_reasoning"]["reason"] == "openrouter_returned_http_401"
+    assert body["stages"]["ai_reasoning"]["error_code"] == "openrouter_authentication_failed"
+    assert body["stages"]["ai_reasoning"]["retryable"] is True
+    # final_action must be "blocked", not stuck in "awaiting_ai_proposal" -- the upstream failure
+    # already resolved, so there is nothing left to await.
+    assert body["stages"]["final_action"]["status"] == "blocked"
+    assert "awaiting" not in body["stages"]["final_action"]["reason"]
+    assert body["status"] == "failed"
+
+
+def test_dashboard_reports_wait_outcome_when_forecast_valid_with_no_proposal_end_to_end() -> None:
+    """Required behavior: "valid forecast + no proposal -> final action = WAIT, guardrails =
+    not_required" -- proven at the real HTTP boundary, not just against the pure function."""
+    boundary = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    state_id, cycle_id, forecast_id = uuid4(), uuid4(), uuid4()
+    state = SimpleNamespace(
+        state_id=state_id, cycle_id=cycle_id, status=SimpleNamespace(value="available"),
+        market_data_boundary=boundary, knowledge_cutoff=boundary, evidence=(),
+        model_dump=lambda **_: {"state_id": str(state_id), "cycle_id": str(cycle_id), "status": "available", "market_data_boundary": boundary.isoformat(), "knowledge_cutoff": boundary.isoformat(), "evidence": []},
+    )
+    forecast = SimpleNamespace(
+        forecast_id=forecast_id, market_state_id=state_id, status="available", generated_at=boundary,
+        failure_state=None, missing_evidence=(), provider_http_status=None, validation_passed=True,
+        model_dump=lambda **_: {"forecast_id": str(forecast_id), "market_state_id": str(state_id), "status": "available"},
+    )
+    with TestClient(create_app()) as client:
+        client.app.state.unified_market_state_repository.latest_state = AsyncMock(return_value=state)
+        client.app.state.quant_forecast_repository.result_for_state = AsyncMock(return_value=None)
+        client.app.state.ai_reasoning_repository.forecast_for_state = AsyncMock(return_value=forecast)
+        client.app.state.ai_reasoning_repository.proposal_for_state = AsyncMock(return_value=None)
+        client.app.state.final_decision_repository.action_for_state = AsyncMock(return_value=None)
+        response = client.get("/api/v1/dashboard/latest")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stages"]["ai_reasoning"]["status"] == "available"
+    assert body["stages"]["guardrails"]["status"] == "not_required"
+    assert body["stages"]["final_action"]["status"] == "wait"
+    assert body["stages"]["final_action"]["direction"] == "WAIT"
+    # `TEN_AI_SIGNAL_MONITORING` is unset in this test app's default config, so monitoring itself
+    # is disabled -- that takes precedence over "not_required" (see
+    # test_monitoring_not_required_for_wait_final_action in test_dashboard_status.py for the
+    # dedicated, monitoring-enabled unit-level proof of the WAIT -> not_required branch).
+    assert body["stages"]["monitoring"]["status"] == "not_available"
+    assert body["stages"]["monitoring"]["reason"] == "ai_signal_monitoring_disabled"
+    assert body["stages"]["outcome"]["status"] == "not_applicable"
+
+
 def test_diagnostics_reports_a_dead_worker_as_degraded_not_healthy() -> None:
     """Regression test for the "market data healthy but SMC-onward chain silent for hours"
     investigation: `operational_state` used to only check `worker["enabled"]` (static config), so

@@ -10,6 +10,7 @@ import {
   latestFinalAction,
   pipelineSteps,
 } from '../../lib/aiDashboard'
+import type { Tone } from '../../lib/aiDashboard'
 import { FreshnessIndicator, PipelineIcon, StatusBadge } from './Primitives'
 
 function formatPrice(value: number | null | undefined): string {
@@ -38,7 +39,22 @@ export function DashboardHeader({
   onRefresh: () => Promise<void>
 }) {
   const profile = reasoning?.runtime.operating_profile ?? 'safe_test'
-  const aiOnline = reasoning?.health.provider_available
+  // `provider_available` is false for any failure category where no usable response was ever
+  // received (auth/rate-limit/timeout/unknown) and true only on success or a response that was
+  // received but rejected by our own schema validation (`structured_output_invalid`) -- see
+  // `_PROVIDER_REACHABLE_FAILURE_STATES` in ai_reasoning/service.py. That split is what separates
+  // "offline" (provider/transport-level failure) from "degraded" (provider responded, our
+  // validation caught a problem) below, instead of collapsing every failure into one bucket.
+  const health = reasoning?.health
+  const aiState: 'online' | 'degraded' | 'offline' | 'not_called' = !health
+    ? 'not_called'
+    : !health.provider_available
+      ? 'offline'
+      : health.failed_requests > 0 || health.failure_state != null
+        ? 'degraded'
+        : 'online'
+  const aiTone: Tone = aiState === 'online' ? 'positive' : aiState === 'degraded' ? 'warning' : aiState === 'offline' ? 'negative' : 'neutral'
+  const aiLabel: string = aiState === 'not_called' ? 'AI not called' : aiState === 'degraded' ? `AI degraded — ${humanize(health?.failure_state ?? 'failing')}` : `AI ${aiState}`
   const healthy = reasoning?.health.guardrails.status === 'healthy' && !stale
   return <header className="ai-statusbar">
     <div className="ai-statusbar__identity">
@@ -47,9 +63,7 @@ export function DashboardHeader({
     </div>
     <div className="ai-statusbar__badges" aria-label="System status">
       <StatusBadge tone="neutral">{humanize(profile)}</StatusBadge>
-      <StatusBadge tone={aiOnline === true ? 'positive' : aiOnline === false ? 'negative' : 'neutral'} pulse={aiOnline === true}>
-        AI {aiOnline === true ? 'online' : aiOnline === false ? 'offline' : 'not called'}
-      </StatusBadge>
+      <StatusBadge tone={aiTone} pulse={aiState === 'online'}>{aiLabel}</StatusBadge>
       <FreshnessIndicator stale={stale} timestamp={intelligence?.latest_candle_timestamp ?? null} />
       <StatusBadge tone={healthy ? 'positive' : 'warning'}><ShieldCheck size={12} />System {healthy ? 'healthy' : 'limited'}</StatusBadge>
       <span className="ai-updated">Updated {lastUpdated ? lastUpdated.toLocaleTimeString() : '—'}</span>

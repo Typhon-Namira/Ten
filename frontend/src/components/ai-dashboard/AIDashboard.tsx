@@ -2,6 +2,7 @@ import { BarChart3, CheckCircle2, Scale } from 'lucide-react'
 import { useActiveSelection } from '../../hooks/useActiveSelection'
 import { useAIDashboardData } from '../../hooks/useAIDashboardData'
 import { humanize } from '../../lib/aiDashboard'
+import { ErrorBoundary } from '../ErrorBoundary'
 import { ActiveSignalMonitor, GuardrailSummary, OperationalHealth, ValidationSummary } from './DecisionCards'
 import { DashboardHeader, DecisionPipeline, FinalDecisionHero } from './DecisionOverview'
 import { AIReasoningSummary, MarketStateSummary, QuantForecastSummary } from './IntelligenceCards'
@@ -69,37 +70,40 @@ export function AIDashboard({ view = 'overview' }: { view?: DashboardView }) {
     {errorMessage && <ErrorState message={`${errorMessage}. Last known backend-authoritative values remain visible.`} />}
     {data.loading && !data.reasoning && !data.intelligence ? <LoadingSkeleton rows={6} /> : <>
       {view === 'overview' && <>
-        <FinalDecisionHero intelligence={data.intelligence} reasoning={data.reasoning} unavailableReason={data.aggregate?.stages.final_action.reason} publicationReason={data.aggregate?.stages.publication.reason} />
-        <DecisionPipeline intelligence={data.intelligence} quant={data.quant} reasoning={data.reasoning} stages={data.aggregate?.stages} />
+        <ErrorBoundary label="Final decision"><FinalDecisionHero intelligence={data.intelligence} reasoning={data.reasoning} unavailableReason={data.aggregate?.stages.final_action.reason} publicationReason={data.aggregate?.stages.publication.reason} /></ErrorBoundary>
+        <ErrorBoundary label="Decision pipeline"><DecisionPipeline intelligence={data.intelligence} quant={data.quant} reasoning={data.reasoning} stages={data.aggregate?.stages} /></ErrorBoundary>
         <div className="ai-card-grid">
-          <MarketStateSummary data={data.intelligence} />
-          <QuantForecastSummary forecast={data.quant} calibration={data.calibration} unavailableReason={data.aggregate?.stages.quant_forecast.reason} />
-          <AIReasoningSummary data={data.reasoning} unavailableReason={data.aggregate?.stages.ai_reasoning.reason} />
-          <GuardrailSummary data={data.reasoning} unavailableReason={data.aggregate?.stages.guardrails.reason} />
+          <ErrorBoundary label="Market state"><MarketStateSummary data={data.intelligence} /></ErrorBoundary>
+          <ErrorBoundary label="Quant forecast"><QuantForecastSummary forecast={data.quant} calibration={data.calibration} unavailableReason={data.aggregate?.stages.quant_forecast.reason} /></ErrorBoundary>
+          <ErrorBoundary label="AI reasoning"><AIReasoningSummary data={data.reasoning} unavailableReason={data.aggregate?.stages.ai_reasoning.reason} /></ErrorBoundary>
+          <ErrorBoundary label="Guardrails"><GuardrailSummary data={data.reasoning} unavailableReason={data.aggregate?.stages.guardrails.reason} /></ErrorBoundary>
         </div>
-        <ActiveSignalMonitor data={data.reasoning} market={data.intelligence} unavailableReason={data.aggregate?.stages.monitoring.reason} />
-        <ValidationSummary data={data.reasoning} unavailableReason={data.aggregate?.readiness.reason} />
-        <OperationalHealth data={data.reasoning} stale={data.stale} />
-        <SystemStatusPanel data={data.systemStatus} />
+        <ErrorBoundary label="Active signal monitor"><ActiveSignalMonitor data={data.reasoning} market={data.intelligence} unavailableReason={data.aggregate?.stages.monitoring.reason} /></ErrorBoundary>
+        <ErrorBoundary label="Validation summary"><ValidationSummary data={data.reasoning} unavailableReason={data.aggregate?.readiness.reason} /></ErrorBoundary>
+        <ErrorBoundary label="Operational health"><OperationalHealth data={data.reasoning} stale={data.stale} /></ErrorBoundary>
+        <ErrorBoundary label="System status"><SystemStatusPanel data={data.systemStatus} /></ErrorBoundary>
       </>}
       {view === 'signals' && <>
-        <FinalDecisionHero intelligence={data.intelligence} reasoning={data.reasoning} unavailableReason={data.aggregate?.stages.final_action.reason} publicationReason={data.aggregate?.stages.publication.reason} />
-        <ActiveSignalMonitor data={data.reasoning} market={data.intelligence} unavailableReason={data.aggregate?.stages.monitoring.reason} />
-        <div className="ai-card-grid"><GuardrailSummary data={data.reasoning} unavailableReason={data.aggregate?.stages.guardrails.reason} /><AIReasoningSummary data={data.reasoning} unavailableReason={data.aggregate?.stages.ai_reasoning.reason} /></div>
+        <ErrorBoundary label="Final decision"><FinalDecisionHero intelligence={data.intelligence} reasoning={data.reasoning} unavailableReason={data.aggregate?.stages.final_action.reason} publicationReason={data.aggregate?.stages.publication.reason} /></ErrorBoundary>
+        <ErrorBoundary label="Active signal monitor"><ActiveSignalMonitor data={data.reasoning} market={data.intelligence} unavailableReason={data.aggregate?.stages.monitoring.reason} /></ErrorBoundary>
+        <div className="ai-card-grid">
+          <ErrorBoundary label="Guardrails"><GuardrailSummary data={data.reasoning} unavailableReason={data.aggregate?.stages.guardrails.reason} /></ErrorBoundary>
+          <ErrorBoundary label="AI reasoning"><AIReasoningSummary data={data.reasoning} unavailableReason={data.aggregate?.stages.ai_reasoning.reason} /></ErrorBoundary>
+        </div>
       </>}
       {view === 'performance' && <>
-        <ValidationSummary data={data.reasoning} unavailableReason={data.aggregate?.readiness.reason} />
-        <CalibrationPanel data={data} />
+        <ErrorBoundary label="Validation summary"><ValidationSummary data={data.reasoning} unavailableReason={data.aggregate?.readiness.reason} /></ErrorBoundary>
+        <ErrorBoundary label="Calibration"><CalibrationPanel data={data} /></ErrorBoundary>
       </>}
       {view === 'calibration' && <>
-        <CalibrationPanel data={data} />
-        <QuantForecastSummary forecast={data.quant} calibration={data.calibration} unavailableReason={data.aggregate?.stages.quant_forecast.reason} />
+        <ErrorBoundary label="Calibration"><CalibrationPanel data={data} /></ErrorBoundary>
+        <ErrorBoundary label="Quant forecast"><QuantForecastSummary forecast={data.quant} calibration={data.calibration} unavailableReason={data.aggregate?.stages.quant_forecast.reason} /></ErrorBoundary>
       </>}
       {view === 'system' && <>
-        <SystemStatusPanel data={data.systemStatus} />
-        <ReadinessDetail data={data} />
-        <OperationalHealth data={data.reasoning} stale={data.stale} />
-        <DecisionPipeline intelligence={data.intelligence} quant={data.quant} reasoning={data.reasoning} stages={data.aggregate?.stages} />
+        <ErrorBoundary label="System status"><SystemStatusPanel data={data.systemStatus} /></ErrorBoundary>
+        <ErrorBoundary label="Readiness detail"><ReadinessDetail data={data} /></ErrorBoundary>
+        <ErrorBoundary label="Operational health"><OperationalHealth data={data.reasoning} stale={data.stale} /></ErrorBoundary>
+        <ErrorBoundary label="Decision pipeline"><DecisionPipeline intelligence={data.intelligence} quant={data.quant} reasoning={data.reasoning} stages={data.aggregate?.stages} /></ErrorBoundary>
       </>}
     </>}
   </div>

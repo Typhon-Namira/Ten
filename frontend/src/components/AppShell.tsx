@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { Activity, Gauge, Settings2, ShieldCheck, Signal } from 'lucide-react'
 import { navigate } from '../router/navigation'
+import { DiagnosticsBar } from './DiagnosticsBar'
 
 const NAVIGATION = [
   { path: '/', label: 'Overview', icon: Activity },
@@ -28,6 +29,7 @@ export function AppShell({ currentPath, children }: { currentPath: string; child
       <span className="top-nav__scope">Analysis only</span>
     </nav>
     <main>{children}</main>
+    <DiagnosticsBar />
     <footer className="app-footer">Analysis and decision support only. No Broker Execution. Outcomes and probabilities are not guarantees.</footer>
   </div>
 }

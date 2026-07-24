@@ -220,6 +220,12 @@ class TypedUnavailableProvider(ValidProvider):
         )
 
 
+class TimeoutProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version):
+        self.calls += 1
+        raise TimeoutError("simulated asyncio.wait_for timeout")
+
+
 class InvalidProvider(ValidProvider):
     async def reason(self, request, *, prompt_version):
         self.calls += 1
@@ -228,6 +234,21 @@ class InvalidProvider(ValidProvider):
             provider="openrouter",
             model_identifier=request.model_identifier,
             latency_ms=2,
+            token_usage=None,
+        )
+
+
+class NoProposalProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version):
+        response = await super().reason(request, prompt_version=prompt_version)
+        return AIProviderResponse(
+            raw_output={
+                "forecast": response.raw_output["forecast"],
+                "proposal": None,
+            },
+            provider=response.provider,
+            model_identifier=response.model_identifier,
+            latency_ms=response.latency_ms,
             token_usage=None,
         )
 
@@ -394,6 +415,43 @@ async def test_llm_unavailability_is_explicit_and_never_fabricates_a_proposal() 
 
 
 @pytest.mark.asyncio
+async def test_provider_timeout_is_reported_distinctly_not_as_generic_llm_unavailable() -> None:
+    state, quant = await state_and_quant()
+    repository, provider = InMemoryAIReasoningRepository(), TimeoutProvider()
+    service = build_service(repository, provider, maximum_retries=0)
+    result = await service.process(state, quant)
+
+    assert result is not None and result.proposal is None
+    assert result.forecast.status == AIResultStatus.UNAVAILABLE
+    assert result.forecast.failure_state == "ai_reasoning_request_timeout"
+    failure = next(iter(repository.failures.values()))
+    assert failure.provider_failure is not None
+    assert failure.provider_failure["phase"] == "provider_request_timeout"
+    assert service.health()["provider_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_health_reports_provider_availability_from_transport_outcome() -> None:
+    state, quant = await state_and_quant()
+
+    unavailable = build_service(
+        InMemoryAIReasoningRepository(),
+        TypedUnavailableProvider(),
+        maximum_retries=0,
+    )
+    await unavailable.process(state, quant)
+    assert unavailable.health()["provider_available"] is False
+
+    healthy = build_service(
+        InMemoryAIReasoningRepository(),
+        ValidProvider(),
+        maximum_retries=0,
+    )
+    await healthy.process(state, quant)
+    assert healthy.health()["provider_available"] is True
+
+
+@pytest.mark.asyncio
 async def test_shadow_reasoning_runs_without_proposal_or_monitoring_flags_and_persists_typed_failure() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), TypedUnavailableProvider()
@@ -496,6 +554,25 @@ async def test_invalid_optional_proposal_field_preserves_valid_forecast_as_degra
     assert result.validation_issues
     assert repository.forecasts
     assert not repository.failures and not repository.proposals
+
+
+@pytest.mark.asyncio
+async def test_valid_forecast_without_proposal_is_persisted_independently() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    result = await build_service(
+        repository,
+        NoProposalProvider(),
+        maximum_retries=0,
+    ).process(state, quant)
+
+    assert result is not None
+    assert result.proposal is None
+    assert result.forecast.status == AIResultStatus.AVAILABLE
+    assert result.forecast.validation_passed is True
+    assert repository.forecasts
+    assert not repository.proposals and not repository.signals
+    assert not repository.failures
 
 
 @pytest.mark.asyncio

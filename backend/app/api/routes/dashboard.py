@@ -17,6 +17,16 @@ from uuid import uuid4
 from fastapi import APIRouter, Request
 from sqlalchemy import text
 
+from backend.app.api.dashboard_status import (
+    StageResult,
+    derive_ai_proposal_stage,
+    derive_ai_reasoning_stage,
+    derive_final_action_stage,
+    derive_guardrails_stage,
+    derive_monitoring_stage,
+    derive_outcome_stage,
+    derive_publication_stage,
+)
 from backend.app.core.feature_flags import FeatureFlag
 from backend.app.engines.market_data_engine.models import canonical_symbol
 
@@ -384,6 +394,7 @@ def _stage(
     timestamp: datetime | None = None,
     error_code: str | None = None,
     retryable: bool = False,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -393,7 +404,27 @@ def _stage(
         "error_code": error_code,
         "retryable": retryable,
         "data": data.model_dump(mode="json") if hasattr(data, "model_dump") else data,
+        **(extra or {}),
     }
+
+
+def _stage_from_result(
+    result: StageResult,
+    *,
+    data: Any = None,
+    record_id: object | None = None,
+    timestamp: datetime | None = None,
+) -> dict[str, Any]:
+    return _stage(
+        status=result.status,
+        reason=result.reason,
+        data=data,
+        record_id=record_id,
+        timestamp=timestamp,
+        error_code=result.error_code,
+        retryable=result.retryable,
+        extra=result.extra,
+    )
 
 
 def _record_status(value: Any, *, available_reason: str) -> tuple[str, str]:
@@ -525,6 +556,9 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
 
     quant = await request.app.state.quant_forecast_repository.result_for_state(state.state_id)
     forecast = await request.app.state.ai_reasoning_repository.forecast_for_state(state.state_id)
+    ai_request = await request.app.state.ai_reasoning_repository.request_for_state(
+        state.state_id
+    )
     proposal = await request.app.state.ai_reasoning_repository.proposal_for_state(state.state_id)
     action = await request.app.state.final_decision_repository.action_for_state(state.state_id)
     active_signals = await request.app.state.ai_reasoning_repository.active_signals(symbol)
@@ -554,38 +588,52 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         if quant is not None
         else ("pending", "quant_forecast_not_yet_persisted_for_cycle")
     )
-    forecast_status, forecast_reason = (
-        _record_status(forecast, available_reason="same_cycle_ai_reasoning_persisted")
-        if forecast is not None
-        else ("pending", "ai_reasoning_not_yet_persisted_for_cycle")
+    ai_reasoning_result = derive_ai_reasoning_stage(
+        forecast=forecast,
+        request=ai_request,
+        ai_health=ai_health,
+        now=now,
+        cycle_available_at=state.knowledge_cutoff,
     )
-    proposal_reason = (
-        "same_cycle_ai_proposal_persisted"
-        if proposal is not None
-        else "ai_signal_proposals_disabled"
-        if not proposals_enabled
-        else "ai_reasoning_produced_no_proposal"
+    ai_proposal_result = derive_ai_proposal_stage(
+        forecast=forecast,
+        proposal=proposal,
+        proposals_enabled=proposals_enabled,
     )
-    action_reason = (
-        "same_cycle_guardrail_result_persisted"
-        if action is not None
-        else "awaiting_ai_proposal"
-        if proposal is None
-        else "guardrail_result_not_yet_persisted"
+    guardrails_result = derive_guardrails_stage(
+        forecast=forecast,
+        proposal=proposal,
+        action=action,
     )
-    publication_reason = (
-        "analytical_signal_persisted"
-        if publication is not None
-        else "ai_signal_publication_disabled"
-        if not publication_enabled
-        else "final_action_not_publication_eligible"
+    final_action_result = derive_final_action_stage(
+        forecast=forecast,
+        proposal=proposal,
+        action=action,
     )
-    monitoring_reason = (
-        "managed_signal_active"
-        if signal is not None
-        else "ai_signal_monitoring_disabled"
-        if not monitoring_enabled
-        else "no_managed_signal_for_latest_cycle"
+    publication_config_source = (
+        "environment variable TEN_AI_SIGNAL_PUBLICATION"
+        if request.app.state.settings.ai_signal_publication is not None
+        else "configs/feature_flags.yaml (ai_signal_publication)"
+    )
+    publication_result = derive_publication_stage(
+        publication=publication,
+        publication_enabled=publication_enabled,
+        publication_config_source=publication_config_source,
+    )
+    monitoring_result = derive_monitoring_stage(
+        signal=signal,
+        final_action_status=final_action_result.status,
+        action=action,
+        publication=publication,
+        publication_enabled=publication_enabled,
+        monitoring_enabled=monitoring_enabled,
+    )
+    outcome_result = derive_outcome_stage(
+        outcome=outcome,
+        final_action_status=final_action_result.status,
+        action=action,
+        publication=publication,
+        publication_enabled=publication_enabled,
     )
 
     stages = {
@@ -611,56 +659,44 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             timestamp=getattr(quant, "generated_at", None),
             retryable=quant_status == "failed",
         ),
-        "ai_reasoning": _stage(
-            status=forecast_status,
-            reason=forecast_reason,
+        "ai_reasoning": _stage_from_result(
+            ai_reasoning_result,
             data=forecast,
             record_id=getattr(forecast, "forecast_id", None),
             timestamp=getattr(forecast, "generated_at", None),
-            error_code=(
-                getattr(forecast, "provider_error_code", None)
-                or getattr(forecast, "failure_state", None)
-            ),
-            retryable=forecast_status == "failed",
         ),
-        "ai_proposal": _stage(
-            status="available" if proposal is not None else "not_available",
-            reason=proposal_reason,
+        "ai_proposal": _stage_from_result(
+            ai_proposal_result,
             data=proposal,
             record_id=getattr(proposal, "proposal_id", None),
             timestamp=getattr(proposal, "created_at", None),
         ),
-        "guardrails": _stage(
-            status="available" if action is not None else "not_evaluated",
-            reason=action_reason,
+        "guardrails": _stage_from_result(
+            guardrails_result,
             data=list(getattr(action, "gate_evaluations", ()) or ()),
             record_id=getattr(action, "final_action_id", None),
             timestamp=getattr(action, "created_at", None),
         ),
-        "final_action": _stage(
-            status="available" if action is not None else "not_available",
-            reason=action_reason,
+        "final_action": _stage_from_result(
+            final_action_result,
             data=action,
             record_id=getattr(action, "final_action_id", None),
             timestamp=getattr(action, "created_at", None),
         ),
-        "publication": _stage(
-            status="available" if publication is not None else "not_available",
-            reason=publication_reason,
+        "publication": _stage_from_result(
+            publication_result,
             data=publication,
             record_id=getattr(publication, "publication_id", None),
             timestamp=getattr(publication, "published_at", None),
         ),
-        "monitoring": _stage(
-            status="available" if signal is not None else "not_available",
-            reason=monitoring_reason,
+        "monitoring": _stage_from_result(
+            monitoring_result,
             data=signal,
             record_id=getattr(signal, "signal_id", None),
             timestamp=getattr(signal, "updated_at", None),
         ),
-        "outcome": _stage(
-            status="available" if outcome is not None else "not_evaluated",
-            reason="signal_outcome_persisted" if outcome is not None else "evaluation_horizon_not_complete",
+        "outcome": _stage_from_result(
+            outcome_result,
             data=outcome,
             record_id=getattr(outcome, "outcome_id", None),
             timestamp=getattr(outcome, "evaluated_at", None),
@@ -671,7 +707,19 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         "failed"
         if "failed" in substantive
         else "partial"
-        if any(value in {"pending", "not_available", "not_evaluated"} for value in substantive)
+        if any(
+            value
+            in {
+                "pending",
+                "not_available",
+                "not_evaluated",
+                "blocked",
+                "disabled",
+                "running",
+                "degraded",
+            }
+            for value in substantive
+        )
         else "complete"
     )
     response = {

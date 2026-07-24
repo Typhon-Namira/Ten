@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { tenApi } from '../services/api'
+import { describeApiError, toApiError } from '../lib/apiError'
+import { recordFetchOutcome } from '../lib/diagnosticsFeed'
 import type { AIReasoningDashboard, DashboardAggregate, DashboardSystemStatus, MarketIntelligence, QuantCalibrationReport, QuantForecastResult } from '../types'
 
 export interface AIDashboardData {
@@ -19,10 +21,6 @@ export interface AIDashboardData {
 const POLL_MS = 15_000
 const HIDDEN_POLL_MS = 60_000
 const MAX_BACKOFF_MS = 120_000
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : 'Backend unavailable'
-}
 
 export function useAIDashboardData(instrument: string, timeframe: string): AIDashboardData {
   const [intelligence, setIntelligence] = useState<MarketIntelligence | null>(null)
@@ -45,9 +43,16 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
         tenApi.dashboardSystemStatus(instrument),
       ] as const)
       const nextErrors: Record<string, string> = {}
-      if (results[0].status === 'rejected') nextErrors.market = message(results[0].reason)
-      if (results[1].status === 'rejected') nextErrors.dashboard = message(results[1].reason)
-      if (results[2].status === 'rejected') nextErrors.system = message(results[2].reason)
+      const sources = ['market-intelligence', 'dashboard', 'dashboard-system'] as const
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          const error = toApiError(result.reason)
+          nextErrors[sources[index]] = describeApiError(error)
+          recordFetchOutcome(sources[index], { ok: false, error })
+        } else {
+          recordFetchOutcome(sources[index], { ok: true })
+        }
+      })
       if (results[0].status === 'fulfilled') setIntelligence(results[0].value)
       if (results[1].status === 'fulfilled') {
         const value = results[1].value

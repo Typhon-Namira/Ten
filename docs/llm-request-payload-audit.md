@@ -1,8 +1,10 @@
 # TEN OpenRouter Request Payload Audit
 
-Measured: 2026-07-24  
-Production request: `5b681b44-8c00-56dd-a36d-0f29d28ca6f1`  
-Production request timestamp: `2026-07-24T13:27:03.311588Z`  
+Measured: 2026-07-24
+
+Production request: `5b681b44-8c00-56dd-a36d-0f29d28ca6f1`
+
+Production request timestamp: `2026-07-24T13:27:03.311588Z`
 Sanitized API-key fingerprint: `sha256:1f6fe8fd2f69`
 
 No API key, Authorization header, prompt content, provider payload, or private market value is included in this report.

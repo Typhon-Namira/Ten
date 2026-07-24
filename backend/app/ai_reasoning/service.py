@@ -38,6 +38,8 @@ from .validation import StructuredAIOutputError, StructuredAIOutputValidator, Va
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_REACHABLE_FAILURE_STATES = frozenset({"structured_output_invalid"})
+
 
 class AIReasoningService:
     def __init__(
@@ -305,6 +307,33 @@ class AIReasoningService:
                     self._provider_failure_streak = 0
                     self._provider_backoff_until = None
                 await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
+            except TimeoutError as exc:
+                failure_state = "ai_reasoning_request_timeout"
+                failure_errors = (type(exc).__name__, str(exc)[:200])
+                provider_failure = {
+                    "reason_code": failure_state,
+                    "phase": "provider_request_timeout",
+                    "request_id": str(request.request_id),
+                    "cycle_id": str(request.cycle_id),
+                    "model": request.model_identifier,
+                    "exception_class": type(exc).__name__,
+                    "configured_timeout_seconds": self.config.request_timeout_seconds,
+                }
+                self._provider_failure_streak += 1
+                backoff = min(
+                    self.config.provider_backoff_initial_seconds
+                    * (2 ** (self._provider_failure_streak - 1)),
+                    self.config.provider_backoff_max_seconds,
+                )
+                self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
+                await self._record_usage(
+                    request,
+                    state.state_hash,
+                    None,
+                    self.last_latency_ms,
+                    False,
+                    failure_state,
+                )
             except Exception as exc:
                 failure_state = "llm_unavailable"
                 failure_errors = (type(exc).__name__, str(exc)[:200])
@@ -708,7 +737,12 @@ class AIReasoningService:
             "monitoring_enabled": self.monitoring_enabled,
             "publication_enabled": self.final_decision.publication_enabled if self.final_decision else False,
             "adjustments_enabled": self.final_decision.adjustments_enabled if self.final_decision else False,
-            "provider_available": self.last_failure_state != "llm_unavailable" if self.requests else None,
+            "provider_available": (
+                self.last_failure_state is None
+                or self.last_failure_state in _PROVIDER_REACHABLE_FAILURE_STATES
+            )
+            if self.requests
+            else None,
             "provider": metadata["provider"],
             "model_identifier": metadata["model_identifier"],
             "prompt_version": self.config.prompt_version_new_market,
