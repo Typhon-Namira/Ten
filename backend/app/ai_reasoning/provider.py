@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import logging
 from time import perf_counter
 from typing import Any, Protocol
 
-from backend.app.ai.openrouter_client.client import OpenRouterClient
+from backend.app.ai.openrouter_client.client import (
+    OpenRouterClient,
+    build_request_body,
+    measure_request_body,
+)
 from backend.app.ai.prompts.loader import PromptLoader
+from backend.app.core.exceptions import OpenRouterFailureDetails, OpenRouterRequestError
 
+from .llm_context import build_llm_analysis_context
 from .models import AIReasoningRequest
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,21 +49,141 @@ class ExistingOpenRouterReasoningProvider:
         model: str,
         temperature: float,
         max_tokens: int,
+        target_input_tokens: int = 4_000,
+        warning_input_tokens: int = 8_000,
+        hard_input_tokens: int = 16_000,
+        absolute_max_output_tokens: int = 2_000,
+        maximum_request_cost_usd: float = 0.05,
+        input_cost_per_million_usd: float = 1.04,
+        output_cost_per_million_usd: float = 2.25,
     ) -> None:
         self.client = client
         self.prompts = prompts
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.target_input_tokens = target_input_tokens
+        self.warning_input_tokens = warning_input_tokens
+        self.hard_input_tokens = hard_input_tokens
+        self.absolute_max_output_tokens = absolute_max_output_tokens
+        self.maximum_request_cost_usd = maximum_request_cost_usd
+        self.input_cost_per_million_usd = input_cost_per_million_usd
+        self.output_cost_per_million_usd = output_cost_per_million_usd
 
     async def reason(self, request: AIReasoningRequest, *, prompt_version: str) -> AIProviderResponse:
         started = perf_counter()
-        raw = await self.client.complete_json(
-            system_prompt=self.prompts.load(prompt_version),
-            payload={
-                "analysis_request": request.model_dump(mode="json"),
-                "response_contract": self._response_contract(request),
+        context = build_llm_analysis_context(request)
+        payload = {
+            "analysis_context": context.model_dump(mode="json"),
+            "response_contract": self._response_contract(),
+        }
+        system_prompt = self.prompts.load(prompt_version)
+        request_body = build_request_body(
+            system_prompt=system_prompt,
+            payload=payload,
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+        metrics = measure_request_body(
+            request_body,
+            input_cost_per_million_usd=self.input_cost_per_million_usd,
+            output_cost_per_million_usd=self.output_cost_per_million_usd,
+        )
+        section_sizes = {
+            key: len(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode()
+            )
+            for key, value in payload.items()
+        }
+        largest_sections = tuple(
+            f"{key}:{size}"
+            for key, size in sorted(
+                section_sizes.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        )
+        logger.info(
+            "ai_reasoning.request.measured",
+            extra={
+                "request_id": str(request.request_id),
+                "cycle_id": str(request.cycle_id),
+                "model": self.model,
+                "serialized_request_bytes": metrics.serialized_request_bytes,
+                "estimated_input_tokens": metrics.estimated_input_tokens,
+                "maximum_output_tokens": metrics.maximum_output_tokens,
+                "estimated_maximum_cost_usd": metrics.estimated_maximum_cost_usd,
+                "message_count": metrics.message_count,
+                "system_prompt_characters": metrics.system_prompt_characters,
+                "user_prompt_characters": metrics.user_prompt_characters,
+                "tool_definition_bytes": metrics.tool_definition_bytes,
+                "response_schema_bytes": metrics.response_schema_bytes,
+                "largest_payload_sections": largest_sections,
+                "over_target": metrics.estimated_input_tokens > self.target_input_tokens,
+                "over_warning": metrics.estimated_input_tokens > self.warning_input_tokens,
             },
+        )
+        rejection_reason: str | None = None
+        if metrics.maximum_output_tokens > self.absolute_max_output_tokens:
+            rejection_reason = "maximum_output_tokens_exceeded"
+        elif metrics.estimated_input_tokens > self.hard_input_tokens:
+            rejection_reason = "request_too_large"
+        elif metrics.estimated_maximum_cost_usd > self.maximum_request_cost_usd:
+            rejection_reason = "maximum_cost_exceeded"
+        if rejection_reason is not None:
+            details = OpenRouterFailureDetails(
+                reason_code=rejection_reason,
+                phase="request_validation",
+                request_id=str(request.request_id),
+                cycle_id=str(request.cycle_id),
+                model=self.model,
+                endpoint=f"{getattr(self.client, 'base_url', 'openrouter')}/chat/completions",
+                error_code=rejection_reason,
+                error_message=(
+                    f"preflight rejected bytes={metrics.serialized_request_bytes} "
+                    f"estimated_input_tokens={metrics.estimated_input_tokens} "
+                    f"maximum_output_tokens={metrics.maximum_output_tokens} "
+                    f"estimated_maximum_cost_usd={metrics.estimated_maximum_cost_usd:.6f} "
+                    f"largest_sections={','.join(largest_sections)}"
+                )[:500],
+                body_length=metrics.serialized_request_bytes,
+                exception_class="OpenRouterRequestBudgetError",
+            )
+            logger.error(
+                "openrouter.request.rejected",
+                extra={
+                    "request_id": details.request_id,
+                    "cycle_id": details.cycle_id,
+                    "model": details.model,
+                    "failure_phase": details.phase,
+                    "failure_reason_code": details.reason_code,
+                    "serialized_request_bytes": metrics.serialized_request_bytes,
+                    "estimated_input_tokens": metrics.estimated_input_tokens,
+                    "maximum_output_tokens": metrics.maximum_output_tokens,
+                    "estimated_maximum_cost_usd": metrics.estimated_maximum_cost_usd,
+                    "largest_payload_sections": largest_sections,
+                },
+            )
+            raise OpenRouterRequestError(details)
+        if metrics.estimated_input_tokens > self.warning_input_tokens:
+            logger.warning(
+                "openrouter.request.budget_warning",
+                extra={
+                    "request_id": str(request.request_id),
+                    "cycle_id": str(request.cycle_id),
+                    "estimated_input_tokens": metrics.estimated_input_tokens,
+                    "warning_input_tokens": self.warning_input_tokens,
+                    "largest_payload_sections": largest_sections,
+                },
+            )
+        raw = await self.client.complete_json(
+            system_prompt=system_prompt,
+            payload=payload,
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
@@ -79,72 +209,29 @@ class ExistingOpenRouterReasoningProvider:
         }
 
     @staticmethod
-    def _response_contract(request: AIReasoningRequest) -> dict[str, Any]:
-        """Give the model an explicit compact contract without duplicating full JSON Schema."""
+    def _response_contract() -> dict[str, Any]:
+        """Request only the decision fields consumed by deterministic normalization."""
 
         return {
-            "top_level": {"forecast": "object (required)", "proposal": "object or null"},
-            "immutable_values": {
-                "request_id": str(request.request_id),
-                "cycle_id": str(request.cycle_id),
-                "market_state_id": str(request.market_state_id),
-                "quantitative_forecast_id": str(request.quantitative_forecast_id),
-                "model_identifier": request.model_identifier,
-                "prompt_version": request.prompt_version,
-                "reasoning_policy_version": request.reasoning_policy_version,
-                "setup_family_registry_version": request.setup_family_registry_version,
-                "quantitative_model_version": request.quantitative_model_version,
-                "feature_schema_version": request.feature_schema_version,
-                "market_state_schema_version": request.market_state_schema_version,
+            "required": {
+                "decision": "LONG | SHORT | WAIT",
+                "confidence": "number 0..1",
+                "rationale": "concise string, maximum 500 characters",
+                "risk_flags": "array of at most 5 concise strings",
+                "proposal": "object only for LONG/SHORT; otherwise null",
             },
-            "forecast_required": {
-                "forecast_id": "UUID",
-                "request_id": "UUID copied from immutable_values",
-                "market_state_id": "UUID copied from immutable_values",
-                "quantitative_forecast_id": "UUID copied from immutable_values",
-                "cycle_id": "UUID copied from immutable_values",
-                "status": "available | non_actionable",
-                "dominant_direction": "BUY | SELL | NEUTRAL",
-                "buy_probability": "number 0..1",
-                "sell_probability": "number 0..1",
-                "neutral_probability": "number 0..1; all three sum to 1",
-                "dominant_scenario": "string",
-                "dominant_scenario_probability": "number 0..1",
-                "model_provider": "openrouter",
-                "model_identifier": "copied from immutable_values",
-                "prompt_version": "copied from immutable_values",
-                "reasoning_policy_version": "copied from immutable_values",
-                "setup_family_registry_version": "copied from immutable_values",
-                "quantitative_model_version": "copied from immutable_values",
-                "feature_schema_version": "copied from immutable_values",
-                "market_state_schema_version": "copied from immutable_values",
-                "validation_passed": True,
-                "retry_count": 0,
-                "shadow_only": True,
-                "awaiting_guardrail_validation": True,
-                "approved_for_publication": False,
-                "generated_at": "timezone-aware ISO-8601 timestamp",
-            },
-            "proposal_required_when_object": {
-                "proposal_id": "UUID",
-                "forecast_id": "same UUID as forecast.forecast_id",
-                "market_state_id": "UUID copied from immutable_values",
-                "recommended_action": "BUY | SELL | WAIT",
-                "direction": "BUY | SELL | NEUTRAL",
-                "setup_readiness": "not_ready | developing | ready | active",
-                "proposal_confidence": "number 0..1",
-                "model_identifier": "copied from immutable_values",
-                "policy_version": "reasoning_policy_version copied from immutable_values",
-                "shadow_only": True,
-                "awaiting_guardrail_validation": True,
-                "approved_for_publication": False,
-                "created_at": "timezone-aware ISO-8601 timestamp",
+            "proposal_when_actionable": {
+                "setup_family": "string",
+                "entry_low": "positive number",
+                "entry_high": "positive number",
+                "stop_loss": "positive number",
+                "take_profit_levels": "array of 1..3 positive numbers",
             },
             "rules": [
-                "forecast must never be a string",
-                "WAIT must use direction NEUTRAL and null/empty execution levels",
-                "BUY/SELL requires ordered entry_zone, stop_loss, and at least one take_profit_level",
-                "use only evidence IDs present in analysis_request",
-                "unknown fields are unnecessary",
+                "return exactly one JSON object",
+                "do not include chain-of-thought or private reasoning",
+                "WAIT requires proposal=null",
+                "LONG/SHORT requires valid ordered entry, stop, and target geometry",
+                "use only the compact analysis_context",
             ],
         }

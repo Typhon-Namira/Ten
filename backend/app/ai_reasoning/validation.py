@@ -224,6 +224,14 @@ class StructuredAIOutputValidator:
         normalized = dict(raw)
         repaired: list[str] = []
         issues: list[str] = []
+        if "forecast" not in normalized and "decision" in normalized:
+            normalized = self._normalize_compact_response(
+                normalized,
+                request=request,
+                state=state,
+                quant=quant,
+            )
+            repaired.append("compact_response")
         if isinstance(normalized.get("forecast"), str) and str(normalized["forecast"]).strip().upper() == "WAIT":
             normalized = self._simplified_wait(request=request, state=state, quant=quant)
             repaired.extend(("forecast", "proposal"))
@@ -305,6 +313,98 @@ class StructuredAIOutputValidator:
             )
             normalized["proposal"] = proposal
         return normalized, tuple(dict.fromkeys(repaired)), tuple(issues)
+
+    def _normalize_compact_response(
+        self,
+        raw: dict[str, Any],
+        *,
+        request: AIReasoningRequest,
+        state: UnifiedMarketState,
+        quant: QuantForecastResult,
+    ) -> dict[str, Any]:
+        """Expand the intentionally small provider response into internal domain models."""
+
+        decision = str(raw.get("decision", "WAIT")).strip().upper()
+        if decision not in {"LONG", "SHORT", "WAIT"}:
+            decision = "WAIT"
+        try:
+            confidence = max(0.0, min(1.0, float(raw.get("confidence", 0))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        rationale = str(raw.get("rationale") or f"{decision.lower()} decision")[:500]
+        risk_flags = tuple(
+            str(value)[:160]
+            for value in raw.get("risk_flags", ())
+            if isinstance(value, (str, int, float))
+        )[:5]
+        direction = {"LONG": "BUY", "SHORT": "SELL", "WAIT": "NEUTRAL"}[decision]
+        if decision == "LONG":
+            probabilities = (confidence, 0.0, 1.0 - confidence)
+        elif decision == "SHORT":
+            probabilities = (0.0, confidence, 1.0 - confidence)
+        else:
+            quant_buy = float(request.quantitative_probabilities.get("BUY") or 0)
+            quant_sell = float(request.quantitative_probabilities.get("SELL") or 0)
+            directional_total = quant_buy + quant_sell
+            remainder = 1.0 - confidence
+            if directional_total > 0:
+                probabilities = (
+                    remainder * quant_buy / directional_total,
+                    remainder * quant_sell / directional_total,
+                    confidence,
+                )
+            else:
+                probabilities = (remainder / 2, remainder / 2, confidence)
+
+        proposal_raw = raw.get("proposal")
+        setup_family = (
+            str(proposal_raw.get("setup_family"))[:64]
+            if isinstance(proposal_raw, dict) and proposal_raw.get("setup_family")
+            else None
+        )
+        forecast = {
+            "status": "available" if decision != "WAIT" else "non_actionable",
+            "dominant_direction": direction,
+            "buy_probability": probabilities[0],
+            "sell_probability": probabilities[1],
+            "neutral_probability": probabilities[2],
+            "expected_horizon": next(
+                (item.horizon.horizon_id for item in quant.predictions),
+                None,
+            ),
+            "dominant_scenario": rationale,
+            "dominant_scenario_probability": confidence,
+            "selected_setup_family": setup_family if decision != "WAIT" else None,
+            "setup_family_candidates": [setup_family] if setup_family and decision != "WAIT" else [],
+            "supporting_evidence_ids": [],
+            "contradicting_evidence_ids": [],
+            "missing_evidence": [],
+            "evidence_completeness": state.evidence_completeness,
+            "forecast_confidence": confidence,
+            "execution_confidence": confidence if decision != "WAIT" else 0.0,
+            "setup_readiness": "ready" if decision != "WAIT" else "not_ready",
+            "uncertainty": 1.0 - confidence,
+            "reasoning_summary": rationale,
+            "monitoring_conditions": list(risk_flags),
+        }
+        proposal: dict[str, Any] | None = None
+        if decision != "WAIT" and isinstance(proposal_raw, dict):
+            entry_low = proposal_raw.get("entry_low")
+            entry_high = proposal_raw.get("entry_high")
+            targets = proposal_raw.get("take_profit_levels", ())
+            proposal = {
+                "recommended_action": direction,
+                "direction": direction,
+                "entry_type": "limit",
+                "entry_zone": {"low": entry_low, "high": entry_high},
+                "stop_loss": proposal_raw.get("stop_loss"),
+                "take_profit_levels": list(targets)[:3] if isinstance(targets, (list, tuple)) else [],
+                "setup_readiness": "ready",
+                "proposal_confidence": confidence,
+                "risk_notes": list(risk_flags),
+                "reason_codes": ["compact_llm_response"],
+            }
+        return {"forecast": forecast, "proposal": proposal}
 
     def _simplified_wait(
         self,

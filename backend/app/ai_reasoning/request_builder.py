@@ -171,6 +171,7 @@ class AIReasoningRequestBuilder:
             analysis_timestamp=state.market_data_boundary,
             knowledge_cutoff=state.knowledge_cutoff,
             trigger_timeframe=state.trigger_timeframe,
+            current_price=prediction.reference_price if prediction else 1.0,
             supported_timeframe_states=tuple(item.model_dump(mode="json") for item in state.timeframes),
             market_regime=grouped["market_regime"],
             trend_evidence=tuple(

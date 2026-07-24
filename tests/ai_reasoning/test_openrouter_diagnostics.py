@@ -56,7 +56,7 @@ async def test_http_402_is_sanitized_logged_and_typed(caplog: pytest.LogCaptureF
         target_logger.setLevel(previous_level)
 
     details = captured.value.details
-    assert details.reason_code == "openrouter_insufficient_credits"
+    assert details.reason_code == "payment_blocked"
     assert details.phase == "http_request"
     assert details.http_status == 402
     assert details.error_code == "402"
@@ -111,6 +111,41 @@ async def test_http_200_parse_failure_is_typed_as_response_decoding() -> None:
     assert captured.value.details.reason_code == "openrouter_response_decoding_failed"
     assert captured.value.details.phase == "response_decoding"
     assert captured.value.details.http_status == 200
+
+
+@pytest.mark.asyncio
+async def test_http_402_prompt_token_limit_is_key_limit_not_payment_blocked() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            402,
+            headers={"content-type": "application/json"},
+            json={
+                "error": {
+                    "code": 402,
+                    "message": "Prompt tokens limit exceeded: 48161 > 23881.",
+                }
+            },
+            request=request,
+        )
+
+    client = HttpOpenRouterClient(
+        "safe-test-key",
+        "https://openrouter.ai/api/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(OpenRouterRequestError) as captured:
+        await client.complete_json(
+            system_prompt="system",
+            payload={"input": "test"},
+            model="model",
+            temperature=0,
+            max_tokens=10,
+            request_id="request",
+            cycle_id="cycle",
+        )
+
+    assert captured.value.details.reason_code == "key_limit_exhausted"
+    assert captured.value.details.reason_code != "payment_blocked"
 
 
 @pytest.mark.asyncio

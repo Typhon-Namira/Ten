@@ -280,7 +280,7 @@ class OptionalProposalFieldInvalidProvider(ValidProvider):
         )
 
 
-def build_service(repository, provider, *, shadow=False, proposals=True, monitoring=False, maximum_retries=1):
+def build_service(repository, provider, *, shadow=False, proposals=True, monitoring=False, maximum_retries=0):
     config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig).model_copy(update={"maximum_retries": maximum_retries})
     registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
     return AIReasoningService(
@@ -384,12 +384,12 @@ async def test_valid_structured_output_creates_auditable_shadow_proposal() -> No
 async def test_llm_unavailability_is_explicit_and_never_fabricates_a_proposal() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), UnavailableProvider()
-    result = await build_service(repository, provider, maximum_retries=1).process(state, quant)
+    result = await build_service(repository, provider, maximum_retries=0).process(state, quant)
     assert result is not None and result.proposal is None
     assert result.forecast.status == AIResultStatus.UNAVAILABLE
     assert result.forecast.buy_probability is None
-    assert provider.calls == 2
-    assert len(repository.failures) == 2
+    assert provider.calls == 1
+    assert len(repository.failures) == 1
     assert not repository.proposals and not repository.signals
 
 
@@ -430,6 +430,7 @@ async def test_invalid_output_is_stored_and_cannot_create_proposal() -> None:
     assert result.forecast.status == AIResultStatus.INVALID
     assert result.forecast.validation_passed is False
     assert repository.failures
+    assert all(failure.raw_output is None for failure in repository.failures.values())
     assert not repository.proposals
 
 

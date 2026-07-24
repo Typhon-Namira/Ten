@@ -20,6 +20,7 @@ from backend.app.quant_forecasting.models import QuantForecastResult
 
 from .config import AIReasoningConfig
 from .lifecycle import SignalLifecycleService
+from .llm_context import build_llm_analysis_context
 from .memory import MarketMemory
 from .models import (
     AIMarketForecast,
@@ -176,7 +177,9 @@ class AIReasoningService:
         failure_state = "unavailable"
         failure_errors: tuple[str, ...] = ()
         provider_failure: dict[str, Any] | None = None
-        for attempt in range(self.config.maximum_retries + 1):
+        # One physical provider request is the hard five-minute-cycle boundary. A failed
+        # attempt becomes a typed terminal result; it is never replayed inside the cycle.
+        for attempt in range(1):
             try:
                 async with self._llm_semaphore:
                     response = await asyncio.wait_for(
@@ -275,12 +278,32 @@ class AIReasoningService:
                     if value
                 )
                 self.last_latency_ms = exc.details.elapsed_ms
-                self._provider_failure_streak += 1
-                backoff = min(
-                    self.config.provider_backoff_initial_seconds * (2 ** (self._provider_failure_streak - 1)),
-                    self.config.provider_backoff_max_seconds,
-                )
-                self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
+                provider_backoff_failures = {
+                    "authentication_failed",
+                    "payment_blocked",
+                    "key_limit_exhausted",
+                    "rate_limited",
+                    "provider_unavailable",
+                    # Backward-compatible codes from already-deployed adapters.
+                    "openrouter_authentication_failed",
+                    "openrouter_insufficient_credits",
+                    "openrouter_rate_limited",
+                    "openrouter_provider_unavailable",
+                    "openrouter_transport_error",
+                }
+                if failure_state in provider_backoff_failures:
+                    self._provider_failure_streak += 1
+                    backoff = min(
+                        self.config.provider_backoff_initial_seconds
+                        * (2 ** (self._provider_failure_streak - 1)),
+                        self.config.provider_backoff_max_seconds,
+                    )
+                    self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
+                else:
+                    # Local payload/context/cost validation is deterministic and must not be
+                    # mislabeled as provider payment backoff.
+                    self._provider_failure_streak = 0
+                    self._provider_backoff_until = None
                 await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
             except Exception as exc:
                 failure_state = "llm_unavailable"
@@ -314,7 +337,7 @@ class AIReasoningService:
         if validated is None:
             self.failed_requests += 1
             self.last_validation_passed = False
-            self.last_retry_count = self.config.maximum_retries
+            self.last_retry_count = 0
             self.last_failure_state = failure_state
             unavailable = self._unavailable_forecast(
                 request,
@@ -463,7 +486,7 @@ class AIReasoningService:
     ) -> None:
         if self.final_decision is None:
             return
-        payload = request.model_dump(mode="json")
+        payload = build_llm_analysis_context(request).model_dump(mode="json")
         request_hash = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         total = token_usage.get("total_tokens") if token_usage else None
         usage = LLMUsageMetric(
@@ -567,7 +590,8 @@ class AIReasoningService:
             attempt=attempt,
             model_identifier=model,
             prompt_version=prompt,
-            raw_output=raw,
+            # Provider output can contain private reasoning and is never persisted.
+            raw_output=None,
             validation_errors=errors,
             failure_state=state,
             provider_failure=provider_failure,
@@ -599,7 +623,7 @@ class AIReasoningService:
             feature_schema_version=request.feature_schema_version,
             market_state_schema_version=request.market_state_schema_version,
             validation_passed=False,
-            retry_count=self.config.maximum_retries,
+            retry_count=0,
             failure_state=failure_state,
             failure_phase=str(provider_failure.get("phase")) if provider_failure and provider_failure.get("phase") else None,
             provider_http_status=(

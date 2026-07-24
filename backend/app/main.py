@@ -386,6 +386,13 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             model=settings.openrouter_model,
             temperature=ai_reasoning_config.temperature,
             max_tokens=ai_reasoning_config.max_tokens,
+            target_input_tokens=ai_reasoning_config.target_input_tokens,
+            warning_input_tokens=ai_reasoning_config.warning_input_tokens,
+            hard_input_tokens=ai_reasoning_config.hard_input_tokens,
+            absolute_max_output_tokens=ai_reasoning_config.absolute_max_output_tokens,
+            maximum_request_cost_usd=ai_reasoning_config.maximum_request_cost_usd,
+            input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
+            output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
         )
         app.state.ai_reasoning_repository = ai_repository
         app.state.ai_reasoning_service = AIReasoningService(
