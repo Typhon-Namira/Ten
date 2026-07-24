@@ -102,6 +102,9 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px soli
 .decision-pipeline__step--active { color: var(--green); }
 .decision-pipeline__step--active > svg { animation: soft-pulse 2.5s ease-in-out infinite; }
 .decision-pipeline__step--rejected,.decision-pipeline__step--failed { color: var(--red); }
+.decision-pipeline__step--blocked,.decision-pipeline__step--disabled { color: var(--amber); }
+.decision-pipeline__step--running { color: var(--green); }
+.decision-pipeline__step--wait,.decision-pipeline__step--not_required,.decision-pipeline__step--not_applicable { color: var(--faint); }
 
 .ai-card-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; margin-top: 16px; }
 .ai-card { padding: 22px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); box-shadow: 0 8px 25px rgba(26,45,34,.035); animation: card-in .45s ease both; }

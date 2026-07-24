@@ -751,6 +751,16 @@ export type DashboardDataStatus =
   | 'failed'
   | 'not_available'
   | 'not_evaluated'
+  // The backend's AI-pipeline terminal-state machine (backend/app/api/dashboard_status.py) —
+  // 'pending' alone could not distinguish "genuinely fresh" from "attempted and already failed
+  // during a provider-backoff window", which is exactly what let a real failure sit under the
+  // same generic label indefinitely. Every one of these always carries a specific `reason`.
+  | 'blocked'
+  | 'disabled'
+  | 'running'
+  | 'wait'
+  | 'not_required'
+  | 'not_applicable'
 
 export interface DashboardStage<T = unknown> {
   status: DashboardDataStatus
@@ -760,6 +770,23 @@ export interface DashboardStage<T = unknown> {
   error_code: string | null
   retryable: boolean
   data: T | null
+  // Present only for specific statuses — see backend/app/api/dashboard_status.py's StageResult.extra
+  // for which fields accompany which status (e.g. `elapsed_seconds`/`job_state` on "running"/
+  // "pending", `retry_in_seconds` on "blocked", `field`/`expected`/`received` on a structured-
+  // output validation failure, `direction` on "wait", `config_source` on publication "disabled").
+  elapsed_seconds?: number
+  job_state?: string
+  retry_in_seconds?: number
+  last_failure_state?: string | null
+  disabled_flags?: string[]
+  field?: string
+  expected?: string
+  received?: unknown
+  provider_http_status?: number
+  upstream_reason?: string
+  direction?: string
+  config_source?: string
+  repaired_fields?: boolean
 }
 
 export interface DashboardAggregate {

@@ -497,6 +497,39 @@ async def test_invalid_optional_proposal_field_preserves_valid_forecast_as_degra
     assert not repository.failures and not repository.proposals
 
 
+class NoProposalProvider(ValidProvider):
+    """A valid forecast with an explicit `proposal: null` — the AI concluded a scenario but chose
+    not to recommend any action at all, distinct from a proposal whose action is WAIT."""
+
+    async def reason(self, request, *, prompt_version):
+        response = await super().reason(request, prompt_version=prompt_version)
+        return AIProviderResponse(
+            raw_output={"forecast": response.raw_output["forecast"], "proposal": None},
+            provider=response.provider,
+            model_identifier=response.model_identifier,
+            latency_ms=response.latency_ms,
+            token_usage=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_valid_forecast_without_any_proposal_is_persisted_independently() -> None:
+    """Item 5 / required persistence behavior: "A valid or safely normalized AI forecast must be
+    persisted independently of the optional proposal" — a forecast is never withheld just because
+    the LLM chose not to propose anything at all (as opposed to explicitly proposing WAIT)."""
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    result = await build_service(repository, NoProposalProvider(), maximum_retries=0).process(state, quant)
+
+    assert result is not None
+    assert result.proposal is None
+    assert result.forecast.status == AIResultStatus.AVAILABLE
+    assert result.forecast.validation_passed is True
+    assert repository.forecasts
+    assert not repository.proposals and not repository.signals
+    assert not repository.failures
+
+
 @pytest.mark.asyncio
 async def test_setup_family_enforces_only_its_own_mandatory_evidence() -> None:
     registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
