@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
@@ -403,6 +404,27 @@ def build_service(repository, provider, *, shadow=False, proposals=True, monitor
         monitoring_enabled=monitoring,
         clock=lambda: NOW,
     )
+
+
+@pytest.mark.asyncio
+async def test_execution_context_revalidates_explicit_xauusd_market_status() -> None:
+    state, quant = await state_and_quant()
+    service = build_service(InMemoryAIReasoningRepository(), ValidProvider())
+
+    context = service._execution_context(
+        state,
+        quant,
+        SimpleNamespace(spread=0.2, economic_event_context=()),
+        uuid4(),
+        "xauusd-open-market-test",
+    )
+
+    assert state.market_schedule is not None
+    assert context.market_open is True
+    assert context.market_status == "OPEN"
+    assert context.session == "london_new_york_overlap"
+    assert context.market_timezone == "America/New_York"
+    assert context.market_status_source == "ums_market_schedule_revalidated_at_guardrail"
 
 
 @pytest.mark.asyncio

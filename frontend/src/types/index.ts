@@ -24,7 +24,9 @@ export interface MarketStatus {
   is_open: boolean
   checked_at: string
   note: string
-  market_status: 'OPEN' | 'CLOSED_WEEKEND' | 'CLOSED_DAILY_BREAK' | 'HOLIDAY_OR_PROVIDER_CLOSED' | 'UNKNOWN'
+  market_status: 'OPEN' | 'MAINTENANCE' | 'CLOSED_WEEKEND' | 'CLOSED_DAILY_BREAK' | 'HOLIDAY_OR_PROVIDER_CLOSED' | 'UNKNOWN'
+  market_status_source: string
+  market_timezone: string
   closure_reason: string | null
   next_expected_open_at: string | null
   server_time_utc: string
@@ -216,6 +218,10 @@ export interface MarketIntelligence {
   latest_candle_timestamp: string | null
   current_session: string
   market_open: boolean | null
+  market_status: MarketStatus['market_status']
+  market_status_source: string
+  market_timezone: string
+  market_closure_reason: string | null
   current_candle: { timestamp: string; open: number; high: number; low: number; close: number; volume: number; spread: number | null } | null
   spread: number | null
   current_bias: string | null

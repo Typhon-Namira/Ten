@@ -17,6 +17,8 @@ class MarketStatusResponse(BaseModel):
     checked_at: datetime
     note: str
     market_status: str
+    market_status_source: str
+    market_timezone: str
     closure_reason: str | None = None
     next_expected_open_at: datetime | None = None
     server_time_utc: datetime

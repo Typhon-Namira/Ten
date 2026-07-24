@@ -14,9 +14,12 @@ class MarketSessionEngine:
 
     def session_at(self, timestamp: datetime) -> MarketSession:
         instant = timestamp.astimezone(UTC)
-        if instant.date() in self.holidays:
+        local = instant.astimezone(self.new_york)
+        if local.date() in self.holidays or instant.date() in self.holidays:
             return MarketSession.HOLIDAY
-        if instant.weekday() == 5 or (instant.weekday() == 6 and instant.time() < time(22)):
+        if local.weekday() == 5 or (
+            local.weekday() == 6 and local.timetz().replace(tzinfo=None) < time(18)
+        ):
             return MarketSession.WEEKEND
         london_hour = instant.astimezone(self.london).hour
         new_york_hour = instant.astimezone(self.new_york).hour
@@ -43,7 +46,7 @@ class MarketSessionEngine:
             )
         instant = timestamp.astimezone(UTC)
         local = instant.astimezone(self.new_york)
-        if local.date() in self.holidays:
+        if local.date() in self.holidays or instant.date() in self.holidays:
             return MarketScheduleStatus(
                 market_status=MarketStatusCode.HOLIDAY_OR_PROVIDER_CLOSED,
                 market_open=False,
@@ -69,10 +72,10 @@ class MarketSessionEngine:
         if weekday in {0, 1, 2, 3} and time(17) <= local_time < time(18):
             next_open = datetime.combine(local.date(), time(18), self.new_york).astimezone(UTC)
             return MarketScheduleStatus(
-                market_status=MarketStatusCode.CLOSED_DAILY_BREAK,
+                market_status=MarketStatusCode.MAINTENANCE,
                 market_open=False,
                 active_session=None,
-                closure_reason="daily_maintenance_break",
+                closure_reason="daily_rollover_maintenance",
                 next_expected_open_at=next_open,
                 server_time_utc=instant,
             )

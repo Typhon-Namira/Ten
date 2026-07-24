@@ -185,6 +185,34 @@ async def test_market_closed_stale_data_and_low_risk_reward_are_deterministicall
 
 
 @pytest.mark.asyncio
+async def test_unknown_market_status_remains_fail_closed_with_typed_audit_context() -> None:
+    state, quant, forecast, proposal, signal, _ = await proposal_fixture()
+    service, _ = final_service(publication=True)
+    result = await service.evaluate(
+        state,
+        quant,
+        forecast,
+        proposal,
+        signal,
+        context(
+            state,
+            quant,
+            proposal,
+            signal,
+            market_open=None,
+            market_status="UNKNOWN",
+            market_status_source="unavailable",
+        ),
+    )
+
+    gate = next(item for item in result.action.gate_evaluations if item.gate_id == "market_open")
+    assert gate.status == GateStatus.UNAVAILABLE
+    assert gate.reason_codes == ("market_status_unavailable",)
+    assert gate.audit_payload["market_status"] == "UNKNOWN"
+    assert result.publication is None
+
+
+@pytest.mark.asyncio
 async def test_duplicate_structural_opportunity_is_blocked_and_publication_is_idempotent() -> None:
     state, quant, forecast, proposal, signal, _ = await proposal_fixture()
     service, repository = final_service(publication=True)

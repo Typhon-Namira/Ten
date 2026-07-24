@@ -22,6 +22,7 @@ export function MarketStateSummary({ data }: { data: MarketIntelligence | null }
       <div><span>Regime</span><strong>{value(data.market_regime.dominant_regime)}</strong></div>
       <div><span>Structural bias</span><strong>{value(data.current_bias ?? data.market_regime.directional_bias)}</strong></div>
       <div><span>Volatility</span><strong>{percent(data.market_regime.volatility_score)}</strong></div>
+      <div><span>Market status</span><strong>{value(data.market_status)}</strong></div>
       <div><span>Session</span><strong>{value(data.current_session)}</strong></div>
       <div><span>Spread</span><strong>{data.spread?.toFixed(3) ?? 'Unavailable'}</strong></div>
       <div><span>Liquidity</span><strong>{data.liquidity.available ? 'Available' : 'Unavailable'}</strong></div>

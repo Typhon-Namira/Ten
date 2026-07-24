@@ -219,7 +219,29 @@ def derive_monitoring_stage(
     if not monitoring_enabled:
         return StageResult("not_available", "ai_signal_monitoring_disabled")
     if signal is not None:
-        return StageResult("available", "managed_signal_active")
+        signal_state = _value(getattr(signal, "state", None)) or "unknown"
+        if publication is None and signal_state == "active":
+            return StageResult(
+                "blocked",
+                "active_signal_missing_publication",
+                extra={"managed_signal_state": signal_state},
+            )
+        if publication is None:
+            reason = (
+                "unpublished_signal_observed_in_shadow"
+                if not publication_enabled
+                else "proposed_signal_monitored_while_publication_ineligible"
+            )
+            return StageResult(
+                "available",
+                reason,
+                extra={"managed_signal_state": signal_state},
+            )
+        return StageResult(
+            "available",
+            "published_managed_signal_monitored",
+            extra={"managed_signal_state": signal_state},
+        )
     if final_action_status == "wait":
         return StageResult("not_required", "latest_final_action_non_actionable_wait")
     if action is not None and _value(getattr(action, "action", None)) in ACTIONABLE_FINAL_ACTION_VALUES and publication is None and not publication_enabled:

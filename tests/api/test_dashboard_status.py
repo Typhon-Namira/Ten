@@ -341,9 +341,9 @@ def test_outcome_not_started_when_actionable_action_exists_but_publication_disab
     assert result.status == "not_started"
 
 
-def test_monitoring_active_when_signal_exists_regardless_of_final_action_status():
+def test_unpublished_proposed_signal_is_observed_but_never_labeled_active():
     result = derive_monitoring_stage(
-        signal=SimpleNamespace(signal_id="s1"),
+        signal=SimpleNamespace(signal_id="s1", state="proposed"),
         final_action_status="available",
         action=action(),
         publication=None,
@@ -351,7 +351,21 @@ def test_monitoring_active_when_signal_exists_regardless_of_final_action_status(
         monitoring_enabled=True,
     )
     assert result.status == "available"
-    assert result.reason == "managed_signal_active"
+    assert result.reason == "proposed_signal_monitored_while_publication_ineligible"
+    assert result.extra["managed_signal_state"] == "proposed"
+
+
+def test_active_signal_without_publication_is_reported_as_inconsistent():
+    result = derive_monitoring_stage(
+        signal=SimpleNamespace(signal_id="s1", state="active"),
+        final_action_status="available",
+        action=action(),
+        publication=None,
+        publication_enabled=True,
+        monitoring_enabled=True,
+    )
+    assert result.status == "blocked"
+    assert result.reason == "active_signal_missing_publication"
 
 
 def test_monitoring_disabled_flag_takes_precedence():

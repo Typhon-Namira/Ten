@@ -13,6 +13,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from backend.app.core.exceptions import OpenRouterRequestError
+from backend.app.engines.market_data_engine.sessions import MarketSessionEngine
 from backend.app.final_decision.models import ExecutionContext, LLMUsageMetric, OperationMode
 from backend.app.final_decision.service import FinalDecisionService
 from backend.app.market_state import UnifiedMarketState
@@ -111,6 +112,7 @@ class AIReasoningService:
         proposals_enabled: bool,
         monitoring_enabled: bool,
         final_decision: FinalDecisionService | None = None,
+        market_sessions: MarketSessionEngine | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
@@ -123,6 +125,7 @@ class AIReasoningService:
         self.proposals_enabled = proposals_enabled
         self.monitoring_enabled = monitoring_enabled
         self.final_decision = final_decision
+        self.market_sessions = market_sessions or MarketSessionEngine()
         self.clock = clock or (lambda: datetime.now(UTC))
         self._llm_semaphore = asyncio.Semaphore(config.llm_concurrency_limit)
         self._processed_state_hashes: set[str] = set()
@@ -782,18 +785,31 @@ class AIReasoningService:
         signal_id: Any,
         opportunity_key: str,
     ) -> ExecutionContext:
-        market_open = self._find_boolean(state, ("market_open", "is_market_open"))
+        evaluated_at = (
+            state.knowledge_cutoff
+            if state.mode.lower() in {"historical", "replay", "backtest"}
+            else max(self.clock(), state.market_data_boundary)
+        )
+        schedule = self.market_sessions.status_at(evaluated_at)
+        schedule_source = (
+            "ums_market_schedule_revalidated_at_guardrail"
+            if state.market_schedule is not None
+            else "market_session_engine_legacy_state_fallback"
+        )
         economic_blackout = self._find_boolean(state, ("prohibited_window", "blackout", "event_blackout"))
-        session = self._find_string(state, ("session", "session_name")) or "unknown"
+        session = schedule.active_session.value if schedule.active_session else "closed"
         current_price = quant.predictions[0].reference_price if quant.predictions else None
-        return ExecutionContext(
+        context = ExecutionContext(
             context_id=uuid5(NAMESPACE_URL, f"ten:execution-context:{state.state_id}"),
             instrument=state.instrument,
-            evaluated_at=max(self.clock(), state.market_data_boundary),
+            evaluated_at=evaluated_at,
             operation_mode=OperationMode.ANALYTICAL_LIVE if self.final_decision and self.final_decision.publication_enabled else OperationMode.SHADOW,
             analytical_only=True,
             broker_execution_available=False,
-            market_open=market_open,
+            market_open=schedule.market_open,
+            market_status=schedule.market_status.value,
+            market_status_source=schedule_source,
+            market_timezone=schedule.timezone,
             current_price=current_price,
             spread=request.spread,
             session=session,
@@ -804,6 +820,19 @@ class AIReasoningService:
             active_opportunity_keys=(opportunity_key,),
             active_signal_id=signal_id,
         )
+        logger.info(
+            "market_status.evaluated",
+            extra={
+                "evaluated_timestamp": evaluated_at.isoformat(),
+                "timezone": schedule.timezone,
+                "instrument": state.instrument,
+                "detected_session": session,
+                "market_status_source": schedule_source,
+                "final_market_status": schedule.market_status.value,
+                "market_open": schedule.market_open,
+            },
+        )
+        return context
 
     @staticmethod
     def _walk(value: Any) -> list[dict[str, Any]]:

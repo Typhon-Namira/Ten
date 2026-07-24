@@ -11,6 +11,7 @@ from uuid import UUID, uuid5
 
 from pydantic_core import to_jsonable_python
 
+from backend.app.engines.market_data_engine.sessions import MarketSessionEngine
 from backend.app.integration.models import CanonicalEventEnvelope, MarketCandlePayload
 
 from .models import (
@@ -89,8 +90,15 @@ def expected_closed_boundary(boundary: datetime, timeframe: str) -> datetime:
 class UnifiedMarketStateService:
     """Captures full engine outputs and builds synchronized M1/M5/M15 states."""
 
-    def __init__(self, repository: UnifiedMarketStateRepository, *, clock: Any | None = None) -> None:
+    def __init__(
+        self,
+        repository: UnifiedMarketStateRepository,
+        *,
+        sessions: MarketSessionEngine | None = None,
+        clock: Any | None = None,
+    ) -> None:
         self.repository = repository
+        self.sessions = sessions or MarketSessionEngine()
         self.clock = clock or (lambda: datetime.now(UTC))
 
     async def capture_cycle(
@@ -134,12 +142,16 @@ class UnifiedMarketStateService:
                 return None
             selected[timeframe] = frame
 
+        # UMS describes the synchronized market boundary, not the wall clock of a delayed
+        # worker. Publication revalidates this schedule at its own execution timestamp.
+        market_schedule = self.sessions.status_at(market_data_boundary)
         state_material = {
             "schema_version": "1.0",
             "instrument": instrument,
             "boundary": market_data_boundary.isoformat(),
             "knowledge_cutoff": knowledge_cutoff.isoformat(),
             "frames": {name: value.frame_hash for name, value in sorted(selected.items())},
+            "market_schedule": market_schedule.model_dump(mode="json"),
             "mode": mode,
         }
         state_hash = _hash(state_material)
@@ -208,6 +220,7 @@ class UnifiedMarketStateService:
             knowledge_cutoff=knowledge_cutoff,
             mode=mode,
             status=MarketStateStatus.DEGRADED if unavailable or degraded or stale else MarketStateStatus.AVAILABLE,
+            market_schedule=market_schedule,
             timeframes=tuple(timeframe_states),
             evidence=tuple(evidence),
             unavailable_evidence=unavailable,
