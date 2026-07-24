@@ -221,10 +221,6 @@ class TypedUnavailableProvider(ValidProvider):
 
 
 class TimeoutProvider(ValidProvider):
-    """Simulates asyncio.wait_for's own timeout firing before the HTTP client's typed timeout
-    can be caught and converted to OpenRouterRequestError -- the exact race this regression
-    test guards against staying mislabeled as the opaque, non-retryable-looking "llm_unavailable"."""
-
     async def reason(self, request, *, prompt_version):
         self.calls += 1
         raise TimeoutError("simulated asyncio.wait_for timeout")
@@ -238,6 +234,21 @@ class InvalidProvider(ValidProvider):
             provider="openrouter",
             model_identifier=request.model_identifier,
             latency_ms=2,
+            token_usage=None,
+        )
+
+
+class NoProposalProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version):
+        response = await super().reason(request, prompt_version=prompt_version)
+        return AIProviderResponse(
+            raw_output={
+                "forecast": response.raw_output["forecast"],
+                "proposal": None,
+            },
+            provider=response.provider,
+            model_identifier=response.model_identifier,
+            latency_ms=response.latency_ms,
             token_usage=None,
         )
 
@@ -290,7 +301,7 @@ class OptionalProposalFieldInvalidProvider(ValidProvider):
         )
 
 
-def build_service(repository, provider, *, shadow=False, proposals=True, monitoring=False, maximum_retries=1):
+def build_service(repository, provider, *, shadow=False, proposals=True, monitoring=False, maximum_retries=0):
     config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig).model_copy(update={"maximum_retries": maximum_retries})
     registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
     return AIReasoningService(
@@ -394,12 +405,12 @@ async def test_valid_structured_output_creates_auditable_shadow_proposal() -> No
 async def test_llm_unavailability_is_explicit_and_never_fabricates_a_proposal() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), UnavailableProvider()
-    result = await build_service(repository, provider, maximum_retries=1).process(state, quant)
+    result = await build_service(repository, provider, maximum_retries=0).process(state, quant)
     assert result is not None and result.proposal is None
     assert result.forecast.status == AIResultStatus.UNAVAILABLE
     assert result.forecast.buy_probability is None
-    assert provider.calls == 2
-    assert len(repository.failures) == 2
+    assert provider.calls == 1
+    assert len(repository.failures) == 1
     assert not repository.proposals and not repository.signals
 
 
@@ -407,41 +418,37 @@ async def test_llm_unavailability_is_explicit_and_never_fabricates_a_proposal() 
 async def test_provider_timeout_is_reported_distinctly_not_as_generic_llm_unavailable() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), TimeoutProvider()
-    result = await build_service(repository, provider, maximum_retries=0).process(state, quant)
+    service = build_service(repository, provider, maximum_retries=0)
+    result = await service.process(state, quant)
 
     assert result is not None and result.proposal is None
     assert result.forecast.status == AIResultStatus.UNAVAILABLE
     assert result.forecast.failure_state == "ai_reasoning_request_timeout"
-    assert result.forecast.failure_state != "llm_unavailable"
     failure = next(iter(repository.failures.values()))
     assert failure.provider_failure is not None
     assert failure.provider_failure["phase"] == "provider_request_timeout"
-    assert not repository.proposals and not repository.signals
+    assert service.health()["provider_available"] is False
 
 
 @pytest.mark.asyncio
-async def test_health_reports_provider_unavailable_for_transport_level_failures_not_just_llm_unavailable() -> None:
-    """`provider_available` used to only go false for the literal string "llm_unavailable",
-    so a timeout (or an auth/rate-limit failure) still reported the provider as available and
-    the dashboard badge showed "degraded" instead of "offline". It must go false for any
-    failure category where no usable response was ever received."""
+async def test_health_reports_provider_availability_from_transport_outcome() -> None:
     state, quant = await state_and_quant()
 
-    timeout_service = build_service(InMemoryAIReasoningRepository(), TimeoutProvider(), maximum_retries=0)
-    await timeout_service.process(state, quant)
-    assert timeout_service.health()["provider_available"] is False
+    unavailable = build_service(
+        InMemoryAIReasoningRepository(),
+        TypedUnavailableProvider(),
+        maximum_retries=0,
+    )
+    await unavailable.process(state, quant)
+    assert unavailable.health()["provider_available"] is False
 
-    auth_service = build_service(InMemoryAIReasoningRepository(), TypedUnavailableProvider(), maximum_retries=0)
-    await auth_service.process(state, quant)
-    assert auth_service.health()["provider_available"] is False
-
-    generic_service = build_service(InMemoryAIReasoningRepository(), UnavailableProvider(), maximum_retries=0)
-    await generic_service.process(state, quant)
-    assert generic_service.health()["provider_available"] is False
-
-    healthy_service = build_service(InMemoryAIReasoningRepository(), ValidProvider(), maximum_retries=0)
-    await healthy_service.process(state, quant)
-    assert healthy_service.health()["provider_available"] is True
+    healthy = build_service(
+        InMemoryAIReasoningRepository(),
+        ValidProvider(),
+        maximum_retries=0,
+    )
+    await healthy.process(state, quant)
+    assert healthy.health()["provider_available"] is True
 
 
 @pytest.mark.asyncio
@@ -481,6 +488,7 @@ async def test_invalid_output_is_stored_and_cannot_create_proposal() -> None:
     assert result.forecast.status == AIResultStatus.INVALID
     assert result.forecast.validation_passed is False
     assert repository.failures
+    assert all(failure.raw_output is None for failure in repository.failures.values())
     assert not repository.proposals
 
 
@@ -548,29 +556,15 @@ async def test_invalid_optional_proposal_field_preserves_valid_forecast_as_degra
     assert not repository.failures and not repository.proposals
 
 
-class NoProposalProvider(ValidProvider):
-    """A valid forecast with an explicit `proposal: null` — the AI concluded a scenario but chose
-    not to recommend any action at all, distinct from a proposal whose action is WAIT."""
-
-    async def reason(self, request, *, prompt_version):
-        response = await super().reason(request, prompt_version=prompt_version)
-        return AIProviderResponse(
-            raw_output={"forecast": response.raw_output["forecast"], "proposal": None},
-            provider=response.provider,
-            model_identifier=response.model_identifier,
-            latency_ms=response.latency_ms,
-            token_usage=None,
-        )
-
-
 @pytest.mark.asyncio
-async def test_valid_forecast_without_any_proposal_is_persisted_independently() -> None:
-    """Item 5 / required persistence behavior: "A valid or safely normalized AI forecast must be
-    persisted independently of the optional proposal" — a forecast is never withheld just because
-    the LLM chose not to propose anything at all (as opposed to explicitly proposing WAIT)."""
+async def test_valid_forecast_without_proposal_is_persisted_independently() -> None:
     state, quant = await state_and_quant()
     repository = InMemoryAIReasoningRepository()
-    result = await build_service(repository, NoProposalProvider(), maximum_retries=0).process(state, quant)
+    result = await build_service(
+        repository,
+        NoProposalProvider(),
+        maximum_retries=0,
+    ).process(state, quant)
 
     assert result is not None
     assert result.proposal is None

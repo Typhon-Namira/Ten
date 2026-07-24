@@ -5,15 +5,19 @@ setup_family_registry_version: "setup_families_v1"
 prompt_version_new_market: "new_market_analysis_v1"
 prompt_version_existing_signal: "existing_signal_monitoring_v1"
 maximum_memory_entries: 20
-maximum_retries: 1
+maximum_retries: 0
 temperature: 0.1
-max_tokens: 3200
-# Must stay comfortably above HttpOpenRouterClient's own httpx timeout (wired in main.py as
-# this value minus 5s) so a slow-but-live response is reported by httpx's typed timeout (caught
-# as OpenRouterRequestError) instead of racing asyncio.wait_for's untyped TimeoutError. Raised
-# from 45s -> 60s after production observed structured-output completions genuinely running past
-# 45s under the larger response-contract prompt payload.
+max_tokens: 1000
+# The HTTP client is configured five seconds lower so it raises the typed
+# OpenRouter timeout before the orchestration-level asyncio deadline.
 request_timeout_seconds: 60.0
 llm_concurrency_limit: 1
 provider_backoff_initial_seconds: 5.0
 provider_backoff_max_seconds: 300.0
+target_input_tokens: 4000
+warning_input_tokens: 8000
+hard_input_tokens: 16000
+absolute_max_output_tokens: 2000
+maximum_request_cost_usd: 0.05
+input_cost_per_million_usd: 1.04
+output_cost_per_million_usd: 2.25

@@ -7,6 +7,7 @@ import { ActiveSignalMonitor, GuardrailSummary, OperationalHealth, ValidationSum
 import { DashboardHeader, DecisionPipeline, FinalDecisionHero } from './DecisionOverview'
 import { AIReasoningSummary, MarketStateSummary, QuantForecastSummary } from './IntelligenceCards'
 import { EmptyState, ErrorState, LoadingSkeleton, Metric, SectionHeader, StatusBadge } from './Primitives'
+import { SystemStatusPanel } from './SystemStatusPanel'
 
 export type DashboardView = 'overview' | 'signals' | 'performance' | 'calibration' | 'system'
 
@@ -80,6 +81,7 @@ export function AIDashboard({ view = 'overview' }: { view?: DashboardView }) {
         <ErrorBoundary label="Active signal monitor"><ActiveSignalMonitor data={data.reasoning} market={data.intelligence} unavailableReason={data.aggregate?.stages.monitoring.reason} /></ErrorBoundary>
         <ErrorBoundary label="Validation summary"><ValidationSummary data={data.reasoning} unavailableReason={data.aggregate?.readiness.reason} /></ErrorBoundary>
         <ErrorBoundary label="Operational health"><OperationalHealth data={data.reasoning} stale={data.stale} /></ErrorBoundary>
+        <ErrorBoundary label="System status"><SystemStatusPanel data={data.systemStatus} /></ErrorBoundary>
       </>}
       {view === 'signals' && <>
         <ErrorBoundary label="Final decision"><FinalDecisionHero intelligence={data.intelligence} reasoning={data.reasoning} unavailableReason={data.aggregate?.stages.final_action.reason} publicationReason={data.aggregate?.stages.publication.reason} /></ErrorBoundary>
@@ -98,6 +100,7 @@ export function AIDashboard({ view = 'overview' }: { view?: DashboardView }) {
         <ErrorBoundary label="Quant forecast"><QuantForecastSummary forecast={data.quant} calibration={data.calibration} unavailableReason={data.aggregate?.stages.quant_forecast.reason} /></ErrorBoundary>
       </>}
       {view === 'system' && <>
+        <ErrorBoundary label="System status"><SystemStatusPanel data={data.systemStatus} /></ErrorBoundary>
         <ErrorBoundary label="Readiness detail"><ReadinessDetail data={data} /></ErrorBoundary>
         <ErrorBoundary label="Operational health"><OperationalHealth data={data.reasoning} stale={data.stale} /></ErrorBoundary>
         <ErrorBoundary label="Decision pipeline"><DecisionPipeline intelligence={data.intelligence} quant={data.quant} reasoning={data.reasoning} stages={data.aggregate?.stages} /></ErrorBoundary>

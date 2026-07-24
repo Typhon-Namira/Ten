@@ -26,6 +26,7 @@ from backend.app.storage.models import (
 )
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
+from .llm_context import build_llm_analysis_context, compact_request_audit_payload
 from .models import (
     AIMarketForecast,
     AIReasoningRequest,
@@ -212,6 +213,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
 
     @scoped_session
     async def save_request(self, value: AIReasoningRequest) -> AIReasoningRequest:
+        context = build_llm_analysis_context(value)
         await self.session.execute(
             insert(AIReasoningRequestRecord)
             .values(
@@ -223,7 +225,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 analysis_timestamp=value.analysis_timestamp,
                 prompt_version=value.prompt_version,
                 model_identifier=value.model_identifier,
-                payload=value.model_dump(mode="json"),
+                payload=compact_request_audit_payload(value, context),
                 created_at=value.created_at,
             )
             .on_conflict_do_nothing(index_elements=["request_id"])

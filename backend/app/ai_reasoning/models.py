@@ -112,6 +112,7 @@ class AIReasoningRequest(ImmutableAIModel):
     analysis_timestamp: datetime
     knowledge_cutoff: datetime
     trigger_timeframe: str
+    current_price: float = Field(gt=0)
     supported_timeframe_states: tuple[dict[str, Any], ...]
     market_regime: tuple[dict[str, Any], ...] = ()
     trend_evidence: tuple[dict[str, Any], ...] = ()

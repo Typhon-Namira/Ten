@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+from datetime import timedelta
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from backend.app.ai.openrouter_client.client import (
+    OpenRouterClient,
+    build_request_body,
+    measure_request_body,
+)
+from backend.app.ai.prompts.loader import PromptLoader
+from backend.app.ai_reasoning.config import AIReasoningConfig
+from backend.app.ai_reasoning.llm_context import LLMAnalysisContext, build_llm_analysis_context
+from backend.app.ai_reasoning.memory import MarketMemory
+from backend.app.ai_reasoning.models import MarketMemoryEntry, MarketMemorySummary
+from backend.app.ai_reasoning.provider import ExistingOpenRouterReasoningProvider
+from backend.app.ai_reasoning.request_builder import AIReasoningRequestBuilder
+from backend.app.ai_reasoning.setup_families import SetupFamilyRegistry
+from backend.app.ai_reasoning.validation import StructuredAIOutputValidator
+from backend.app.core.config import YamlConfigRepository
+from backend.app.core.exceptions import OpenRouterRequestError
+from tests.ai_reasoning.test_ai_reasoning_lifecycle import NOW, state_and_quant
+
+
+class CapturingClient(OpenRouterClient):
+    def __init__(self, response: dict[str, Any] | None = None) -> None:
+        self.calls = 0
+        self.payloads: list[dict[str, Any]] = []
+        self.response = response or {
+            "decision": "WAIT",
+            "confidence": 0.8,
+            "rationale": "No actionable setup.",
+            "risk_flags": [],
+            "proposal": None,
+        }
+
+    async def complete_json(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        self.payloads.append(kwargs["payload"])
+        return self.response
+
+
+async def _request(memory: MarketMemorySummary | None = None):
+    state, quant = await state_and_quant()
+    config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig)
+    request = AIReasoningRequestBuilder(
+        config,
+        model_identifier="meta-llama/llama-3.3-70b-instruct",
+        clock=lambda: NOW,
+    ).build(
+        state,
+        quant,
+        memory or MarketMemorySummary(entry_count=0),
+        existing_signal=None,
+        previous_forecast=None,
+        previous_proposal=None,
+    )
+    return state, quant, config, request
+
+
+def _provider(
+    client: CapturingClient,
+    config: AIReasoningConfig,
+    **overrides: Any,
+) -> ExistingOpenRouterReasoningProvider:
+    values = {
+        "model": "meta-llama/llama-3.3-70b-instruct",
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "target_input_tokens": config.target_input_tokens,
+        "warning_input_tokens": config.warning_input_tokens,
+        "hard_input_tokens": config.hard_input_tokens,
+        "absolute_max_output_tokens": config.absolute_max_output_tokens,
+        "maximum_request_cost_usd": config.maximum_request_cost_usd,
+        "input_cost_per_million_usd": config.input_cost_per_million_usd,
+        "output_cost_per_million_usd": config.output_cost_per_million_usd,
+    }
+    values.update(overrides)
+    return ExistingOpenRouterReasoningProvider(
+        client,
+        PromptLoader(Path("backend/app/ai_reasoning/prompts")),
+        **values,
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_serializes_only_typed_compact_context_without_candles_or_engine_objects() -> None:
+    _, _, config, request = await _request()
+    client = CapturingClient()
+
+    await _provider(client, config).reason(request, prompt_version=request.prompt_version)
+
+    assert client.calls == 1
+    payload = client.payloads[0]
+    assert set(payload) == {"analysis_context", "response_contract"}
+    context = LLMAnalysisContext.model_validate(payload["analysis_context"])
+    encoded = json.dumps(payload, sort_keys=True)
+    prohibited = (
+        '"analysis_request"',
+        '"candles"',
+        '"raw"',
+        '"smc_evidence"',
+        '"volume_profile_evidence"',
+        '"feature_vector"',
+        '"previous_ai_forecast"',
+        '"previous_ai_proposal"',
+        '"dashboard"',
+    )
+    assert all(token not in encoded for token in prohibited)
+    assert context.current_price > 0
+
+
+@pytest.mark.asyncio
+async def test_compact_context_collection_cardinalities_are_hard_bounded() -> None:
+    _, _, _, request = await _request()
+    context = build_llm_analysis_context(request)
+
+    assert len(context.timeframe_trends) <= 3
+    assert len(context.nearest_supply_zones) <= 3
+    assert len(context.nearest_demand_zones) <= 3
+    assert len(context.relevant_order_blocks) <= 3
+    assert len(context.relevant_fair_value_gaps) <= 3
+    assert len(context.nearest_liquidity_levels) <= 5
+    assert len(context.volume_profile.nearest_hvns) <= 3
+    assert len(context.volume_profile.nearest_lvns) <= 3
+    assert len(context.material_changes) <= 5
+
+
+@pytest.mark.asyncio
+async def test_normal_context_stays_below_target_token_budget() -> None:
+    _, _, config, request = await _request()
+    context = build_llm_analysis_context(request)
+    provider = _provider(CapturingClient(), config)
+    prompt = provider.prompts.load(request.prompt_version)
+    payload = {
+        "analysis_context": context.model_dump(mode="json"),
+        "response_contract": provider._response_contract(),
+    }
+    body = build_request_body(
+        system_prompt=prompt,
+        payload=payload,
+        model=provider.model,
+        temperature=provider.temperature,
+        max_tokens=provider.max_tokens,
+    )
+    metrics = measure_request_body(
+        body,
+        input_cost_per_million_usd=config.input_cost_per_million_usd,
+        output_cost_per_million_usd=config.output_cost_per_million_usd,
+    )
+
+    assert metrics.estimated_input_tokens <= config.target_input_tokens
+    assert metrics.maximum_output_tokens == 1_000
+    assert metrics.maximum_output_tokens <= config.absolute_max_output_tokens
+
+
+@pytest.mark.asyncio
+async def test_oversized_context_is_rejected_before_provider_and_not_typed_as_credit_failure() -> None:
+    _, _, config, request = await _request()
+    client = CapturingClient()
+    provider = _provider(client, config, hard_input_tokens=100)
+
+    with pytest.raises(OpenRouterRequestError) as captured:
+        await provider.reason(request, prompt_version=request.prompt_version)
+
+    assert client.calls == 0
+    assert captured.value.details.reason_code == "request_too_large"
+    assert captured.value.details.phase == "request_validation"
+    assert captured.value.details.reason_code not in {"payment_blocked", "openrouter_insufficient_credits"}
+
+
+@pytest.mark.asyncio
+async def test_compact_wait_response_and_output_limit() -> None:
+    state, quant, config, request = await _request()
+    client = CapturingClient()
+    response = await _provider(client, config).reason(request, prompt_version=request.prompt_version)
+    validated = StructuredAIOutputValidator(
+        SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+    ).validate(response.raw_output, request=request, state=state, quant=quant)
+
+    assert response.raw_output == {
+        "decision": "WAIT",
+        "confidence": 0.8,
+        "rationale": "No actionable setup.",
+        "risk_flags": [],
+        "proposal": None,
+    }
+    assert validated.forecast.status.value == "non_actionable"
+    assert validated.forecast.dominant_direction is not None
+    assert validated.proposal is None
+    assert client.calls == 1
+    assert config.max_tokens == 1_000
+
+
+@pytest.mark.asyncio
+async def test_history_is_bounded_to_five_material_changes_and_cannot_accumulate_prompt_turns() -> None:
+    common_tail = tuple(f"material-{index}" for index in range(5))
+    short_memory = MarketMemorySummary(
+        entry_count=25,
+        regime_transitions=tuple(f"old-{index}" for index in range(20)) + common_tail,
+    )
+    long_memory = MarketMemorySummary(
+        entry_count=105,
+        regime_transitions=tuple(f"older-{index}" for index in range(100)) + common_tail,
+    )
+    _, _, _, short_request = await _request(short_memory)
+    _, _, _, long_request = await _request(long_memory)
+    short_context = build_llm_analysis_context(short_request)
+    long_context = build_llm_analysis_context(long_request)
+
+    assert short_context.material_changes == long_context.material_changes
+    assert len(short_context.material_changes) == 5
+    assert short_context.previous_final_decision is None
+    assert "messages" not in short_context.model_dump()
+    assert len(json.dumps(short_context.model_dump(mode="json"))) == len(
+        json.dumps(long_context.model_dump(mode="json"))
+    )
+
+
+def test_market_memory_summary_never_includes_full_structured_payload_history() -> None:
+    entries = tuple(
+        MarketMemoryEntry(
+            entry_id=__import__("uuid").uuid4(),
+            instrument="XAUUSD",
+            cycle_id=__import__("uuid").uuid4(),
+            market_state_id=__import__("uuid").uuid4(),
+            category="evidence_change",
+            summary=f"summary-{index}",
+            structured_payload={"private_full_payload": "x" * 20_000},
+            occurred_at=NOW + timedelta(seconds=index),
+        )
+        for index in range(20)
+    )
+
+    summary = MarketMemory(20).summarize(entries)
+    encoded = json.dumps(summary.model_dump(mode="json"))
+    assert "private_full_payload" not in encoded
+    assert len(summary.evidence_changes) == 20

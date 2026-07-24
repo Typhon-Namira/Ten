@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -8,9 +8,38 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import Settings
+from backend.app.api.routes.dashboard import _stage_fingerprint, _system_stage
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
 from backend.app.main import create_app
+
+
+@pytest.mark.parametrize(
+    "stage_status",
+    ("healthy", "running", "degraded", "failed", "disabled", "blocked", "stale", "no_data"),
+)
+def test_dashboard_stage_status_vocabulary_is_exact(stage_status: str) -> None:
+    result = _system_stage("test", "Test", stage_status, "typed_reason")
+    assert result["status"] == stage_status
+    assert result["reason"] == "typed_reason"
+    assert "unavailable" not in str(result).lower()
+
+
+def test_unchanged_stage_status_has_one_stable_history_fingerprint() -> None:
+    stage = _system_stage(
+        "volume_profile",
+        "Volume Profile",
+        "degraded",
+        "insufficient_volume_profile_data",
+        record_id="snapshot-1",
+        details={"usable_count": 0},
+    )
+    repeated = dict(stage)
+    repeated["timestamp"] = datetime.now(UTC)
+    assert _stage_fingerprint(stage) == _stage_fingerprint(repeated)
+
+    changed = {**stage, "reason": "empty_profile_period"}
+    assert _stage_fingerprint(changed) != _stage_fingerprint(stage)
 
 
 def test_unhandled_exception_on_get_degrades_to_200_not_500() -> None:
@@ -117,6 +146,55 @@ def test_dashboard_aggregate_returns_typed_reasons_without_expected_404s() -> No
     assert body["reasoning"]["runtime"]["operating_profile"] == "safe_test"
 
 
+def test_dashboard_system_status_is_one_authoritative_thirteen_stage_contract() -> None:
+    with TestClient(create_app()) as client:
+        response = client.get(
+            "/api/dashboard/system-status",
+            params={"instrument": " XAU/USD "},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["instrument"] == "XAUUSD"
+    assert len(body["stages"]) == 13
+    assert [item["id"] for item in body["stages"]] == [
+        "market_data",
+        "smc",
+        "liquidity",
+        "volume_profile",
+        "institutional_flow",
+        "market_regime",
+        "economic_calendar",
+        "unified_market_state",
+        "quant_forecast",
+        "ai_reasoning",
+        "proposal",
+        "guardrails",
+        "final_decision",
+    ]
+    valid = {
+        "healthy", "running", "degraded", "failed",
+        "disabled", "blocked", "stale", "no_data",
+    }
+    assert all(item["status"] in valid for item in body["stages"])
+    assert all(item["status"] != "unavailable" for item in body["stages"])
+    assert {"current_decision", "storage", "failure_history"} <= set(body)
+
+
+def test_dashboard_reports_exact_storage_circuit_breaker_reason() -> None:
+    with TestClient(create_app()) as client:
+        client.app.state.integration_service.storage_exhausted_until = (
+            datetime.now(UTC) + timedelta(minutes=5)
+        )
+        response = client.get("/api/dashboard/system-status")
+
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["storage"]["status"] == "failed"
+    assert body["storage"]["reason"] == "storage_exhausted"
+    assert body["storage"]["circuit_retry_at"] is not None
+
+
 def test_dashboard_aggregate_queries_every_stage_at_one_market_state_boundary() -> None:
     boundary = datetime(2026, 7, 23, 15, 0, tzinfo=UTC)
     state_id = uuid4()
@@ -192,7 +270,7 @@ def test_dashboard_reports_terminal_ai_failure_not_pending_end_to_end() -> None:
     the exact production symptom the fix in dashboard_status.py exists for. Every status here is
     read straight off the JSON response the backend actually returned; nothing is inferred."""
     boundary = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
-    state_id, cycle_id, quant_id, forecast_id = uuid4(), uuid4(), uuid4(), uuid4()
+    state_id, cycle_id, forecast_id = uuid4(), uuid4(), uuid4()
     state = SimpleNamespace(
         state_id=state_id, cycle_id=cycle_id, status=SimpleNamespace(value="available"),
         market_data_boundary=boundary, knowledge_cutoff=boundary, evidence=(),

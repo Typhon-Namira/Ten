@@ -7,12 +7,15 @@ This endpoint never runs analytics. It only joins persisted records through the 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import hashlib
+import json
 import logging
 from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Request
+from sqlalchemy import text
 
 from backend.app.api.dashboard_status import (
     StageResult,
@@ -28,7 +31,358 @@ from backend.app.core.feature_flags import FeatureFlag
 from backend.app.engines.market_data_engine.models import canonical_symbol
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
+system_status_router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 logger = logging.getLogger(__name__)
+
+_PIPELINE_STAGES = (
+    ("market_data", "Market Data"),
+    ("smc", "Smart Money Concepts"),
+    ("liquidity", "Liquidity"),
+    ("volume_profile", "Volume Profile"),
+    ("institutional_flow", "Institutional Flow"),
+    ("market_regime", "Market Regime"),
+    ("economic_calendar", "Economic Calendar"),
+    ("unified_market_state", "Unified Market State"),
+    ("quant_forecast", "Quant Forecast"),
+    ("ai_reasoning", "AI Reasoning"),
+    ("proposal", "Proposal"),
+    ("guardrails", "Guardrails"),
+    ("final_decision", "Final Decision"),
+)
+_VALID_STAGE_STATUSES = {
+    "healthy", "running", "degraded", "failed", "disabled", "blocked", "stale", "no_data"
+}
+
+
+def _system_stage(
+    stage_id: str,
+    label: str,
+    status: str,
+    reason: str,
+    *,
+    timestamp: datetime | None = None,
+    record_id: object | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    assert status in _VALID_STAGE_STATUSES
+    return {
+        "id": stage_id,
+        "label": label,
+        "status": status,
+        "reason": reason,
+        "timestamp": timestamp,
+        "record_id": str(record_id) if record_id is not None else None,
+        "details": details or {},
+    }
+
+
+def _stage_fingerprint(stage: dict[str, Any]) -> str:
+    fingerprint_payload = {
+        key: stage[key]
+        for key in ("id", "status", "reason", "record_id", "details")
+    }
+    return hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+    ).hexdigest()
+
+
+async def _storage_diagnostics(request: Request) -> dict[str, Any]:
+    integration = getattr(request.app.state, "integration_service", None)
+    exhausted_until = getattr(integration, "storage_exhausted_until", None)
+    circuit_open = bool(exhausted_until and exhausted_until > datetime.now(UTC))
+    factory = getattr(request.app.state, "database_session_factory", None)
+    if factory is None:
+        return {
+            "status": "failed" if circuit_open else "disabled",
+            "reason": "storage_exhausted" if circuit_open else "persistent_database_not_configured",
+            "database_bytes": None,
+            "growth_bytes_per_hour": None,
+            "projected_gb_per_day": None,
+            "largest_relations": [],
+            "retention": {"status": "disabled", "policies": []},
+            "circuit_retry_at": exhausted_until,
+        }
+    async with factory() as session:
+        database_bytes = int(
+            await session.scalar(text("SELECT pg_database_size(current_database())")) or 0
+        )
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT relname,
+                           pg_total_relation_size(relid) AS total_bytes,
+                           pg_relation_size(relid) AS table_bytes,
+                           pg_indexes_size(relid) AS index_bytes,
+                           n_live_tup, n_dead_tup
+                    FROM pg_stat_user_tables
+                    ORDER BY pg_total_relation_size(relid) DESC
+                    LIMIT 12
+                    """
+                )
+            )
+        ).mappings().all()
+        try:
+            policies = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT relation_name, retention_days, cleanup_batch_size, protected
+                        FROM storage_retention_policies
+                        ORDER BY relation_name
+                        """
+                    )
+                )
+            ).mappings().all()
+        except Exception:
+            await session.rollback()
+            policies = []
+    measured_at = datetime.now(UTC)
+    previous = getattr(request.app.state, "dashboard_storage_sample", None)
+    growth_bytes_per_hour: int | None = None
+    if previous is not None:
+        previous_at, previous_bytes = previous
+        elapsed = (measured_at - previous_at).total_seconds()
+        if elapsed > 0:
+            growth_bytes_per_hour = round(
+                (database_bytes - int(previous_bytes)) * 3600 / elapsed
+            )
+    request.app.state.dashboard_storage_sample = (measured_at, database_bytes)
+    return {
+        "status": "failed" if circuit_open else "healthy",
+        "reason": "storage_exhausted" if circuit_open else "database_size_measured",
+        "database_bytes": database_bytes,
+        "growth_bytes_per_hour": growth_bytes_per_hour,
+        "projected_gb_per_day": (
+            round(growth_bytes_per_hour * 24 / 1024**3, 3)
+            if growth_bytes_per_hour is not None else None
+        ),
+        "largest_relations": [dict(item) for item in rows],
+        "retention": {
+            "status": "healthy" if policies else "no_data",
+            "policies": [dict(item) for item in policies],
+        },
+        "circuit_retry_at": exhausted_until,
+    }
+
+
+async def _persist_stage_projection(
+    request: Request,
+    instrument: str,
+    stages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Cache current status and append history only when its fingerprint changes."""
+
+    factory = getattr(request.app.state, "database_session_factory", None)
+    if factory is None:
+        return []
+    async with factory() as session:
+        try:
+            for stage in stages:
+                fingerprint = _stage_fingerprint(stage)
+                params = {
+                    "instrument": instrument,
+                    "stage": stage["id"],
+                    "status": stage["status"],
+                    "reason": stage["reason"],
+                    "fingerprint": fingerprint,
+                    "record_id": stage["record_id"],
+                    "observed_at": stage["timestamp"] or datetime.now(UTC),
+                    "details": json.dumps(stage["details"], default=str),
+                    "updated_at": datetime.now(UTC),
+                }
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO pipeline_stage_history
+                            (instrument, stage, status, reason, fingerprint, record_id,
+                             observed_at, details)
+                        VALUES
+                            (:instrument, :stage, :status, :reason, :fingerprint, :record_id,
+                             :observed_at, CAST(:details AS jsonb))
+                        ON CONFLICT (instrument, stage, fingerprint) DO NOTHING
+                        """
+                    ),
+                    params,
+                )
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO pipeline_stage_current
+                            (instrument, stage, status, reason, fingerprint, record_id,
+                             observed_at, updated_at, details)
+                        VALUES
+                            (:instrument, :stage, :status, :reason, :fingerprint, :record_id,
+                             :observed_at, :updated_at, CAST(:details AS jsonb))
+                        ON CONFLICT (instrument, stage) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            reason = EXCLUDED.reason,
+                            fingerprint = EXCLUDED.fingerprint,
+                            record_id = EXCLUDED.record_id,
+                            observed_at = EXCLUDED.observed_at,
+                            updated_at = EXCLUDED.updated_at,
+                            details = EXCLUDED.details
+                        WHERE pipeline_stage_current.fingerprint <> EXCLUDED.fingerprint
+                        """
+                    ),
+                    params,
+                )
+            await session.commit()
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT stage, status, reason, observed_at AS timestamp
+                        FROM pipeline_stage_history
+                        WHERE instrument = :instrument
+                          AND status IN ('failed','degraded','blocked','stale')
+                        ORDER BY observed_at DESC
+                        LIMIT 50
+                        """
+                    ),
+                    {"instrument": instrument},
+                )
+            ).mappings().all()
+            return [dict(item) for item in rows]
+        except Exception as exc:
+            await session.rollback()
+            # Rolling deploys may briefly serve with the previous schema. Status remains
+            # available; the projection cache begins as soon as the migration completes.
+            logger.warning(
+                "dashboard_stage_projection.failed",
+                extra={"exception_class": type(exc).__name__},
+            )
+            return []
+
+
+@system_status_router.get("/system-status")
+async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") -> dict[str, Any]:
+    """One backend-authoritative read model for pipeline, storage and failures."""
+
+    now = datetime.now(UTC)
+    symbol = canonical_symbol(instrument)
+    flags = request.app.state.engine_registry.context.feature_flags
+    state = await request.app.state.unified_market_state_repository.latest_state(symbol)
+    stages: dict[str, dict[str, Any]] = {}
+    evidence_by_engine = {
+        item.source_engine: item for item in (state.evidence if state is not None else ())
+    }
+    market_timestamp = getattr(state, "market_data_boundary", None)
+    stale = bool(market_timestamp and (now - market_timestamp).total_seconds() > 1200)
+    stages["market_data"] = _system_stage(
+        "market_data",
+        "Market Data",
+        "no_data" if state is None else "stale" if stale else "healthy",
+        "awaiting_first_synchronized_candle" if state is None else "market_boundary_stale" if stale else "closed_candles_available",
+        timestamp=market_timestamp,
+    )
+    for stage_id, label in _PIPELINE_STAGES[1:7]:
+        evidence = evidence_by_engine.get(stage_id)
+        availability = getattr(getattr(evidence, "availability", None), "value", None)
+        status = {
+            "available": "healthy",
+            "degraded": "degraded",
+            "stale": "stale",
+            "unavailable": "no_data",
+        }.get(str(availability), "no_data")
+        reason_codes = tuple(getattr(evidence, "reason_codes", ()) or ())
+        stages[stage_id] = _system_stage(
+            stage_id,
+            label,
+            status,
+            reason_codes[0] if reason_codes else f"{stage_id}_{availability or 'not_persisted'}",
+            timestamp=getattr(evidence, "available_at", None),
+            record_id=getattr(evidence, "evidence_id", None),
+        )
+    stages["unified_market_state"] = _system_stage(
+        "unified_market_state",
+        "Unified Market State",
+        "no_data" if state is None else "degraded" if state.status.value == "degraded" else "healthy",
+        "awaiting_synchronized_m1_m5_m15_state" if state is None else "point_in_time_state_persisted",
+        timestamp=market_timestamp,
+        record_id=getattr(state, "state_id", None),
+        details={"evidence_completeness": getattr(state, "evidence_completeness", None)},
+    )
+    quant = (
+        await request.app.state.quant_forecast_repository.result_for_state(state.state_id)
+        if state is not None else None
+    )
+    forecast = (
+        await request.app.state.ai_reasoning_repository.forecast_for_state(state.state_id)
+        if state is not None else None
+    )
+    proposal = (
+        await request.app.state.ai_reasoning_repository.proposal_for_state(state.state_id)
+        if state is not None else None
+    )
+    action = (
+        await request.app.state.final_decision_repository.action_for_state(state.state_id)
+        if state is not None else None
+    )
+    stages["quant_forecast"] = _system_stage(
+        "quant_forecast", "Quant Forecast",
+        "blocked" if state is None else "running" if quant is None else "failed" if str(getattr(quant, "status", "")).endswith("failed") else "healthy",
+        "awaiting_unified_market_state" if state is None else "forecast_in_progress" if quant is None else "quant_forecast_persisted",
+        timestamp=getattr(quant, "generated_at", None), record_id=getattr(quant, "result_id", None),
+    )
+    reasoning_enabled = flags.is_enabled(FeatureFlag.AI_CENTRIC_SHADOW_MODE)
+    stages["ai_reasoning"] = _system_stage(
+        "ai_reasoning", "AI Reasoning",
+        "disabled" if not reasoning_enabled else "blocked" if quant is None else "running" if forecast is None else "failed" if getattr(forecast, "failure_state", None) else "degraded" if getattr(forecast, "validation_degraded", False) else "healthy",
+        "ai_centric_shadow_mode_disabled" if not reasoning_enabled else "awaiting_quant_forecast" if quant is None else "reasoning_in_progress" if forecast is None else getattr(forecast, "failure_state", None) or "ai_reasoning_persisted",
+        timestamp=getattr(forecast, "generated_at", None), record_id=getattr(forecast, "forecast_id", None),
+    )
+    proposals_enabled = flags.is_enabled(FeatureFlag.AI_SIGNAL_PROPOSALS)
+    stages["proposal"] = _system_stage(
+        "proposal", "Proposal",
+        "disabled" if not proposals_enabled else "blocked" if forecast is None else "running" if proposal is None else "healthy",
+        "ai_signal_proposals_disabled" if not proposals_enabled else "awaiting_ai_reasoning" if forecast is None else "proposal_in_progress" if proposal is None else "proposal_persisted",
+        timestamp=getattr(proposal, "created_at", None), record_id=getattr(proposal, "proposal_id", None),
+    )
+    stages["guardrails"] = _system_stage(
+        "guardrails", "Guardrails",
+        "blocked" if proposal is None else "running" if action is None else "healthy",
+        "awaiting_proposal" if proposal is None else "guardrails_in_progress" if action is None else "deterministic_guardrails_completed",
+        timestamp=getattr(action, "created_at", None), record_id=getattr(action, "final_action_id", None),
+    )
+    stages["final_decision"] = _system_stage(
+        "final_decision", "Final Decision",
+        "blocked" if action is None else "healthy",
+        "awaiting_guardrails" if action is None else "final_decision_persisted",
+        timestamp=getattr(action, "created_at", None), record_id=getattr(action, "final_action_id", None),
+    )
+    storage = await _storage_diagnostics(request)
+    stage_list = [stages[item[0]] for item in _PIPELINE_STAGES]
+    persisted_failures = await _persist_stage_projection(request, symbol, stage_list)
+    overall = (
+        "failed" if storage["status"] == "failed" or any(item["status"] == "failed" for item in stage_list)
+        else "degraded" if any(item["status"] in {"degraded", "stale"} for item in stage_list)
+        else "running" if any(item["status"] == "running" for item in stage_list)
+        else "healthy"
+    )
+    return {
+        "status": overall,
+        "instrument": symbol,
+        "generated_at": now,
+        "cycle_id": str(state.cycle_id) if state is not None else None,
+        "stages": stage_list,
+        "current_decision": action.model_dump(mode="json") if action is not None else None,
+        "storage": storage,
+        "failure_history": persisted_failures or [
+            {
+                "stage": item["id"],
+                "status": item["status"],
+                "reason": item["reason"],
+                "timestamp": item["timestamp"],
+            }
+            for item in stage_list if item["status"] in {"failed", "degraded", "blocked", "stale"}
+        ],
+    }
 
 
 def _stage(
@@ -54,7 +408,13 @@ def _stage(
     }
 
 
-def _stage_from_result(result: StageResult, *, data: Any = None, record_id: object | None = None, timestamp: datetime | None = None) -> dict[str, Any]:
+def _stage_from_result(
+    result: StageResult,
+    *,
+    data: Any = None,
+    record_id: object | None = None,
+    timestamp: datetime | None = None,
+) -> dict[str, Any]:
     return _stage(
         status=result.status,
         reason=result.reason,
@@ -196,7 +556,9 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
 
     quant = await request.app.state.quant_forecast_repository.result_for_state(state.state_id)
     forecast = await request.app.state.ai_reasoning_repository.forecast_for_state(state.state_id)
-    ai_request = await request.app.state.ai_reasoning_repository.request_for_state(state.state_id)
+    ai_request = await request.app.state.ai_reasoning_repository.request_for_state(
+        state.state_id
+    )
     proposal = await request.app.state.ai_reasoning_repository.proposal_for_state(state.state_id)
     action = await request.app.state.final_decision_repository.action_for_state(state.state_id)
     active_signals = await request.app.state.ai_reasoning_repository.active_signals(symbol)
@@ -226,11 +588,6 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         if quant is not None
         else ("pending", "quant_forecast_not_yet_persisted_for_cycle")
     )
-
-    # Backend-authoritative terminal-state machine for the AI-centric stages — see
-    # backend/app/api/dashboard_status.py for why a bare "does a row exist yet" check (the
-    # previous logic here) let a real, already-terminal failure or a legitimate non-actionable
-    # WAIT conclusion both collapse into the same misleading "pending"/"awaiting_ai_proposal".
     ai_reasoning_result = derive_ai_reasoning_stage(
         forecast=forecast,
         request=ai_request,
@@ -238,9 +595,21 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         now=now,
         cycle_available_at=state.knowledge_cutoff,
     )
-    ai_proposal_result = derive_ai_proposal_stage(forecast=forecast, proposal=proposal, proposals_enabled=proposals_enabled)
-    guardrails_result = derive_guardrails_stage(forecast=forecast, proposal=proposal, action=action)
-    final_action_result = derive_final_action_stage(forecast=forecast, proposal=proposal, action=action)
+    ai_proposal_result = derive_ai_proposal_stage(
+        forecast=forecast,
+        proposal=proposal,
+        proposals_enabled=proposals_enabled,
+    )
+    guardrails_result = derive_guardrails_stage(
+        forecast=forecast,
+        proposal=proposal,
+        action=action,
+    )
+    final_action_result = derive_final_action_stage(
+        forecast=forecast,
+        proposal=proposal,
+        action=action,
+    )
     publication_config_source = (
         "environment variable TEN_AI_SIGNAL_PUBLICATION"
         if request.app.state.settings.ai_signal_publication is not None
@@ -338,7 +707,19 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         "failed"
         if "failed" in substantive
         else "partial"
-        if any(value in {"pending", "not_available", "not_evaluated", "blocked", "disabled", "running", "degraded"} for value in substantive)
+        if any(
+            value
+            in {
+                "pending",
+                "not_available",
+                "not_evaluated",
+                "blocked",
+                "disabled",
+                "running",
+                "degraded",
+            }
+            for value in substantive
+        )
         else "complete"
     )
     response = {

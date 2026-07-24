@@ -28,8 +28,9 @@ from datetime import UTC, datetime, timedelta
 import logging
 from typing import Any, Protocol
 
-from sqlalchemy import Column, delete, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import InstrumentedAttribute
 
 from backend.app.storage.models import (
     GapHistoryRecord,
@@ -71,8 +72,8 @@ class _Cleanable(Protocol):
 class _DeleteTarget:
     label: str
     table: type
-    pk_column: Column[Any]
-    ts_column: Column[Any]
+    pk_column: InstrumentedAttribute[Any]
+    ts_column: InstrumentedAttribute[Any]
     guard: Any | None = None  # extra WHERE clause, e.g. a NOT EXISTS subquery
 
 

@@ -86,6 +86,7 @@ from backend.app.final_decision import (
     InMemoryFinalDecisionRepository,
     SqlAlchemyFinalDecisionRepository,
 )
+from backend.app.storage.maintenance import StorageMaintenanceWorker
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -160,7 +161,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         smc_config = configs.load_model("smc", SMCConfig)
         app.state.smc_database_engine = None
-        # A single shared `async_sessionmaker` ? never a pre-created `Session` ? is stored once
+        # A single shared `async_sessionmaker` — never a pre-created `Session` — is stored once
         # and handed to every repository. Each repository opens and closes its own `AsyncSession`
         # per call (see `backend/app/storage/scoped_session.py`); no session is ever held for the
         # process lifetime or shared across concurrent callers. This directly fixes production
@@ -314,13 +315,13 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         await app.state.signal_decision_service.start()
         ai_reasoning_config = configs.load_model("ai_reasoning", AIReasoningConfig)
-        # Kept below ai_reasoning_config.request_timeout_seconds so httpx's own typed timeout
-        # fires first and is converted to OpenRouterRequestError, instead of racing the outer
-        # asyncio.wait_for in AIReasoningService.process() and losing to it on slow responses.
         app.state.llm_client = HttpOpenRouterClient(
             settings.openrouter_api_key,
             settings.openrouter_base_url,
-            timeout_seconds=max(1.0, ai_reasoning_config.request_timeout_seconds - 5.0),
+            timeout_seconds=max(
+                1.0,
+                ai_reasoning_config.request_timeout_seconds - 5.0,
+            ),
         )
         app.state.explainability_service = ExplainabilityService(
             app.state.llm_client,
@@ -393,6 +394,13 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             model=settings.openrouter_model,
             temperature=ai_reasoning_config.temperature,
             max_tokens=ai_reasoning_config.max_tokens,
+            target_input_tokens=ai_reasoning_config.target_input_tokens,
+            warning_input_tokens=ai_reasoning_config.warning_input_tokens,
+            hard_input_tokens=ai_reasoning_config.hard_input_tokens,
+            absolute_max_output_tokens=ai_reasoning_config.absolute_max_output_tokens,
+            maximum_request_cost_usd=ai_reasoning_config.maximum_request_cost_usd,
+            input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
+            output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
         )
         app.state.ai_reasoning_repository = ai_repository
         app.state.ai_reasoning_service = AIReasoningService(
@@ -486,13 +494,21 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             historical_analysis=app.state.integration_service.process_historical_candle,
         )
         app.state.market_data_worker.start()
+        app.state.storage_maintenance_worker = (
+            StorageMaintenanceWorker(app.state.database_session_factory)
+            if app.state.database_session_factory is not None
+            else None
+        )
+        if app.state.storage_maintenance_worker is not None:
+            app.state.storage_maintenance_worker.start()
         if settings.integration_worker_enabled and integration_config.enabled and integration_config.live_pipeline_enabled:
             app.state.integration_worker.start()
         app.state.retention_worker = RetentionWorker(
-            # Never dereferenced when disabled -- RetentionWorker.start() no-ops unless
-            # `enabled`, so a `None` factory here (in-memory/dev mode) is harmless.
             RetentionRepository(app.state.database_session_factory),
-            enabled=settings.retention_worker_enabled and app.state.database_session_factory is not None,
+            enabled=(
+                settings.retention_worker_enabled
+                and app.state.database_session_factory is not None
+            ),
             interval_seconds=settings.retention_interval_seconds,
             batch_size=settings.retention_batch_size,
             analytical_object_retention_days=settings.analytical_object_retention_days,
@@ -500,7 +516,11 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             integration_audit_retention_days=settings.integration_audit_retention_days,
             operational_signal_retention_days=settings.operational_signal_retention_days,
             market_data_history_retention_days=settings.market_data_history_retention_days,
-            cleanable_services=(app.state.ai_scoring_service, app.state.signal_decision_service, app.state.replay_service),
+            cleanable_services=(
+                app.state.ai_scoring_service,
+                app.state.signal_decision_service,
+                app.state.replay_service,
+            ),
         )
         app.state.retention_worker.start()
         enabled_workers = [
@@ -514,6 +534,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                     and integration_config.live_pipeline_enabled,
                 ),
                 ("replay", replay_config.worker.enabled and replay_config.worker.embedded_api_worker),
+                ("storage_maintenance", app.state.storage_maintenance_worker is not None),
                 ("retention", app.state.retention_worker.enabled),
             )
             if enabled
@@ -554,6 +575,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 },
             )
             app.state.pipeline_activity_log.stop()
+            if app.state.storage_maintenance_worker is not None:
+                await app.state.storage_maintenance_worker.stop()
             await app.state.market_data_worker.stop()
             await app.state.integration_worker.stop()
             await app.state.retention_worker.stop()
@@ -565,7 +588,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             await app.state.economic_calendar_service.stop()
             await app.state.market_data_service.close()
             await app.state.pipeline_manager.event_bus.drain()
-            # No per-engine sessions to close ? every repository call already closed its own
+            # No per-engine sessions to close — every repository call already closed its own
             # ephemeral session on return (see `scoped_session`). Only the shared engine (and its
             # connection pool) needs disposing.
             if app.state.smc_database_engine is not None:
@@ -597,7 +620,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
 
     @application.exception_handler(TenError)
     async def handle_ten_error(request: Request, exc: TenError) -> JSONResponse:
-        # This app has no order-execution surface (see the FastAPI description above) ? every
+        # This app has no order-execution surface (see the FastAPI description above) — every
         # route is read-only analysis/observability. A GET request that fails must degrade to a
         # graceful, per-endpoint `status: "error"` body at 200, not an opaque failure, so the
         # dashboard never has to special-case a non-200 response just to render "unavailable".
@@ -610,14 +633,14 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
     async def handle_unhandled_exception(request: Request, exc: Exception) -> Response:
         # Catches everything NOT already handled above or by FastAPI's own HTTPException/
         # RequestValidationError handlers (Starlette dispatches to the most specific registered
-        # type, so those keep their existing behaviour untouched) ? e.g. a raw AttributeError,
+        # type, so those keep their existing behaviour untouched) — e.g. a raw AttributeError,
         # KeyError, or SQLAlchemy driver error bubbling out of a repository/engine call that was
         # never wrapped in a try/except. Root cause this closes: dozens of observability GET
         # endpoints called services/repositories directly with no guard at all, so any of those
         # exception types propagated straight to FastAPI's default 500 handler.
         #
         # A handler registered for the bare `Exception` class is dispatched by Starlette's
-        # outermost `ServerErrorMiddleware`, not the inner `ExceptionMiddleware` ? which always
+        # outermost `ServerErrorMiddleware`, not the inner `ExceptionMiddleware` — which always
         # re-raises after sending the response (so the exception still surfaces in server logs /
         # `TestClient(raise_server_exceptions=True)`), and does not tolerate the handler itself
         # raising. So POST/PUT/DELETE failing closed is expressed as an explicit 500 response

@@ -8,7 +8,7 @@ repository prune from running.
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 import logging
 
 import pytest

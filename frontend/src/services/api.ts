@@ -1,4 +1,4 @@
-import type { ActiveSelection, AIReasoningDashboard, AIScoreSnapshot, ChartOverlays, ChatTurn, DashboardAggregate, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { ActiveSelection, AIReasoningDashboard, AIScoreSnapshot, ChartOverlays, ChatTurn, DashboardAggregate, DashboardSystemStatus, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 import { ApiError } from '../lib/apiError'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
@@ -133,6 +133,8 @@ export const tenApi = {
     }
     return value
   },
+  dashboardSystemStatus: (instrument: string) =>
+    request<DashboardSystemStatus>(`/api/dashboard/system-status?instrument=${encodeURIComponent(instrument)}`),
   // Explainability: every AI-authored answer here is prose over a context TEN itself assembled —
   // the AI never fetches its own data, so a chat answer can never disagree with these same panels.
   explainCurrent: (instrument: string, timeframe: string) => request<ExplainResponse>(`/api/v1/explain/current?${scoped(instrument, timeframe)}`),
