@@ -220,6 +220,16 @@ class TypedUnavailableProvider(ValidProvider):
         )
 
 
+class TimeoutProvider(ValidProvider):
+    """Simulates asyncio.wait_for's own timeout firing before the HTTP client's typed timeout
+    can be caught and converted to OpenRouterRequestError -- the exact race this regression
+    test guards against staying mislabeled as the opaque, non-retryable-looking "llm_unavailable"."""
+
+    async def reason(self, request, *, prompt_version):
+        self.calls += 1
+        raise TimeoutError("simulated asyncio.wait_for timeout")
+
+
 class InvalidProvider(ValidProvider):
     async def reason(self, request, *, prompt_version):
         self.calls += 1
@@ -390,6 +400,22 @@ async def test_llm_unavailability_is_explicit_and_never_fabricates_a_proposal() 
     assert result.forecast.buy_probability is None
     assert provider.calls == 2
     assert len(repository.failures) == 2
+    assert not repository.proposals and not repository.signals
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_is_reported_distinctly_not_as_generic_llm_unavailable() -> None:
+    state, quant = await state_and_quant()
+    repository, provider = InMemoryAIReasoningRepository(), TimeoutProvider()
+    result = await build_service(repository, provider, maximum_retries=0).process(state, quant)
+
+    assert result is not None and result.proposal is None
+    assert result.forecast.status == AIResultStatus.UNAVAILABLE
+    assert result.forecast.failure_state == "ai_reasoning_request_timeout"
+    assert result.forecast.failure_state != "llm_unavailable"
+    failure = next(iter(repository.failures.values()))
+    assert failure.provider_failure is not None
+    assert failure.provider_failure["phase"] == "provider_request_timeout"
     assert not repository.proposals and not repository.signals
 
 

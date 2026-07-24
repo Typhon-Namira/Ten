@@ -282,6 +282,29 @@ class AIReasoningService:
                 )
                 self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
                 await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
+            except TimeoutError as exc:
+                # The outer asyncio.wait_for budget was exhausted before the HTTP client's own
+                # typed timeout could fire and be converted to OpenRouterRequestError. Label this
+                # distinctly from a genuinely unexpected exception so it's diagnosable from the
+                # dashboard/logs without needing to inspect exception_class by hand.
+                failure_state = "ai_reasoning_request_timeout"
+                failure_errors = (type(exc).__name__, str(exc)[:200])
+                provider_failure = {
+                    "reason_code": failure_state,
+                    "phase": "provider_request_timeout",
+                    "request_id": str(request.request_id),
+                    "cycle_id": str(request.cycle_id),
+                    "model": request.model_identifier,
+                    "exception_class": type(exc).__name__,
+                    "configured_timeout_seconds": self.config.request_timeout_seconds,
+                }
+                self._provider_failure_streak += 1
+                backoff = min(
+                    self.config.provider_backoff_initial_seconds * (2 ** (self._provider_failure_streak - 1)),
+                    self.config.provider_backoff_max_seconds,
+                )
+                self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
+                await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
             except Exception as exc:
                 failure_state = "llm_unavailable"
                 failure_errors = (type(exc).__name__, str(exc)[:200])
