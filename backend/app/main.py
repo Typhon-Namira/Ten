@@ -401,6 +401,9 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             maximum_request_cost_usd=ai_reasoning_config.maximum_request_cost_usd,
             input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
             output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
+            setup_family_ids=tuple(
+                item.setup_family_id for item in setup_family_registry.all()
+            ),
         )
         app.state.ai_reasoning_repository = ai_repository
         app.state.ai_reasoning_service = AIReasoningService(

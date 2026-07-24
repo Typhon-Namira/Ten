@@ -58,6 +58,7 @@ class ExistingOpenRouterReasoningProvider:
         maximum_request_cost_usd: float = 0.05,
         input_cost_per_million_usd: float = 1.04,
         output_cost_per_million_usd: float = 2.25,
+        setup_family_ids: tuple[str, ...] = (),
     ) -> None:
         self.client = client
         self.prompts = prompts
@@ -71,6 +72,7 @@ class ExistingOpenRouterReasoningProvider:
         self.maximum_request_cost_usd = maximum_request_cost_usd
         self.input_cost_per_million_usd = input_cost_per_million_usd
         self.output_cost_per_million_usd = output_cost_per_million_usd
+        self.setup_family_ids = setup_family_ids
 
     async def reason(self, request: AIReasoningRequest, *, prompt_version: str) -> AIProviderResponse:
         started = perf_counter()
@@ -212,8 +214,7 @@ class ExistingOpenRouterReasoningProvider:
             "token_usage_available": False,
         }
 
-    @staticmethod
-    def _response_contract() -> dict[str, Any]:
+    def _response_contract(self) -> dict[str, Any]:
         """Request only the decision fields consumed by deterministic normalization."""
 
         return {
@@ -227,17 +228,19 @@ class ExistingOpenRouterReasoningProvider:
                 "proposal": "object only for LONG/SHORT; otherwise null",
             },
             "proposal_when_actionable": {
-                "setup_family": "string",
+                "setup_family": "exactly one allowed_setup_families value",
                 "entry_low": "positive number",
                 "entry_high": "positive number",
                 "stop_loss": "positive number",
                 "take_profit_levels": "array of 1..3 positive numbers",
             },
+            "allowed_setup_families": list(self.setup_family_ids),
             "rules": [
                 "return exactly one JSON object",
                 "do not include chain-of-thought or private reasoning",
                 "WAIT requires proposal=null",
                 "LONG/SHORT requires valid ordered entry, stop, and target geometry",
+                "for LONG/SHORT, copy setup_family exactly from allowed_setup_families",
                 "use only the compact analysis_context",
             ],
         }
