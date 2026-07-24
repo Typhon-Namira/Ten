@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
 import itertools
+import logging
 import math
 
 from .clock import Clock, SystemClock
@@ -28,6 +29,8 @@ from .models import (
     SourceEvidence,
     stable_id,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DeterministicAIScoringEngine:
@@ -276,12 +279,37 @@ class OpenRouterScoringEngine(AIScoringEngine):
     async def score(self, context: ScoringContext) -> SignalScore:
         model = "meta-llama/llama-3.3-70b-instruct"
         prompt_version = "signal_analysis_v1"
-        response = await self.client.complete_json(
-            system_prompt=self.prompts.load(prompt_version),
-            payload=context.model_dump(mode="json"),
-            model=model,
-            temperature=0.1,
-            max_tokens=900,
+        now = datetime.now().astimezone()
+        bucket = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
+        idempotency_key = sha256(context.model_dump_json().encode()).hexdigest()
+        call_context = {
+            "trigger": "legacy_openrouter_scoring_adapter",
+            "instrument": "unknown",
+            "idempotency_key": idempotency_key,
+            "ten_minute_bucket": bucket.isoformat(),
+        }
+        logger.info("legacy_ai_scoring.provider_call.started", extra=call_context)
+        try:
+            response = await self.client.complete_json(
+                system_prompt=self.prompts.load(prompt_version),
+                payload=context.model_dump(mode="json"),
+                model=model,
+                temperature=0.1,
+                max_tokens=900,
+            )
+        except Exception as exc:
+            logger.info(
+                "legacy_ai_scoring.provider_call.completed",
+                extra={
+                    **call_context,
+                    "result": "failed",
+                    "exception_class": type(exc).__name__,
+                },
+            )
+            raise
+        logger.info(
+            "legacy_ai_scoring.provider_call.completed",
+            extra={**call_context, "result": "success"},
         )
         response.setdefault("model", model)
         response.setdefault("prompt_version", prompt_version)

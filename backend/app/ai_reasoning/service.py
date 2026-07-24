@@ -41,6 +41,42 @@ logger = logging.getLogger(__name__)
 _PROVIDER_REACHABLE_FAILURE_STATES = frozenset({"structured_output_invalid"})
 
 
+def ten_minute_bucket(value: datetime) -> datetime:
+    value = value.astimezone(UTC)
+    return value.replace(minute=(value.minute // 10) * 10, second=0, microsecond=0)
+
+
+def reasoning_idempotency_key(
+    instrument: str,
+    bucket: datetime,
+    market_state_version: str,
+) -> str:
+    normalized_instrument = "".join(
+        character
+        for character in instrument.strip().upper()
+        if character.isalnum()
+    )
+    material = "|".join(
+        (
+            normalized_instrument,
+            bucket.astimezone(UTC).isoformat(),
+            market_state_version,
+        )
+    )
+    return sha256(material.encode()).hexdigest()
+
+
+def _temporary_provider_failure(details: Any) -> bool:
+    status = getattr(details, "http_status", None)
+    if isinstance(status, int):
+        return 500 <= status <= 599
+    return (
+        getattr(details, "phase", None) == "http_request"
+        and getattr(details, "reason_code", None)
+        in {"provider_unavailable", "openrouter_provider_unavailable", "openrouter_transport_error"}
+    )
+
+
 def _first_validation_issue_fields(issues: tuple[str, ...]) -> dict[str, Any]:
     fields = {
         "field_path": None,
@@ -124,6 +160,7 @@ class AIReasoningService:
             "shadow_enabled": self.shadow_enabled,
             "proposals_enabled": self.proposals_enabled,
             "monitoring_enabled": self.monitoring_enabled,
+            "trigger": "integration_worker",
         }
         logger.info("ai_reasoning.worker.received", extra=worker_context)
         if not self.enabled:
@@ -137,21 +174,77 @@ class AIReasoningService:
         quant = QuantForecastResult.model_validate(quant.model_dump(mode="python"))
         if state.market_data_boundary > state.knowledge_cutoff:
             raise ValueError("AI reasoning requires a legally closed point-in-time state")
-        if state.state_hash in self._processed_state_hashes:
-            # One primary reasoning call per immutable closed-cycle state. Monitoring and
-            # publication are driven by the persisted first result, never by per-tick polling.
+        bucket = ten_minute_bucket(self.clock())
+        market_state_version = state.schema_version
+        idempotency_key = reasoning_idempotency_key(
+            state.instrument,
+            bucket,
+            market_state_version,
+        )
+        invocation_context = {
+            **worker_context,
+            "idempotency_key": idempotency_key,
+            "ten_minute_bucket": bucket.isoformat(),
+            "market_state_version": market_state_version,
+        }
+        cached = await self.repository.result_for_reasoning_window(idempotency_key)
+        if cached is not None:
+            forecast, proposal = cached
             logger.info(
-                "ai_reasoning.gate.skipped",
-                extra={**worker_context, "skip_reason": "market_state_already_processed"},
+                "ai_reasoning.result.reused",
+                extra={
+                    **invocation_context,
+                    "forecast_id": str(forecast.forecast_id),
+                    "provider_call_made": False,
+                },
             )
-            return None
+            return await self._reuse_persisted_result(
+                state,
+                forecast,
+                proposal,
+            )
         if self._provider_backoff_until is not None and self.clock() < self._provider_backoff_until:
             logger.info(
                 "ai_reasoning.gate.skipped",
                 extra={
-                    **worker_context,
+                    **invocation_context,
                     "skip_reason": "provider_backoff_active",
                     "provider_backoff_until": self._provider_backoff_until.isoformat(),
+                },
+            )
+            return None
+        claimed = await self.repository.claim_reasoning_window(
+            idempotency_key,
+            state.instrument,
+            bucket,
+            market_state_version,
+            self.clock(),
+        )
+        if not claimed:
+            # Another process owns the durable unique claim. It may have completed between the
+            # first read and this insert, so read once more before reporting in-flight.
+            cached = await self.repository.result_for_reasoning_window(idempotency_key)
+            if cached is not None:
+                forecast, proposal = cached
+                logger.info(
+                    "ai_reasoning.result.reused",
+                    extra={
+                        **invocation_context,
+                        "forecast_id": str(forecast.forecast_id),
+                        "provider_call_made": False,
+                    },
+                )
+                return await self._reuse_persisted_result(
+                    state,
+                    forecast,
+                    proposal,
+                )
+            logger.info(
+                "ai_reasoning.gate.skipped",
+                extra={
+                    **invocation_context,
+                    "skip_reason": "ten_minute_window_claimed_by_another_worker",
+                    "provider_call_made": False,
                 },
             )
             return None
@@ -199,15 +292,34 @@ class AIReasoningService:
         failure_state = "unavailable"
         failure_errors: tuple[str, ...] = ()
         provider_failure: dict[str, Any] | None = None
-        # One physical provider request is the hard five-minute-cycle boundary. A failed
-        # attempt becomes a typed terminal result; it is never replayed inside the cycle.
-        for attempt in range(1):
+        # One scheduled invocation owns this ten-minute window. Only a transient transport/5xx
+        # failure may receive one immediate controlled retry; 4xx and validation failures never do.
+        for attempt in range(2):
+            controlled_retry = False
             try:
                 async with self._llm_semaphore:
+                    logger.info(
+                        "ai_reasoning.provider_call.started",
+                        extra={
+                            **invocation_context,
+                            "request_id": str(request.request_id),
+                            "attempt": attempt + 1,
+                        },
+                    )
                     response = await asyncio.wait_for(
                         self.provider.reason(request, prompt_version=request.prompt_version),
                         timeout=self.config.request_timeout_seconds,
                     )
+                logger.info(
+                    "ai_reasoning.provider_call.completed",
+                    extra={
+                        **invocation_context,
+                        "request_id": str(request.request_id),
+                        "attempt": attempt + 1,
+                        "result": "success",
+                        "latency_ms": response.latency_ms,
+                    },
+                )
                 last_raw = response.raw_output
                 self.last_latency_ms = response.latency_ms
                 await self._record_usage(request, state.state_hash, response.token_usage, response.latency_ms, True, None)
@@ -259,6 +371,15 @@ class AIReasoningService:
                 self._provider_backoff_until = None
                 break
             except StructuredAIOutputError as exc:
+                logger.info(
+                    "ai_reasoning.provider_call.completed",
+                    extra={
+                        **invocation_context,
+                        "request_id": str(request.request_id),
+                        "attempt": attempt + 1,
+                        "result": "structured_output_invalid",
+                    },
+                )
                 failure_state = "structured_output_invalid"
                 failure_errors = exc.errors
                 provider_failure = {
@@ -291,6 +412,16 @@ class AIReasoningService:
                     },
                 )
             except OpenRouterRequestError as exc:
+                logger.info(
+                    "ai_reasoning.provider_call.completed",
+                    extra={
+                        **invocation_context,
+                        "request_id": str(request.request_id),
+                        "attempt": attempt + 1,
+                        "result": exc.details.reason_code,
+                        "http_status": exc.details.http_status,
+                    },
+                )
                 provider_failure = asdict(exc.details)
                 failure_state = exc.details.reason_code
                 failure_errors = tuple(
@@ -332,7 +463,17 @@ class AIReasoningService:
                     self._provider_failure_streak = 0
                     self._provider_backoff_until = None
                 await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
+                controlled_retry = attempt == 0 and _temporary_provider_failure(exc.details)
             except TimeoutError as exc:
+                logger.info(
+                    "ai_reasoning.provider_call.completed",
+                    extra={
+                        **invocation_context,
+                        "request_id": str(request.request_id),
+                        "attempt": attempt + 1,
+                        "result": "ai_reasoning_request_timeout",
+                    },
+                )
                 failure_state = "ai_reasoning_request_timeout"
                 failure_errors = (type(exc).__name__, str(exc)[:200])
                 provider_failure = {
@@ -359,7 +500,18 @@ class AIReasoningService:
                     False,
                     failure_state,
                 )
+                controlled_retry = attempt == 0
             except Exception as exc:
+                logger.info(
+                    "ai_reasoning.provider_call.completed",
+                    extra={
+                        **invocation_context,
+                        "request_id": str(request.request_id),
+                        "attempt": attempt + 1,
+                        "result": "llm_unavailable",
+                        "exception_class": type(exc).__name__,
+                    },
+                )
                 failure_state = "llm_unavailable"
                 failure_errors = (type(exc).__name__, str(exc)[:200])
                 provider_failure = {
@@ -387,11 +539,24 @@ class AIReasoningService:
                 failure_state,
                 provider_failure,
             )
+            if controlled_retry:
+                logger.warning(
+                    "ai_reasoning.provider_call.retry_scheduled",
+                    extra={
+                        **invocation_context,
+                        "request_id": str(request.request_id),
+                        "completed_attempt": attempt + 1,
+                        "next_attempt": attempt + 2,
+                        "failure_reason_code": failure_state,
+                    },
+                )
+                continue
+            break
 
         if validated is None:
             self.failed_requests += 1
             self.last_validation_passed = False
-            self.last_retry_count = 0
+            self.last_retry_count = attempt
             self.last_failure_state = failure_state
             unavailable = self._unavailable_forecast(
                 request,
@@ -413,6 +578,13 @@ class AIReasoningService:
                 )
                 raise
             self._processed_state_hashes.add(state.state_hash)
+            await self.repository.complete_reasoning_window(
+                idempotency_key,
+                request.request_id,
+                unavailable.forecast_id,
+                "failed",
+                self.clock(),
+            )
             logger.info(
                 "ai_reasoning.persist.completed",
                 extra={
@@ -508,6 +680,13 @@ class AIReasoningService:
                 )
         await self._append_memory(state, quant, validated.forecast, proposal, signal)
         self._processed_state_hashes.add(state.state_hash)
+        await self.repository.complete_reasoning_window(
+            idempotency_key,
+            request.request_id,
+            validated.forecast.forecast_id,
+            "completed",
+            self.clock(),
+        )
         logger.info(
             "ai_reasoning.persist.completed",
             extra={
@@ -528,6 +707,39 @@ class AIReasoningService:
             },
         )
         return validated
+
+    async def _reuse_persisted_result(
+        self,
+        state: UnifiedMarketState,
+        forecast: AIMarketForecast,
+        proposal: AISignalProposal | None,
+    ) -> ValidatedAIOutput:
+        # Proposal and guardrail/final-decision persistence belong to the winning invocation.
+        # Monitoring may continue from that immutable result without another provider request.
+        if self.monitoring_enabled:
+            active_signals = await self.repository.active_signals(state.instrument)
+            for active in active_signals:
+                await self.lifecycle.monitor(
+                    active,
+                    forecast,
+                    (
+                        proposal
+                        if proposal is not None
+                        and proposal.structural_opportunity_key
+                        == active.structural_opportunity_key
+                        else None
+                    ),
+                    previous_probability=forecast.dominant_scenario_probability,
+                )
+        return ValidatedAIOutput(
+            forecast=forecast,
+            proposal=proposal,
+            validation_issues=(
+                ("persisted_degraded_result",)
+                if not forecast.validation_passed
+                else ()
+            ),
+        )
 
     async def _record_usage(
         self,

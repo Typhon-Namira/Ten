@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 import logging
@@ -26,7 +27,11 @@ from backend.app.ai_reasoning.models import (
 from backend.app.ai_reasoning.provider import AIProviderResponse, ExistingOpenRouterReasoningProvider
 from backend.app.ai_reasoning.repository import InMemoryAIReasoningRepository
 from backend.app.ai_reasoning.request_builder import AIReasoningRequestBuilder
-from backend.app.ai_reasoning.service import AIReasoningService
+from backend.app.ai_reasoning.service import (
+    AIReasoningService,
+    reasoning_idempotency_key,
+    ten_minute_bucket,
+)
 from backend.app.ai_reasoning.setup_families import SetupFamilyRegistry
 from backend.app.ai_reasoning.validation import StructuredAIOutputValidator, structural_opportunity_key
 from backend.app.ai.prompts.loader import PromptLoader
@@ -215,6 +220,50 @@ class TypedUnavailableProvider(ValidProvider):
                 content_type="application/json",
                 body_length=42,
                 elapsed_ms=12.5,
+                exception_class="HTTPStatusError",
+            )
+        )
+
+
+class TemporaryUnavailableProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version):
+        self.calls += 1
+        if self.calls == 1:
+            raise OpenRouterRequestError(
+                OpenRouterFailureDetails(
+                    reason_code="provider_unavailable",
+                    phase="http_request",
+                    endpoint="https://openrouter.ai/api/v1/chat/completions",
+                    model=request.model_identifier,
+                    request_id=str(request.request_id),
+                    cycle_id=str(request.cycle_id),
+                    http_status=503,
+                    exception_class="HTTPStatusError",
+                )
+            )
+        # ValidProvider increments its counter, so reproduce its one successful response while
+        # preserving an exact physical-call count of two.
+        self.calls -= 1
+        return await super().reason(request, prompt_version=prompt_version)
+
+
+class PermanentHttpFailureProvider(ValidProvider):
+    def __init__(self, status: int, reason_code: str) -> None:
+        super().__init__()
+        self.status = status
+        self.reason_code = reason_code
+
+    async def reason(self, request, *, prompt_version):
+        self.calls += 1
+        raise OpenRouterRequestError(
+            OpenRouterFailureDetails(
+                reason_code=self.reason_code,
+                phase="http_request",
+                endpoint="https://openrouter.ai/api/v1/chat/completions",
+                model=request.model_identifier,
+                request_id=str(request.request_id),
+                cycle_id=str(request.cycle_id),
+                http_status=self.status,
                 exception_class="HTTPStatusError",
             )
         )
@@ -699,6 +748,119 @@ async def test_duplicate_opportunity_updates_preserve_managed_signal_identity() 
     assert first and second
     assert len(repository.signals) == 1
     assert next(iter(repository.signals.values())).structural_opportunity_key == first.proposal.structural_opportunity_key
+
+
+def test_reasoning_idempotency_key_uses_instrument_bucket_and_state_version() -> None:
+    first = datetime(2026, 7, 24, 12, 1, tzinfo=UTC)
+    last = datetime(2026, 7, 24, 12, 9, 59, tzinfo=UTC)
+    next_window = datetime(2026, 7, 24, 12, 10, tzinfo=UTC)
+
+    assert ten_minute_bucket(first) == ten_minute_bucket(last)
+    assert reasoning_idempotency_key("xau/usd", ten_minute_bucket(first), "1.0") == (
+        reasoning_idempotency_key("XAUUSD", ten_minute_bucket(last), "1.0")
+    )
+    assert reasoning_idempotency_key("XAU/USD", ten_minute_bucket(first), "1.0") != (
+        reasoning_idempotency_key("XAU/USD", ten_minute_bucket(next_window), "1.0")
+    )
+    assert reasoning_idempotency_key("XAU/USD", ten_minute_bucket(first), "1.0") != (
+        reasoning_idempotency_key("XAU/USD", ten_minute_bucket(first), "2.0")
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_pipeline_invocations_in_window_make_one_provider_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    first_provider = ValidProvider()
+    second_provider = ValidProvider()
+
+    with caplog.at_level(logging.INFO, logger="backend.app.ai_reasoning.service"):
+        first = await build_service(repository, first_provider).process(state, quant)
+        second = await build_service(repository, second_provider).process(state, quant)
+
+    assert first is not None and second is not None
+    assert first.forecast.forecast_id == second.forecast.forecast_id
+    assert first_provider.calls == 1
+    assert second_provider.calls == 0
+    assert len(repository.reasoning_windows) == 1
+    assert len(repository.forecasts) == 1
+    provider_calls = [
+        record
+        for record in caplog.records
+        if record.message == "ai_reasoning.provider_call.started"
+    ]
+    assert len(provider_calls) == 1
+    assert provider_calls[0].trigger == "integration_worker"
+    assert provider_calls[0].instrument == "XAUUSD"
+    assert provider_calls[0].idempotency_key
+    assert provider_calls[0].ten_minute_bucket == ten_minute_bucket(NOW).isoformat()
+    assert any(
+        record.message == "ai_reasoning.result.reused"
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_workers_share_one_durable_window_claim() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    first_provider = ValidProvider()
+    second_provider = ValidProvider()
+    first_service = build_service(repository, first_provider)
+    second_service = build_service(repository, second_provider)
+
+    await asyncio.gather(
+        first_service.process(state, quant),
+        second_service.process(state, quant),
+    )
+    reused = await second_service.process(state, quant)
+
+    assert first_provider.calls + second_provider.calls == 1
+    assert reused is not None
+    assert len(repository.reasoning_windows) == 1
+    assert len(repository.forecasts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "reason_code"),
+    (
+        (401, "authentication_failed"),
+        (402, "payment_blocked"),
+        (403, "authentication_failed"),
+        (429, "rate_limited"),
+    ),
+)
+async def test_permanent_provider_failure_is_never_retried(
+    status: int,
+    reason_code: str,
+) -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    provider = PermanentHttpFailureProvider(status, reason_code)
+
+    result = await build_service(repository, provider).process(state, quant)
+
+    assert result is not None
+    assert result.forecast.provider_http_status == status
+    assert provider.calls == 1
+    assert len(repository.failures) == 1
+
+
+@pytest.mark.asyncio
+async def test_temporary_5xx_gets_only_one_controlled_retry() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    provider = TemporaryUnavailableProvider()
+
+    result = await build_service(repository, provider).process(state, quant)
+
+    assert result is not None
+    assert result.forecast.status == AIResultStatus.AVAILABLE
+    assert provider.calls == 2
+    assert len(repository.failures) == 1
 
 
 @pytest.mark.asyncio

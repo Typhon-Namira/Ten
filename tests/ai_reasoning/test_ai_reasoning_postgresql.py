@@ -14,6 +14,7 @@ tests/engines/market_regime_engine/test_market_regime_postgresql.py: skips unles
 TEN_TEST_DATABASE_URL is configured.
 """
 
+import asyncio
 from datetime import UTC, datetime
 import os
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -155,6 +156,34 @@ async def _save_parent_rows(
             )
         )
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_database_reasoning_window_claim_is_distributed_and_idempotent(_schema) -> None:
+    session_factory = async_sessionmaker(_schema, expire_on_commit=False)
+    first_repository = SqlAlchemyAIReasoningRepository(session_factory)
+    second_repository = SqlAlchemyAIReasoningRepository(session_factory)
+    now = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
+    key = "a" * 64
+
+    first, second = await asyncio.gather(
+        first_repository.claim_reasoning_window(
+            key,
+            "XAUUSD",
+            now,
+            "1.0",
+            now,
+        ),
+        second_repository.claim_reasoning_window(
+            key,
+            "XAUUSD",
+            now,
+            "1.0",
+            now,
+        ),
+    )
+
+    assert sorted((first, second)) == [False, True]
 
 
 @pytest.mark.asyncio

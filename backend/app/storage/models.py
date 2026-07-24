@@ -1090,6 +1090,39 @@ class AIReasoningRequestRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class AIReasoningWindowLockRecord(Base):
+    """Durable distributed claim for one instrument/version/ten-minute provider window."""
+
+    __tablename__ = "ai_reasoning_window_locks"
+    __table_args__ = (
+        Index(
+            "ix_ai_reasoning_window_instrument_bucket",
+            "instrument",
+            "ten_minute_bucket",
+        ),
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    ten_minute_bucket: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    market_state_version: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24))
+    request_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_reasoning_requests.request_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    forecast_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_forecasts.forecast_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AIMarketForecastRecord(Base):
     __tablename__ = "ai_market_forecasts"
 

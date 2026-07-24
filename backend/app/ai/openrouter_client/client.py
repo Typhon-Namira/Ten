@@ -54,6 +54,8 @@ def _reason_code(
         return "maximum_cost_exceeded"
     if "no eligible provider" in error_text or "no provider" in error_text:
         return "no_eligible_provider"
+    if status is not None and 500 <= status <= 599:
+        return "provider_unavailable"
     known = {
         400: "invalid_request",
         401: "authentication_failed",
