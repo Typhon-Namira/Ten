@@ -150,9 +150,9 @@ def test_dashboard_aggregate_returns_typed_reasons_without_expected_404s() -> No
 def test_repeated_dashboard_refreshes_never_invoke_ai_provider() -> None:
     app = create_app()
     provider_call = AsyncMock(side_effect=AssertionError("dashboard must remain read-only"))
-    app.state.ai_reasoning_service.provider.reason = provider_call
 
     with TestClient(app) as client:
+        app.state.ai_reasoning_service.provider.reason = provider_call
         responses = [
             client.get("/api/v1/dashboard/latest", params={"instrument": "XAUUSD"})
             for _ in range(5)

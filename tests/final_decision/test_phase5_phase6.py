@@ -247,8 +247,11 @@ async def test_reasoning_is_deduplicated_by_immutable_market_state_hash() -> Non
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
     service = build_service(repository, provider)
-    assert await service.process(state, quant) is not None
-    assert await service.process(state, quant) is None
+    first = await service.process(state, quant)
+    reused = await service.process(state, quant)
+    assert first is not None
+    assert reused is not None
+    assert reused.forecast.forecast_id == first.forecast.forecast_id
     assert provider.calls == 1
 
 
