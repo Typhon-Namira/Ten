@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -21,6 +22,12 @@ def alembic_config(*, output_buffer: StringIO | None = None) -> Config:
     config = Config(str(ROOT / "alembic.ini"), output_buffer=output_buffer)
     config.set_main_option("script_location", str(ROOT / "migrations"))
     return config
+
+
+def test_runtime_schema_revision_matches_the_actual_alembic_head() -> None:
+    script = ScriptDirectory.from_config(alembic_config())
+
+    assert script.get_current_head() == SCHEMA_HEAD_REVISION
 
 
 def test_initial_migration_renders_every_model_as_postgresql_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
