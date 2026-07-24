@@ -41,7 +41,10 @@ class MarketSession(StrEnum):
 
 class MarketStatusCode(StrEnum):
     OPEN = "OPEN"
+    MAINTENANCE = "MAINTENANCE"
     CLOSED_WEEKEND = "CLOSED_WEEKEND"
+    # Retained for backward-compatible reads of snapshots persisted before the
+    # explicit MAINTENANCE status was introduced.
     CLOSED_DAILY_BREAK = "CLOSED_DAILY_BREAK"
     HOLIDAY_OR_PROVIDER_CLOSED = "HOLIDAY_OR_PROVIDER_CLOSED"
     UNKNOWN = "UNKNOWN"
@@ -51,6 +54,9 @@ class MarketScheduleStatus(BaseModel):
     market_status: MarketStatusCode
     market_open: bool
     active_session: MarketSession | None
+    instrument: str = "XAUUSD"
+    timezone: str = "America/New_York"
+    status_source: str = "deterministic_xauusd_trading_schedule"
     closure_reason: str | None = None
     next_expected_open_at: datetime | None = None
     server_time_utc: datetime

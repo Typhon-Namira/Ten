@@ -104,6 +104,11 @@ async def test_m1_m5_m15_are_synchronized_at_the_same_point_in_time() -> None:
     assert all(not item.stale for item in state.timeframes)
     assert len(state.evidence) == 21
     assert state.evidence_completeness == 1
+    assert state.market_schedule is not None
+    assert state.market_schedule.market_status.value == "OPEN"
+    assert state.market_schedule.market_open is True
+    assert state.market_schedule.timezone == "America/New_York"
+    assert state.market_schedule.status_source == "deterministic_xauusd_trading_schedule"
 
 
 @pytest.mark.asyncio

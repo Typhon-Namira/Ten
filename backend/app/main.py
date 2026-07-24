@@ -352,7 +352,10 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         if app.state.database_session_factory is not None:
             market_state_repository = SqlAlchemyUnifiedMarketStateRepository(app.state.database_session_factory)
         app.state.unified_market_state_repository = market_state_repository
-        app.state.unified_market_state_service = UnifiedMarketStateService(market_state_repository)
+        app.state.unified_market_state_service = UnifiedMarketStateService(
+            market_state_repository,
+            sessions=app.state.market_data_service.sessions,
+        )
         ai_centric_shadow_mode = app.state.engine_registry.context.feature_flags.is_enabled(FeatureFlag.AI_CENTRIC_SHADOW_MODE)
         quant_config = configs.load_model("quant_forecasting", QuantForecastingConfig)
         quant_repository: QuantForecastRepository = InMemoryQuantForecastRepository()
@@ -420,6 +423,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             proposals_enabled=ai_proposals_enabled,
             monitoring_enabled=ai_monitoring_enabled,
             final_decision=app.state.final_decision_service,
+            market_sessions=app.state.market_data_service.sessions,
         )
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,

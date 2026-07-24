@@ -109,7 +109,7 @@ export function FinalDecisionHero({
     <div className="decision-hero__price">
       <span>Current market</span>
       <strong>{formatPrice(intelligence?.current_candle?.close)}</strong>
-      <small>{intelligence?.current_session ? `${humanize(intelligence.current_session)} session` : 'Session unavailable'}</small>
+      <small>{intelligence ? `${humanize(intelligence.market_status)} · ${humanize(intelligence.current_session)} session` : 'Market status unavailable'}</small>
     </div>
     <div className="decision-hero__levels">
       <div><span>Entry zone</span><strong>{action?.final_entry ? `${formatPrice(action.final_entry.low)} – ${formatPrice(action.final_entry.high)}` : 'Unavailable'}</strong></div>

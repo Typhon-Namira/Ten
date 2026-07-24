@@ -175,6 +175,21 @@ class FinalDecisionService:
         await self.repository.save_action(base_action)
         for evaluation in evaluations:
             await self.repository.save_evaluation(evaluation)
+        market_gate = next(item for item in evaluations if item.gate_id == "market_open")
+        logger.info(
+            "market_status.guardrail_evaluated",
+            extra={
+                "evaluated_timestamp": context.evaluated_at.isoformat(),
+                "timezone": context.market_timezone,
+                "instrument": context.instrument,
+                "detected_session": context.session,
+                "market_status_source": context.market_status_source,
+                "final_market_status": context.market_status,
+                "market_open": context.market_open,
+                "guardrail_decision": market_gate.status.value,
+                "guardrail_reason_codes": market_gate.reason_codes,
+            },
+        )
         logger.info(
             "guardrails.completed",
             extra={
@@ -275,7 +290,19 @@ class FinalDecisionService:
             )
             return self._boolean(ok, gate_id, {"knowledge_cutoff": state.knowledge_cutoff.isoformat()})
         if gate_id == "market_open":
-            return self._optional_boolean(context.market_open, "market_closed", "market_status_unavailable")
+            status, reasons, audit = self._optional_boolean(
+                context.market_open,
+                "market_closed",
+                "market_status_unavailable",
+            )
+            return status, reasons, {
+                **audit,
+                "market_status": context.market_status,
+                "market_status_source": context.market_status_source,
+                "market_timezone": context.market_timezone,
+                "session": context.session,
+                "evaluated_at": context.evaluated_at.isoformat(),
+            }
         if gate_id == "quantitative_forecast_available":
             return self._boolean(quant.status == ForecastStatus.AVAILABLE, "quantitative_forecast_unavailable", {"status": quant.status.value})
         if gate_id == "ai_forecast_valid":

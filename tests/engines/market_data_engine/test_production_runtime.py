@@ -17,7 +17,7 @@ from backend.app.engines.market_data_engine.sessions import MarketSessionEngine
         (datetime(2026, 7, 18, 12, 0, tzinfo=UTC), MarketStatusCode.CLOSED_WEEKEND),
         (datetime(2026, 7, 19, 21, 59, tzinfo=UTC), MarketStatusCode.CLOSED_WEEKEND),
         (datetime(2026, 7, 19, 22, 0, tzinfo=UTC), MarketStatusCode.OPEN),
-        (datetime(2026, 7, 20, 21, 30, tzinfo=UTC), MarketStatusCode.CLOSED_DAILY_BREAK),
+        (datetime(2026, 7, 20, 21, 30, tzinfo=UTC), MarketStatusCode.MAINTENANCE),
     ),
 )
 def test_xau_schedule_boundaries(instant: datetime, expected: MarketStatusCode) -> None:
@@ -34,6 +34,23 @@ def test_xau_schedule_next_open_tracks_new_york_dst() -> None:
     winter = engine.status_at(datetime(2026, 12, 5, 12, tzinfo=UTC))
     assert summer.next_expected_open_at == datetime(2026, 7, 19, 22, tzinfo=UTC)
     assert winter.next_expected_open_at == datetime(2026, 12, 6, 23, tzinfo=UTC)
+
+
+def test_xau_schedule_is_independent_of_provider_availability() -> None:
+    status = MarketSessionEngine().status_at(datetime(2026, 7, 23, 14, tzinfo=UTC))
+
+    assert status.market_status == MarketStatusCode.OPEN
+    assert status.market_open is True
+    assert status.status_source == "deterministic_xauusd_trading_schedule"
+    assert status.timezone == "America/New_York"
+
+
+def test_xau_schedule_fails_closed_when_server_timezone_is_unknown() -> None:
+    status = MarketSessionEngine().status_at(datetime(2026, 7, 23, 14))
+
+    assert status.market_status == MarketStatusCode.UNKNOWN
+    assert status.market_open is False
+    assert status.closure_reason == "timezone_unknown"
 
 
 class StubMarketService:

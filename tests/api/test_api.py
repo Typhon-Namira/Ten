@@ -80,7 +80,9 @@ def test_health_and_status_endpoints() -> None:
     assert health.json()["status"] == "healthy"
     assert engines.status_code == 200 and len(engines.json()) == 11
     assert market.status_code == 200 and market.json()["symbol"] == "XAUUSD"
-    assert market.json()["market_status"] in {"OPEN", "CLOSED_WEEKEND", "CLOSED_DAILY_BREAK", "HOLIDAY_OR_PROVIDER_CLOSED", "UNKNOWN"}
+    assert market.json()["market_status"] in {"OPEN", "MAINTENANCE", "CLOSED_WEEKEND", "CLOSED_DAILY_BREAK", "HOLIDAY_OR_PROVIDER_CLOSED", "UNKNOWN"}
+    assert market.json()["market_status_source"] == "deterministic_xauusd_trading_schedule"
+    assert market.json()["market_timezone"] == "America/New_York"
     assert diagnostics.status_code == 200
     payload = diagnostics.json()
     assert payload["replay"]["status"] == "disabled"
@@ -160,6 +162,29 @@ def test_repeated_dashboard_refreshes_never_invoke_ai_provider() -> None:
 
     assert all(response.status_code == 200 for response in responses)
     provider_call.assert_not_awaited()
+
+
+def test_repeated_market_status_reads_are_stable_and_read_only() -> None:
+    app = create_app()
+    evaluated = datetime(2026, 7, 23, 14, tzinfo=UTC)
+
+    with TestClient(app) as client:
+        schedule = app.state.market_data_service.sessions.status_at(evaluated)
+        app.state.market_data_service.sessions.status_at = lambda _: schedule
+        responses = [client.get("/market/status") for _ in range(5)]
+
+    assert all(response.status_code == 200 for response in responses)
+    states = [
+        (
+            response.json()["market_status"],
+            response.json()["is_open"],
+            response.json()["session"],
+            response.json()["closure_reason"],
+        )
+        for response in responses
+    ]
+    assert len(set(states)) == 1
+    assert states[0][0] == "OPEN"
 
 
 def test_dashboard_system_status_is_one_authoritative_thirteen_stage_contract() -> None:

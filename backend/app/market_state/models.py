@@ -12,6 +12,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from backend.app.engines.market_data_engine.models import MarketScheduleStatus
+
 
 REQUIRED_TIMEFRAMES = ("M1", "M5", "M15")
 
@@ -194,6 +196,7 @@ class UnifiedMarketState(ImmutableMarketStateModel):
     knowledge_cutoff: datetime
     mode: str
     status: MarketStateStatus
+    market_schedule: MarketScheduleStatus | None = None
     timeframes: tuple[TimeframeState, ...]
     evidence: tuple[EvidenceItem, ...]
     unavailable_evidence: tuple[UUID, ...] = ()

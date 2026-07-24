@@ -78,6 +78,9 @@ class ExecutionContext(ImmutableDecisionModel):
     analytical_only: bool = True
     broker_execution_available: bool = False
     market_open: bool | None = None
+    market_status: str = "UNKNOWN"
+    market_status_source: str = "unavailable"
+    market_timezone: str = "America/New_York"
     current_price: float | None = Field(default=None, gt=0)
     spread: float | None = Field(default=None, ge=0)
     session: str = "unknown"

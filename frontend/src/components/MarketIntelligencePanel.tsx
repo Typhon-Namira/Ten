@@ -90,6 +90,7 @@ export function MarketIntelligencePanel({ data, liquidityPools = [] }: { data: M
 
       <div className="intel-grid">
         <div className="intel-field"><span>Current symbol</span><b>{data.instrument}</b></div>
+        <div className="intel-field"><span>Market status</span><b>{data.market_status.replaceAll('_', ' ')}</b></div>
         <div className="intel-field"><span>Current session</span><b>{na(data.current_session.replaceAll('_', ' '))}</b></div>
         <div className="intel-field"><span>Current candle</span><b>{candle ? `${number.format(candle.close)} @ ${new Date(candle.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '—'}</b></div>
         <div className="intel-field"><span>Spread</span><b>{data.spread === null ? 'unavailable' : number.format(data.spread)}</b></div>
