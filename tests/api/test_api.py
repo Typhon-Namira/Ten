@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import Settings
+from backend.app.ai_reasoning.request_persistence import PersistedAIReasoningRequest
 from backend.app.api.routes.dashboard import _stage_fingerprint, _system_stage
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
@@ -262,6 +263,75 @@ def test_dashboard_aggregate_queries_every_stage_at_one_market_state_boundary() 
     assert body["cycle"]["market_state_id"] == str(state_id)
     assert body["stages"]["quant_forecast"]["data"]["market_state_id"] == str(state_id)
     assert body["stages"]["ai_reasoning"]["data"]["market_state_id"] == str(state_id)
+
+
+def test_dashboard_compact_request_history_returns_complete_200_contract() -> None:
+    """Regression for the deployed compact JSONB row that was parsed as AIReasoningRequest."""
+    boundary = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+    state_id, cycle_id, request_id, quant_id = uuid4(), uuid4(), uuid4(), uuid4()
+    state = SimpleNamespace(
+        state_id=state_id,
+        cycle_id=cycle_id,
+        status=SimpleNamespace(value="available"),
+        market_data_boundary=boundary,
+        knowledge_cutoff=boundary,
+        evidence=(),
+        model_dump=lambda **_: {
+            "state_id": str(state_id),
+            "cycle_id": str(cycle_id),
+            "status": "available",
+            "market_data_boundary": boundary.isoformat(),
+            "knowledge_cutoff": boundary.isoformat(),
+            "evidence": [],
+        },
+    )
+    request_snapshot = PersistedAIReasoningRequest(
+        request_id=request_id,
+        cycle_id=cycle_id,
+        market_state_id=state_id,
+        quantitative_forecast_id=quant_id,
+        instrument="XAUUSD",
+        analysis_timestamp=boundary,
+        prompt_version="new_market_analysis_v1",
+        model_identifier="meta-llama/llama-3.3-70b-instruct",
+        created_at=boundary,
+        compatibility_status="compatible",
+        payload_format="legacy_compact_context",
+        payload_schema_version="2.0",
+        context_schema_version="2.0",
+    )
+
+    settings = Settings(
+        ai_centric_shadow_mode=True,
+        ai_signal_proposals=True,
+    )
+    with TestClient(create_app(settings_override=settings)) as client:
+        client.app.state.unified_market_state_repository.latest_state = AsyncMock(
+            return_value=state
+        )
+        client.app.state.quant_forecast_repository.result_for_state = AsyncMock(
+            return_value=None
+        )
+        client.app.state.ai_reasoning_repository.forecast_for_state = AsyncMock(
+            return_value=None
+        )
+        client.app.state.ai_reasoning_repository.request_for_state = AsyncMock(
+            return_value=request_snapshot
+        )
+        client.app.state.ai_reasoning_repository.proposal_for_state = AsyncMock(
+            return_value=None
+        )
+        client.app.state.final_decision_repository.action_for_state = AsyncMock(
+            return_value=None
+        )
+        response = client.get("/api/v1/dashboard/latest")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {"stages", "reasoning"} <= set(body)
+    assert body["stages"]["ai_reasoning"]["status"] == "running"
+    assert body["stages"]["ai_reasoning"]["reason"] == "openrouter_request_in_progress"
+    assert body["reasoning"]["runtime"]["operating_profile"] == "shadow"
 
 
 def test_dashboard_reports_terminal_ai_failure_not_pending_end_to_end() -> None:

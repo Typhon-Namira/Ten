@@ -20,7 +20,7 @@ from backend.app.quant_forecasting.models import QuantForecastResult
 
 from .config import AIReasoningConfig
 from .lifecycle import SignalLifecycleService
-from .llm_context import build_llm_analysis_context
+from .llm_context import LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION, build_llm_analysis_context
 from .memory import MarketMemory
 from .models import (
     AIMarketForecast,
@@ -30,7 +30,7 @@ from .models import (
     ManagedSignalState,
     MarketMemoryEntry,
 )
-from .provider import AIReasoningProvider
+from .provider import AI_REASONING_RESPONSE_SCHEMA_VERSION, AIReasoningProvider
 from .repository import AIReasoningRepository
 from .request_builder import AIReasoningRequestBuilder
 from .setup_families import SetupFamilyRegistry
@@ -221,6 +221,8 @@ class AIReasoningService:
                     extra={
                         **worker_context,
                         "request_id": str(request.request_id),
+                        "request_schema_version": LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION,
+                        "response_schema_version": AI_REASONING_RESPONSE_SCHEMA_VERSION,
                         "validation_status": (
                             "degraded" if candidate.degraded_validation else "valid"
                         ),
@@ -244,6 +246,8 @@ class AIReasoningService:
                     "request_id": str(request.request_id),
                     "cycle_id": str(request.cycle_id),
                     "model": request.model_identifier,
+                    "request_schema_version": LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION,
+                    "response_schema_version": AI_REASONING_RESPONSE_SCHEMA_VERSION,
                     "exception_class": type(exc).__name__,
                 }
                 logger.error(

@@ -20,6 +20,8 @@ from .llm_context import build_llm_analysis_context
 from .models import AIReasoningRequest
 
 logger = logging.getLogger(__name__)
+AI_REASONING_RESPONSE_SCHEMA_TYPE = "ten_ai_reasoning_response"
+AI_REASONING_RESPONSE_SCHEMA_VERSION = "1.0"
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,8 @@ class ExistingOpenRouterReasoningProvider:
                 "request_id": str(request.request_id),
                 "cycle_id": str(request.cycle_id),
                 "model": self.model,
+                "request_schema_version": context.schema_version,
+                "response_schema_version": AI_REASONING_RESPONSE_SCHEMA_VERSION,
                 "serialized_request_bytes": metrics.serialized_request_bytes,
                 "estimated_input_tokens": metrics.estimated_input_tokens,
                 "maximum_output_tokens": metrics.maximum_output_tokens,
@@ -213,6 +217,8 @@ class ExistingOpenRouterReasoningProvider:
         """Request only the decision fields consumed by deterministic normalization."""
 
         return {
+            "schema_type": AI_REASONING_RESPONSE_SCHEMA_TYPE,
+            "schema_version": AI_REASONING_RESPONSE_SCHEMA_VERSION,
             "required": {
                 "decision": "LONG | SHORT | WAIT",
                 "confidence": "number 0..1",

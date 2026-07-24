@@ -166,7 +166,10 @@ async def test_http_200_result_is_logged_without_payload(caplog: pytest.LogCaptu
     with caplog.at_level(logging.INFO, logger="backend.app.ai.openrouter_client.client"):
         result = await client.complete_json(
             system_prompt="secret-system-prompt",
-            payload={"private": "payload"},
+            payload={
+                "analysis_context": {"schema_version": "2.0", "private": "payload"},
+                "response_contract": {"schema_version": "1.0"},
+            },
             model="model",
             temperature=0,
             max_tokens=10,
@@ -181,6 +184,10 @@ async def test_http_200_result_is_logged_without_payload(caplog: pytest.LogCaptu
     assert received.http_status == 200
     assert completed.response_content_type == "application/json"
     assert completed.response_body_length > 0
+    assert completed.request_schema_version == "2.0"
+    assert completed.response_schema_version == "1.0"
+    assert received.request_schema_version == "2.0"
+    assert received.response_schema_version == "1.0"
     assert "secret-key" not in caplog.text
     assert "secret-system-prompt" not in caplog.text
     assert "private-value" not in caplog.text

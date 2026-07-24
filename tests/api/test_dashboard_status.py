@@ -139,6 +139,29 @@ def test_persisted_request_without_forecast_reports_running_with_elapsed_time():
     assert result.extra["job_state"] == "running"
 
 
+def test_incompatible_request_history_reports_explicit_failure_not_http_breaking_exception():
+    result = derive_ai_reasoning_stage(
+        forecast=None,
+        request=SimpleNamespace(
+            created_at=NOW - timedelta(seconds=7),
+            compatibility_status="incompatible",
+            compatibility_reason="unsupported_persisted_request_schema_version",
+            payload_format="incompatible",
+            payload_schema_version="99.0",
+        ),
+        ai_health=healthy_ai_health(),
+        now=NOW,
+        cycle_available_at=NOW - timedelta(seconds=7),
+    )
+    assert result.status == "failed"
+    assert result.reason == "ai_request_history_schema_incompatible"
+    assert result.error_code == "unsupported_persisted_request_schema_version"
+    assert result.extra == {
+        "payload_format": "incompatible",
+        "payload_schema_version": "99.0",
+    }
+
+
 def test_genuinely_fresh_cycle_reports_pending_with_job_state_and_elapsed_time():
     """The only case "pending" may legitimately appear — and even then it must carry job state
     and elapsed waiting time, not just a bare label."""

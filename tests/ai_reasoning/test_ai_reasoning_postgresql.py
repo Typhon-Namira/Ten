@@ -19,12 +19,25 @@ import os
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import insert, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from backend.app.ai_reasoning.models import AIMarketForecast, AIReasoningRequest, AIResultStatus
+from backend.app.ai_reasoning.llm_context import build_llm_analysis_context
+from backend.app.ai_reasoning.models import (
+    AIMarketForecast,
+    AIReasoningRequest,
+    AIResultStatus,
+    MarketMemorySummary,
+)
 from backend.app.ai_reasoning.repository import SqlAlchemyAIReasoningRepository
+from backend.app.ai_reasoning.request_persistence import persisted_request_payload
 from backend.app.core.database.base import Base
+from backend.app.storage.models import (
+    AIReasoningRequestRecord,
+    QuantForecastRequestRecord,
+    QuantForecastResultRecord,
+    UnifiedMarketStateRecord,
+)
 
 
 @pytest.fixture
@@ -69,7 +82,8 @@ def _request(request_id, market_state_id, quant_id, cycle_id, now):
     return AIReasoningRequest(
         request_id=request_id, cycle_id=cycle_id, market_state_id=market_state_id, quantitative_forecast_id=quant_id,
         instrument="XAUUSD", analysis_timestamp=now, knowledge_cutoff=now, trigger_timeframe="M1",
-        supported_timeframe_states=(), data_quality_summary={}, quantitative_probabilities={}, expected_movement={}, tp_probabilities={},
+        current_price=2000, supported_timeframe_states=(), data_quality_summary={}, quantitative_probabilities={},
+        expected_movement={}, tp_probabilities={}, market_memory=MarketMemorySummary(entry_count=0),
         prompt_version="new_market_analysis_v1", reasoning_policy_version="ai_reasoning_policy_v1", setup_family_registry_version="1.0.0",
         model_identifier="configured-model", quantitative_model_version="1.0.0", feature_schema_version="1.0", market_state_schema_version="1.0",
         created_at=now,
@@ -89,6 +103,60 @@ def _failed_forecast(forecast_id, request_id, market_state_id, quant_id, cycle_i
     )
 
 
+async def _save_parent_rows(
+    session_factory,
+    *,
+    market_state_id,
+    quant_id,
+    cycle_id,
+    now,
+) -> None:
+    quant_request_id = uuid4()
+    async with session_factory() as session:
+        await session.execute(
+            insert(UnifiedMarketStateRecord).values(
+                state_id=market_state_id,
+                state_hash=f"state-{market_state_id}",
+                instrument="XAUUSD",
+                trigger_timeframe="M1",
+                market_data_boundary=now,
+                knowledge_cutoff=now,
+                status="available",
+                payload={},
+                created_at=now,
+            )
+        )
+        await session.execute(
+            insert(QuantForecastRequestRecord).values(
+                request_id=quant_request_id,
+                market_state_id=market_state_id,
+                cycle_id=cycle_id,
+                instrument="XAUUSD",
+                point_in_time=now,
+                model_name="test",
+                model_version="1.0",
+                mode="shadow",
+                payload={},
+                created_at=now,
+            )
+        )
+        await session.execute(
+            insert(QuantForecastResultRecord).values(
+                result_id=quant_id,
+                request_id=quant_request_id,
+                market_state_id=market_state_id,
+                instrument="XAUUSD",
+                point_in_time=now,
+                status="available",
+                model_name="test",
+                model_version="1.0",
+                payload={},
+                generated_at=now,
+            )
+        )
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_terminal_forecast_persists_and_reads_back_through_real_postgresql(_schema) -> None:
     engine = _schema
@@ -98,8 +166,16 @@ async def test_terminal_forecast_persists_and_reads_back_through_real_postgresql
     market_state_id, quant_id, cycle_id = uuid4(), uuid4(), uuid4()
     request_id = uuid5(NAMESPACE_URL, "ten:test:ai-request")
     forecast_id = uuid5(NAMESPACE_URL, "ten:test:ai-forecast")
+    await _save_parent_rows(
+        session_factory,
+        market_state_id=market_state_id,
+        quant_id=quant_id,
+        cycle_id=cycle_id,
+        now=now,
+    )
 
-    await repository.save_request(_request(request_id, market_state_id, quant_id, cycle_id, now))
+    request = _request(request_id, market_state_id, quant_id, cycle_id, now)
+    await repository.save_request(request)
     persisted = await repository.save_forecast(_failed_forecast(forecast_id, request_id, market_state_id, quant_id, cycle_id, now))
 
     assert persisted.status == AIResultStatus.UNAVAILABLE
@@ -114,3 +190,44 @@ async def test_terminal_forecast_persists_and_reads_back_through_real_postgresql
     reread_request = await repository.request_for_state(market_state_id)
     assert reread_request is not None
     assert reread_request.request_id == request_id
+    assert reread_request.payload_format == "versioned_compact"
+
+    current_payload = persisted_request_payload(
+        request,
+        build_llm_analysis_context(request),
+    )
+    legacy_compact_payload = {
+        key: value
+        for key, value in current_payload.items()
+        if key not in {
+            "payload_type",
+            "payload_schema_version",
+            "context_schema_version",
+        }
+    }
+    legacy_compact_payload["schema_version"] = "2.0"
+    async with session_factory() as session:
+        await session.execute(
+            update(AIReasoningRequestRecord)
+            .where(AIReasoningRequestRecord.request_id == request_id)
+            .values(payload=legacy_compact_payload)
+        )
+        await session.commit()
+    # A fresh repository instance models an application restart against rows written
+    # by the already-deployed compact persistence format.
+    restarted_repository = SqlAlchemyAIReasoningRepository(session_factory)
+    legacy_compact = await restarted_repository.request_for_state(market_state_id)
+    assert legacy_compact is not None
+    assert legacy_compact.payload_format == "legacy_compact_context"
+
+    async with session_factory() as session:
+        await session.execute(
+            update(AIReasoningRequestRecord)
+            .where(AIReasoningRequestRecord.request_id == request_id)
+            .values(payload=request.model_dump(mode="json"))
+        )
+        await session.commit()
+    restarted_repository = SqlAlchemyAIReasoningRepository(session_factory)
+    legacy_full = await restarted_repository.request_for_state(market_state_id)
+    assert legacy_full is not None
+    assert legacy_full.payload_format == "legacy_full_request"
