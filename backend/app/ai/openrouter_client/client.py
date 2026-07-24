@@ -146,12 +146,13 @@ class HttpOpenRouterClient(OpenRouterClient):
         if not self.api_key:
             raise ConfigurationError("TEN_OPENROUTER_API_KEY is required for AI scoring")
         endpoint = f"{self.base_url}/chat/completions"
+        user_content = json.dumps(payload)
         request = {
             "model": model,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
-            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(payload)}],
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}],
         }
         started = perf_counter()
         logger.info(
@@ -162,6 +163,12 @@ class HttpOpenRouterClient(OpenRouterClient):
                 "model": model,
                 "endpoint": endpoint,
                 "failure_phase": None,
+                # Payload size is the prime suspect whenever a request hangs for the full
+                # timeout with zero response (no HTTP status, no bytes) -- these let a log
+                # dump confirm or rule that out without needing to reproduce the request.
+                "system_prompt_chars": len(system_prompt),
+                "user_content_chars": len(user_content),
+                "max_tokens": max_tokens,
             },
         )
         try:
