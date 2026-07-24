@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { tenApi } from '../services/api'
+import { describeApiError, toApiError } from '../lib/apiError'
+import { recordFetchOutcome } from '../lib/diagnosticsFeed'
 import type { AIScoreSnapshot, EngineStatus, MarketStatus, OperationalSignal, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 
 interface DashboardState {
@@ -16,12 +18,18 @@ interface DashboardState {
   refresh: () => Promise<void>
 }
 
-/** Settles a fetch without letting one failing source blank out an already-loaded value. */
-async function settle<T>(promise: Promise<T>, previous: T): Promise<{ value: T; error: string | null }> {
+/** Settles a fetch without letting one failing source blank out an already-loaded value, and
+ * records the outcome into the shared diagnostics feed (lib/diagnosticsFeed) so the always-visible
+ * DiagnosticsBar reflects every data source this hook touches, not just its own consumers. */
+async function settle<T>(source: string, promise: Promise<T>, previous: T): Promise<{ value: T; error: string | null }> {
   try {
-    return { value: await promise, error: null }
+    const value = await promise
+    recordFetchOutcome(source, { ok: true })
+    return { value, error: null }
   } catch (caught) {
-    return { value: previous, error: caught instanceof Error ? caught.message : 'request failed' }
+    const error = toApiError(caught)
+    recordFetchOutcome(source, { ok: false, error })
+    return { value: previous, error: describeApiError(error) }
   }
 }
 
@@ -46,14 +54,14 @@ export function useDashboard(instrument: string, timeframe: string): DashboardSt
     setLoading(true)
     const current = latest.current
     const [nextSignals, nextEngines, nextMarket, nextAIScore, nextDecision, nextOperational, nextReplays, nextDiagnostics] = await Promise.all([
-      settle(tenApi.signals(), current.signals),
-      settle(tenApi.engines(), current.engines),
-      settle(tenApi.market(), current.market),
-      settle(tenApi.latestAIScore(instrument, timeframe), current.aiScore),
-      settle(tenApi.latestSignalDecision(instrument, timeframe), current.signalDecision),
-      settle(tenApi.latestOperationalSignal(instrument, timeframe), current.operationalSignal),
-      settle(tenApi.replays(), current.replays),
-      settle(tenApi.diagnostics(), current.diagnostics),
+      settle('signals', tenApi.signals(), current.signals),
+      settle('engines', tenApi.engines(), current.engines),
+      settle('market-status', tenApi.market(), current.market),
+      settle('ai-score', tenApi.latestAIScore(instrument, timeframe), current.aiScore),
+      settle('signal-decision', tenApi.latestSignalDecision(instrument, timeframe), current.signalDecision),
+      settle('operational-signal', tenApi.latestOperationalSignal(instrument, timeframe), current.operationalSignal),
+      settle('replays', tenApi.replays(), current.replays),
+      settle('diagnostics', tenApi.diagnostics(), current.diagnostics),
     ])
     setSignals(nextSignals.value)
     setEngines(nextEngines.value)

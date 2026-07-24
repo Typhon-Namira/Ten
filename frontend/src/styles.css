@@ -276,6 +276,28 @@ th,td { padding: 10px; border-bottom: 1px solid var(--line); font-size: 11px; te
   .probability__legend { justify-content: space-between; gap: 5px; }
 }
 
+/* .intel__reason is used by MarketIntelligencePanel.tsx and DiagnosticsPage.tsx for an inline,
+   non-error explanation (e.g. "still bootstrapping") — amber, not red, since it is not a failure. */
+.intel__reason { margin: 12px 0 0; padding: 10px 13px; border: 1px solid #ecd9ad; border-radius: 10px; background: var(--amber-soft); color: var(--amber); font-size: 11px; line-height: 1.5; }
+
+.panel-render-error { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 15px; padding: 13px 15px; border: 1px solid #efcecb; border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: 11px; }
+.panel-render-error strong { display: block; margin-bottom: 3px; font-size: 12px; }
+.panel-render-error p { margin: 0; font-size: 10px; opacity: .85; }
+
+.diagnostics-bar { position: sticky; bottom: 0; z-index: 20; border-top: 1px solid var(--line); background: var(--surface); font-size: 11px; }
+.diagnostics-bar__summary { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px clamp(20px,4vw,64px); border: none; background: none; color: var(--muted); font: inherit; cursor: pointer; text-align: left; }
+.diagnostics-bar__summary:hover { color: var(--ink); }
+.diagnostics-bar__summary span { flex: none; }
+.diagnostics-bar__hint { flex: 1 1 auto; color: var(--amber); font-size: 10px; }
+.diagnostics-bar__chevron--flipped { transform: rotate(180deg); }
+.diagnostics-bar__detail { display: grid; grid-template-columns: repeat(auto-fit,minmax(320px,1fr)); gap: 18px; padding: 4px clamp(20px,4vw,64px) 16px; border-top: 1px solid var(--line); }
+.diagnostics-bar__section h4 { margin: 8px 0 6px; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.diagnostics-bar__section table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.diagnostics-bar__section th { padding: 4px 8px 4px 0; color: var(--faint); font-weight: 600; text-align: left; }
+.diagnostics-bar__section td { padding: 4px 8px 4px 0; color: var(--muted); border-top: 1px solid #edf0ee; }
+.diagnostics-bar__note { margin: 8px 0 0; color: var(--faint); font-size: 10px; }
+.diagnostics-bar__empty { margin: 4px 0; color: var(--faint); font-size: 10px; }
+
 @media (prefers-reduced-motion: reduce) {
   *,*::before,*::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }

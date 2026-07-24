@@ -10,6 +10,7 @@ import {
   latestFinalAction,
   pipelineSteps,
 } from '../../lib/aiDashboard'
+import type { Tone } from '../../lib/aiDashboard'
 import { FreshnessIndicator, PipelineIcon, StatusBadge } from './Primitives'
 
 function formatPrice(value: number | null | undefined): string {
@@ -38,7 +39,21 @@ export function DashboardHeader({
   onRefresh: () => Promise<void>
 }) {
   const profile = reasoning?.runtime.operating_profile ?? 'safe_test'
-  const aiOnline = reasoning?.health.provider_available
+  // `provider_available` only means the OpenRouter client is configured and reachable at the
+  // transport level — it stays `true` even while every request is failing authentication (see
+  // `health.failure_state`/`health.failed_requests`). A badge driven by `provider_available` alone
+  // showed "AI online" in green at the same time the decision pipeline below showed "AI Reasoning:
+  // FAILED" in red for the identical cause — this reconciles the two instead of contradicting.
+  const health = reasoning?.health
+  const aiState: 'online' | 'degraded' | 'offline' | 'not_called' = !health
+    ? 'not_called'
+    : !health.provider_available
+      ? 'offline'
+      : health.failed_requests > 0 || health.failure_state != null
+        ? 'degraded'
+        : 'online'
+  const aiTone: Tone = aiState === 'online' ? 'positive' : aiState === 'degraded' ? 'warning' : aiState === 'offline' ? 'negative' : 'neutral'
+  const aiLabel: string = aiState === 'not_called' ? 'AI not called' : aiState === 'degraded' ? `AI degraded — ${humanize(health?.failure_state ?? 'failing')}` : `AI ${aiState}`
   const healthy = reasoning?.health.guardrails.status === 'healthy' && !stale
   return <header className="ai-statusbar">
     <div className="ai-statusbar__identity">
@@ -47,9 +62,7 @@ export function DashboardHeader({
     </div>
     <div className="ai-statusbar__badges" aria-label="System status">
       <StatusBadge tone="neutral">{humanize(profile)}</StatusBadge>
-      <StatusBadge tone={aiOnline === true ? 'positive' : aiOnline === false ? 'negative' : 'neutral'} pulse={aiOnline === true}>
-        AI {aiOnline === true ? 'online' : aiOnline === false ? 'offline' : 'not called'}
-      </StatusBadge>
+      <StatusBadge tone={aiTone} pulse={aiState === 'online'}>{aiLabel}</StatusBadge>
       <FreshnessIndicator stale={stale} timestamp={intelligence?.latest_candle_timestamp ?? null} />
       <StatusBadge tone={healthy ? 'positive' : 'warning'}><ShieldCheck size={12} />System {healthy ? 'healthy' : 'limited'}</StatusBadge>
       <span className="ai-updated">Updated {lastUpdated ? lastUpdated.toLocaleTimeString() : '—'}</span>

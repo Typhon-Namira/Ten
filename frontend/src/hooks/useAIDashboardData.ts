@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { tenApi } from '../services/api'
+import { describeApiError, toApiError } from '../lib/apiError'
+import { recordFetchOutcome } from '../lib/diagnosticsFeed'
 import type { AIReasoningDashboard, DashboardAggregate, MarketIntelligence, QuantCalibrationReport, QuantForecastResult } from '../types'
 
 export interface AIDashboardData {
@@ -10,6 +12,9 @@ export interface AIDashboardData {
   aggregate: DashboardAggregate | null
   loading: boolean
   stale: boolean
+  /** Human-readable error per source — a real, classified failure (see lib/apiError), never a
+   * stand-in for "backend reported a legitimate not-yet-available stage" (those live in
+   * `aggregate.stages.*.reason` and are rendered separately, see AIDashboard.tsx). */
   errors: Record<string, string>
   lastUpdated: Date | null
   refresh: () => Promise<void>
@@ -18,10 +23,6 @@ export interface AIDashboardData {
 const POLL_MS = 15_000
 const HIDDEN_POLL_MS = 60_000
 const MAX_BACKOFF_MS = 120_000
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : 'Backend unavailable'
-}
 
 export function useAIDashboardData(instrument: string, timeframe: string): AIDashboardData {
   const [intelligence, setIntelligence] = useState<MarketIntelligence | null>(null)
@@ -42,8 +43,20 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
         tenApi.dashboardLatest(instrument),
       ] as const)
       const nextErrors: Record<string, string> = {}
-      if (results[0].status === 'rejected') nextErrors.market = message(results[0].reason)
-      if (results[1].status === 'rejected') nextErrors.dashboard = message(results[1].reason)
+      if (results[0].status === 'rejected') {
+        const error = toApiError(results[0].reason)
+        nextErrors.market = describeApiError(error)
+        recordFetchOutcome('market-intelligence', { ok: false, error })
+      } else {
+        recordFetchOutcome('market-intelligence', { ok: true })
+      }
+      if (results[1].status === 'rejected') {
+        const error = toApiError(results[1].reason)
+        nextErrors.dashboard = describeApiError(error)
+        recordFetchOutcome('dashboard', { ok: false, error })
+      } else {
+        recordFetchOutcome('dashboard', { ok: true })
+      }
       if (results[0].status === 'fulfilled') setIntelligence(results[0].value)
       if (results[1].status === 'fulfilled') {
         const value = results[1].value

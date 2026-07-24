@@ -1,33 +1,65 @@
 import type { ActiveSelection, AIReasoningDashboard, AIScoreSnapshot, ChartOverlays, ChatTurn, DashboardAggregate, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import { ApiError } from '../lib/apiError'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
 
-async function request<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`)
-  if (!response.ok) {
-    let detail = response.statusText || 'request_failed'
-    try {
-      const body = await response.json() as { detail?: string; reason?: string }
-      detail = body.reason ?? body.detail ?? detail
-    } catch {
-      // The status code and correlation-aware backend logs remain authoritative.
+// `/api/v1/dashboard/latest` aggregates every analytical engine's evidence into one response and
+// has been observed in the multi-megabyte range on a live deployment — generous but bounded, so a
+// genuinely hung backend still surfaces as a distinguishable timeout instead of an indefinite spinner.
+const DEFAULT_TIMEOUT_MS = 20_000
+const LARGE_PAYLOAD_TIMEOUT_MS = 45_000
+
+async function timedFetch(path: string, init: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(`${API_BASE_URL}${path}`, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError('timeout', `Request to ${path} did not complete within ${timeoutMs / 1000}s`)
     }
-    throw new Error(`TEN API request failed (${response.status}): ${detail}`)
+    throw new ApiError('network', error instanceof Error ? error.message : 'Network request failed')
+  } finally {
+    window.clearTimeout(timer)
   }
-  return response.json() as Promise<T>
+}
+
+async function errorDetail(response: Response): Promise<string> {
+  let detail = response.statusText || 'request_failed'
+  try {
+    const body = await response.json() as { detail?: string; reason?: string }
+    detail = body.reason ?? body.detail ?? detail
+  } catch {
+    // The status code and correlation-aware backend logs remain authoritative.
+  }
+  return detail
+}
+
+async function parseJson<T>(response: Response, path: string): Promise<T> {
+  try {
+    return (await response.json()) as T
+  } catch (error) {
+    throw new ApiError('parse', `${path} returned a body that could not be parsed as JSON: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function request<T>(path: string, timeoutMs?: number): Promise<T> {
+  const response = await timedFetch(path, {}, timeoutMs)
+  if (!response.ok) throw new ApiError('http', await errorDetail(response), response.status)
+  return parseJson<T>(response, path)
 }
 
 async function requestOptional<T>(path: string): Promise<T | null> {
-  const response = await fetch(`${API_BASE_URL}${path}`)
+  const response = await timedFetch(path)
   if (response.status === 404) return null
-  if (!response.ok) throw new Error(`TEN API request failed (${response.status})`)
-  return response.json() as Promise<T>
+  if (!response.ok) throw new ApiError('http', await errorDetail(response), response.status)
+  return parseJson<T>(response, path)
 }
 
 async function requestJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-  if (!response.ok) throw new Error(`TEN API request failed (${response.status})`)
-  return response.json() as Promise<T>
+  const response = await timedFetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, LARGE_PAYLOAD_TIMEOUT_MS)
+  if (!response.ok) throw new ApiError('http', await errorDetail(response), response.status)
+  return parseJson<T>(response, path)
 }
 
 function isDashboardAggregate(value: unknown): value is DashboardAggregate {
@@ -58,7 +90,7 @@ function scoped(instrument: string, timeframe: string): string {
  * blank out the others. */
 export async function fetchSafe<T>(path: string): Promise<T | null> {
   try {
-    const response = await fetch(`${API_BASE_URL}${path}`)
+    const response = await timedFetch(path)
     if (!response.ok) return null
     return (await response.json()) as T
   } catch {
@@ -91,9 +123,13 @@ export const tenApi = {
   quantForecastOutcomes: (resultId: string) => request<QuantForecastOutcome[]>(`/api/v1/quant-forecasts/${encodeURIComponent(resultId)}/outcomes`),
   latestAIReasoning: (instrument: string) => request<AIReasoningDashboard>(`/api/v1/ai-reasoning/latest?instrument=${encodeURIComponent(instrument)}`),
   dashboardLatest: async (instrument: string) => {
-    const value = await request<unknown>(`/api/v1/dashboard/latest?instrument=${encodeURIComponent(instrument)}`)
+    const value = await request<unknown>(`/api/v1/dashboard/latest?instrument=${encodeURIComponent(instrument)}`, LARGE_PAYLOAD_TIMEOUT_MS)
     if (!isDashboardAggregate(value)) {
-      throw new Error('TEN dashboard response schema mismatch')
+      // A genuinely malformed/renamed response shape — NOT the same thing as `status: "failed"`
+      // or any individual `stages.*.status === "failed"` inside an otherwise well-shaped payload;
+      // those are legitimate backend-reported outcomes and pass this check fine (see
+      // isDashboardAggregate above, which only checks presence/type, never semantic status values).
+      throw new ApiError('parse', 'TEN dashboard response schema mismatch — missing required stages/reasoning fields; the backend contract may have changed')
     }
     return value
   },
