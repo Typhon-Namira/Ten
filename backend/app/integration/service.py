@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import logging
 import os
 from time import perf_counter
@@ -20,6 +20,21 @@ from .repository import IntegrationRepository
 from .stage_tracker import PipelineStageTracker
 
 logger = logging.getLogger(__name__)
+
+
+def _is_storage_exhausted(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        name = type(current).__name__.lower()
+        message = str(current).lower()
+        if (
+            "diskfull" in name
+            or "no space left on device" in message
+            or "could not extend file" in message
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _stage_status(result: object) -> str:
@@ -62,6 +77,7 @@ class FullSystemIntegrationService:
         self.last_cycle_failed_at: datetime | None = None
         self.last_decision_persisted_at: datetime | None = None
         self.last_signal_published_at: datetime | None = None
+        self.storage_exhausted_until: datetime | None = None
 
     async def start(self) -> None:
         if self._unsubscribe is None:
@@ -85,17 +101,55 @@ class FullSystemIntegrationService:
             await self.process_outbox_once()
 
     async def process_outbox_once(self) -> int:
+        now = self.clock()
+        if self.storage_exhausted_until is not None and now < self.storage_exhausted_until:
+            logger.warning(
+                "integration.storage_circuit_open",
+                extra={
+                    "reason": "storage_exhausted",
+                    "retry_at": self.storage_exhausted_until.isoformat(),
+                },
+            )
+            return 0
         items = await self.repository.pending(self.clock(), self.config.limits.outbox_batch_size)
         self.last_batch_failures = 0
+        attempted = 0
         for item in items:
+            attempted += 1
             try:
                 await self.process(item.envelope)
                 await self.repository.complete(item.outbox_id, self.clock())
             except Exception as exc:
                 self.failures += 1
                 self.last_batch_failures += 1
-                await self.repository.fail(item.outbox_id, type(exc).__name__)
-        return len(items)
+                storage_exhausted = _is_storage_exhausted(exc)
+                if storage_exhausted:
+                    self.storage_exhausted_until = self.clock() + timedelta(minutes=5)
+                    logger.critical(
+                        "integration.storage_exhausted",
+                        extra={
+                            "reason": "storage_exhausted",
+                            "circuit_open_seconds": 300,
+                            "exception_class": type(exc).__name__,
+                        },
+                    )
+                try:
+                    await self.repository.fail(item.outbox_id, type(exc).__name__)
+                except Exception as failure_record_error:
+                    if not storage_exhausted:
+                        raise
+                    logger.warning(
+                        "integration.storage_failure_record.skipped",
+                        extra={
+                            "reason": "storage_exhausted",
+                            "exception_class": type(failure_record_error).__name__,
+                        },
+                    )
+                if storage_exhausted:
+                    break
+            else:
+                self.storage_exhausted_until = None
+        return attempted
 
     async def process(self, envelope: CanonicalEventEnvelope) -> OperationalSignal | None:
         if envelope.mode != IntegrationMode.LIVE:

@@ -85,6 +85,7 @@ from backend.app.final_decision import (
     InMemoryFinalDecisionRepository,
     SqlAlchemyFinalDecisionRepository,
 )
+from backend.app.storage.maintenance import StorageMaintenanceWorker
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -478,6 +479,13 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             historical_analysis=app.state.integration_service.process_historical_candle,
         )
         app.state.market_data_worker.start()
+        app.state.storage_maintenance_worker = (
+            StorageMaintenanceWorker(app.state.database_session_factory)
+            if app.state.database_session_factory is not None
+            else None
+        )
+        if app.state.storage_maintenance_worker is not None:
+            app.state.storage_maintenance_worker.start()
         if settings.integration_worker_enabled and integration_config.enabled and integration_config.live_pipeline_enabled:
             app.state.integration_worker.start()
         enabled_workers = [
@@ -530,6 +538,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 },
             )
             app.state.pipeline_activity_log.stop()
+            if app.state.storage_maintenance_worker is not None:
+                await app.state.storage_maintenance_worker.stop()
             await app.state.market_data_worker.stop()
             await app.state.integration_worker.stop()
             await app.state.integration_service.stop()

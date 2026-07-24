@@ -1,4 +1,6 @@
 from datetime import UTC, datetime, timedelta
+import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,6 +13,11 @@ from backend.app.market_state import (
     InMemoryUnifiedMarketStateRepository,
     UnifiedMarketStateService,
     expected_closed_boundary,
+)
+from backend.app.market_state.repository import (
+    _compact_evidence_payload,
+    _compact_state_payload,
+    _reconstruct_compact_state,
 )
 
 
@@ -149,6 +156,92 @@ async def test_complete_nested_engine_output_is_preserved_without_scalar_collaps
         item = next(value for value in state.evidence if value.source_engine == engine and value.source_timeframe == "M15")
         assert item.raw_value["structure"]["internal"]["direction"] == "bullish"
         assert len(item.raw_value["objects"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_compact_persistence_owns_large_payload_once_without_losing_runtime_evidence() -> None:
+    repository = InMemoryUnifiedMarketStateRepository()
+    service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
+    await capture(service, Timeframe.M1)
+    await capture(service, Timeframe.M5)
+    state = await capture(service, Timeframe.M15)
+    assert state is not None
+
+    full_state = json.dumps(state.model_dump(mode="json"))
+    compact_state = json.dumps(_compact_state_payload(state))
+    compact_evidence = json.dumps(
+        [_compact_evidence_payload(item) for item in state.evidence]
+    )
+
+    assert '"raw_value"' not in compact_state
+    assert '"evidence"' not in compact_state
+    assert '"raw_value"' not in compact_evidence
+    assert len(compact_state) + len(compact_evidence) < len(full_state) * 0.50
+    # Compaction is persistence-only. The in-flight analytical state is byte-for-byte untouched.
+    smc = next(item for item in state.evidence if item.source_engine == "smc")
+    assert smc.raw_value["objects"][0]["kind"] == "order_block"
+
+
+@pytest.mark.asyncio
+async def test_legacy_and_compact_rows_reconstruct_semantically_identical_state() -> None:
+    repository = InMemoryUnifiedMarketStateRepository()
+    service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
+    await capture(service, Timeframe.M1)
+    await capture(service, Timeframe.M5)
+    state = await capture(service, Timeframe.M15)
+    assert state is not None
+
+    legacy = type(state).model_validate(state.model_dump(mode="json"))
+    record = SimpleNamespace(
+        payload=_compact_state_payload(state),
+        market_data_boundary=state.market_data_boundary,
+    )
+    timeframe_rows = [
+        SimpleNamespace(
+            frame_id=item.frame_id,
+            timeframe=item.timeframe,
+            source_candle_close_at=item.source_candle_close_at,
+            expected_candle_close_at=item.expected_candle_close_at,
+            stale=item.stale,
+        )
+        for item in state.timeframes
+    ]
+    evidence_rows = [
+        (
+            SimpleNamespace(ordinal=ordinal),
+            SimpleNamespace(
+                evidence_id=item.evidence_id,
+                source_frame_id=item.source_frame_id,
+                source_engine=item.source_engine,
+                payload=_compact_evidence_payload(item),
+            ),
+        )
+        for ordinal, item in enumerate(state.evidence)
+    ]
+    compact = _reconstruct_compact_state(
+        record,
+        timeframe_rows,
+        dict(repository._frames),
+        evidence_rows,
+    )
+
+    assert compact.model_dump(mode="json") == legacy.model_dump(mode="json")
+    assert compact.state_hash == legacy.state_hash
+
+
+@pytest.mark.asyncio
+async def test_repeated_unchanged_cycles_do_not_grow_frames_or_state_history() -> None:
+    repository = InMemoryUnifiedMarketStateRepository()
+    service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
+    for _ in range(25):
+        await capture(service, Timeframe.M1)
+        await capture(service, Timeframe.M5)
+        await capture(service, Timeframe.M15)
+
+    assert len(repository._frames) == 3
+    assert len(repository._states) == 1
+    state = next(iter(repository._states.values()))
+    assert len(state.evidence) == 21
 
 
 @pytest.mark.asyncio

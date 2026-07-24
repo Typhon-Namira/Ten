@@ -798,6 +798,66 @@ export interface DashboardAggregate {
   }
 }
 
+export type SystemStageStatus =
+  | 'healthy'
+  | 'running'
+  | 'degraded'
+  | 'failed'
+  | 'disabled'
+  | 'blocked'
+  | 'stale'
+  | 'no_data'
+
+export interface SystemStageStatusItem {
+  id: string
+  label: string
+  status: SystemStageStatus
+  reason: string
+  timestamp: string | null
+  record_id: string | null
+  details: Record<string, unknown>
+}
+
+export interface DashboardSystemStatus {
+  status: 'healthy' | 'running' | 'degraded' | 'failed'
+  instrument: string
+  generated_at: string
+  cycle_id: string | null
+  stages: SystemStageStatusItem[]
+  current_decision: FinalSystemAction | null
+  storage: {
+    status: SystemStageStatus
+    reason: string
+    database_bytes: number | null
+    growth_bytes_per_hour: number | null
+    projected_gb_per_day: number | null
+    circuit_retry_at: string | null
+    retention: {
+      status: SystemStageStatus
+      policies: Array<{
+        relation_name: string
+        retention_days: number
+        cleanup_batch_size: number
+        protected: boolean
+      }>
+    }
+    largest_relations: Array<{
+      relname: string
+      total_bytes: number
+      table_bytes: number
+      index_bytes: number
+      n_live_tup: number
+      n_dead_tup: number
+    }>
+  }
+  failure_history: Array<{
+    stage: string
+    status: SystemStageStatus
+    reason: string
+    timestamp: string | null
+  }>
+}
+
 export interface FinalSystemAction {
   final_action_id: string
   action: string

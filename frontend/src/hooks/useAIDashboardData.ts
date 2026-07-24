@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { tenApi } from '../services/api'
-import type { AIReasoningDashboard, DashboardAggregate, MarketIntelligence, QuantCalibrationReport, QuantForecastResult } from '../types'
+import type { AIReasoningDashboard, DashboardAggregate, DashboardSystemStatus, MarketIntelligence, QuantCalibrationReport, QuantForecastResult } from '../types'
 
 export interface AIDashboardData {
   intelligence: MarketIntelligence | null
@@ -8,6 +8,7 @@ export interface AIDashboardData {
   calibration: QuantCalibrationReport | null
   reasoning: AIReasoningDashboard | null
   aggregate: DashboardAggregate | null
+  systemStatus: DashboardSystemStatus | null
   loading: boolean
   stale: boolean
   errors: Record<string, string>
@@ -29,6 +30,7 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
   const [calibration, setCalibration] = useState<QuantCalibrationReport | null>(null)
   const [reasoning, setReasoning] = useState<AIReasoningDashboard | null>(null)
   const [aggregate, setAggregate] = useState<DashboardAggregate | null>(null)
+  const [systemStatus, setSystemStatus] = useState<DashboardSystemStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
@@ -40,10 +42,12 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
       const results = await Promise.allSettled([
         tenApi.marketIntelligence(instrument, timeframe),
         tenApi.dashboardLatest(instrument),
+        tenApi.dashboardSystemStatus(instrument),
       ] as const)
       const nextErrors: Record<string, string> = {}
       if (results[0].status === 'rejected') nextErrors.market = message(results[0].reason)
       if (results[1].status === 'rejected') nextErrors.dashboard = message(results[1].reason)
+      if (results[2].status === 'rejected') nextErrors.system = message(results[2].reason)
       if (results[0].status === 'fulfilled') setIntelligence(results[0].value)
       if (results[1].status === 'fulfilled') {
         const value = results[1].value
@@ -52,6 +56,7 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
         setCalibration(value.calibration.data)
         setReasoning(value.reasoning)
       }
+      if (results[2].status === 'fulfilled') setSystemStatus(results[2].value)
       failureCount.current = Object.keys(nextErrors).length ? failureCount.current + 1 : 0
       setErrors(nextErrors)
       setLastUpdated(new Date())
@@ -86,5 +91,5 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
     intelligence?.diagnostics.some(item => item.freshness === 'stale')
     || intelligence?.latest_candle_timestamp == null,
   )
-  return { intelligence, quant, calibration, reasoning, aggregate, loading, stale, errors, lastUpdated, refresh }
+  return { intelligence, quant, calibration, reasoning, aggregate, systemStatus, loading, stale, errors, lastUpdated, refresh }
 }

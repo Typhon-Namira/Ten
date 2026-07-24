@@ -6,6 +6,7 @@ import { ActiveSignalMonitor, GuardrailSummary, OperationalHealth, ValidationSum
 import { DashboardHeader, DecisionPipeline, FinalDecisionHero } from './DecisionOverview'
 import { AIReasoningSummary, MarketStateSummary, QuantForecastSummary } from './IntelligenceCards'
 import { EmptyState, ErrorState, LoadingSkeleton, Metric, SectionHeader, StatusBadge } from './Primitives'
+import { SystemStatusPanel } from './SystemStatusPanel'
 
 export type DashboardView = 'overview' | 'signals' | 'performance' | 'calibration' | 'system'
 
@@ -79,6 +80,7 @@ export function AIDashboard({ view = 'overview' }: { view?: DashboardView }) {
         <ActiveSignalMonitor data={data.reasoning} market={data.intelligence} unavailableReason={data.aggregate?.stages.monitoring.reason} />
         <ValidationSummary data={data.reasoning} unavailableReason={data.aggregate?.readiness.reason} />
         <OperationalHealth data={data.reasoning} stale={data.stale} />
+        <SystemStatusPanel data={data.systemStatus} />
       </>}
       {view === 'signals' && <>
         <FinalDecisionHero intelligence={data.intelligence} reasoning={data.reasoning} unavailableReason={data.aggregate?.stages.final_action.reason} publicationReason={data.aggregate?.stages.publication.reason} />
@@ -94,6 +96,7 @@ export function AIDashboard({ view = 'overview' }: { view?: DashboardView }) {
         <QuantForecastSummary forecast={data.quant} calibration={data.calibration} unavailableReason={data.aggregate?.stages.quant_forecast.reason} />
       </>}
       {view === 'system' && <>
+        <SystemStatusPanel data={data.systemStatus} />
         <ReadinessDetail data={data} />
         <OperationalHealth data={data.reasoning} stale={data.stale} />
         <DecisionPipeline intelligence={data.intelligence} quant={data.quant} reasoning={data.reasoning} stages={data.aggregate?.stages} />
