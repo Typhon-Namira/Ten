@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,6 +19,10 @@ from backend.app.ai_reasoning.llm_context import LLMAnalysisContext, build_llm_a
 from backend.app.ai_reasoning.memory import MarketMemory
 from backend.app.ai_reasoning.models import MarketMemoryEntry, MarketMemorySummary
 from backend.app.ai_reasoning.provider import ExistingOpenRouterReasoningProvider
+from backend.app.ai_reasoning.request_persistence import (
+    decode_persisted_request,
+    persisted_request_payload,
+)
 from backend.app.ai_reasoning.request_builder import AIReasoningRequestBuilder
 from backend.app.ai_reasoning.setup_families import SetupFamilyRegistry
 from backend.app.ai_reasoning.validation import StructuredAIOutputValidator
@@ -112,6 +117,83 @@ async def test_provider_serializes_only_typed_compact_context_without_candles_or
     )
     assert all(token not in encoded for token in prohibited)
     assert context.current_price > 0
+
+
+def _request_record(request: Any, payload: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(
+        request_id=request.request_id,
+        cycle_id=request.cycle_id,
+        market_state_id=request.market_state_id,
+        quantitative_forecast_id=request.quantitative_forecast_id,
+        instrument=request.instrument,
+        analysis_timestamp=request.analysis_timestamp,
+        prompt_version=request.prompt_version,
+        model_identifier=request.model_identifier,
+        payload=payload,
+        created_at=request.created_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_versioned_compact_request_history_decodes_without_reconstructing_internal_request() -> None:
+    _, _, _, request = await _request()
+    context = build_llm_analysis_context(request)
+    payload = persisted_request_payload(request, context)
+
+    decoded = decode_persisted_request(_request_record(request, payload))
+
+    assert decoded.compatibility_status == "compatible"
+    assert decoded.payload_format == "versioned_compact"
+    assert decoded.context_schema_version == "2.0"
+    assert decoded.request_id == request.request_id
+    assert "supported_timeframe_states" not in payload
+    assert "smc_evidence" not in payload
+
+
+@pytest.mark.asyncio
+async def test_deployed_legacy_context_envelope_remains_readable() -> None:
+    _, _, _, request = await _request()
+    context = build_llm_analysis_context(request)
+    payload = persisted_request_payload(request, context)
+    legacy_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"payload_type", "payload_schema_version", "context_schema_version"}
+    }
+    legacy_payload["schema_version"] = context.schema_version
+
+    decoded = decode_persisted_request(_request_record(request, legacy_payload))
+
+    assert decoded.compatibility_status == "compatible"
+    assert decoded.payload_format == "legacy_compact_context"
+    assert decoded.context_schema_version == "2.0"
+
+
+@pytest.mark.asyncio
+async def test_legacy_full_internal_request_remains_readable_as_bounded_snapshot() -> None:
+    _, _, _, request = await _request()
+
+    decoded = decode_persisted_request(
+        _request_record(request, request.model_dump(mode="json"))
+    )
+
+    assert decoded.compatibility_status == "compatible"
+    assert decoded.payload_format == "legacy_full_request"
+    assert decoded.request_id == request.request_id
+
+
+@pytest.mark.asyncio
+async def test_unknown_request_history_shape_returns_typed_incompatibility_without_raw_payload() -> None:
+    _, _, _, request = await _request()
+
+    decoded = decode_persisted_request(
+        _request_record(request, {"unexpected": "secret-value"})
+    )
+
+    assert decoded.compatibility_status == "incompatible"
+    assert decoded.payload_format == "incompatible"
+    assert decoded.compatibility_reason == "unrecognized_persisted_request_payload"
+    assert "secret-value" not in decoded.model_dump_json()
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Protocol
 
 from sqlalchemy import select, update
@@ -26,7 +27,7 @@ from backend.app.storage.models import (
 )
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
-from .llm_context import build_llm_analysis_context, compact_request_audit_payload
+from .llm_context import build_llm_analysis_context
 from .models import (
     AIMarketForecast,
     AIReasoningRequest,
@@ -40,6 +41,14 @@ from .models import (
     SignalStateTransition,
 )
 from .setup_families import SetupFamilyDefinition
+from .request_persistence import (
+    PersistedAIReasoningRequest,
+    decode_persisted_request,
+    persisted_request_from_domain,
+    persisted_request_payload,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class AIReasoningRepository(Protocol):
@@ -50,7 +59,7 @@ class AIReasoningRepository(Protocol):
     async def save_proposal(self, value: AISignalProposal) -> AISignalProposal: ...
     async def latest_forecast(self, instrument: str) -> AIMarketForecast | None: ...
     async def latest_proposal(self) -> AISignalProposal | None: ...
-    async def request_for_state(self, market_state_id: object) -> AIReasoningRequest | None: ...
+    async def request_for_state(self, market_state_id: object) -> PersistedAIReasoningRequest | None: ...
     async def forecast_for_state(self, market_state_id: object) -> AIMarketForecast | None: ...
     async def proposal_for_state(self, market_state_id: object) -> AISignalProposal | None: ...
     async def signal_by_opportunity(self, opportunity_key: str) -> ManagedSignal | None: ...
@@ -118,10 +127,13 @@ class InMemoryAIReasoningRepository:
             values = list(self.proposals.values())
         return max(values, key=lambda item: (item.created_at, str(item.proposal_id)), default=None)
 
-    async def request_for_state(self, market_state_id: object) -> AIReasoningRequest | None:
+    async def request_for_state(self, market_state_id: object) -> PersistedAIReasoningRequest | None:
         async with self._lock:
             values = [item for item in self.requests.values() if item.market_state_id == market_state_id]
-        return max(values, key=lambda item: (item.created_at, str(item.request_id)), default=None)
+        request = max(values, key=lambda item: (item.created_at, str(item.request_id)), default=None)
+        if request is None:
+            return None
+        return persisted_request_from_domain(request)
 
     async def forecast_for_state(self, market_state_id: object) -> AIMarketForecast | None:
         async with self._lock:
@@ -225,7 +237,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 analysis_timestamp=value.analysis_timestamp,
                 prompt_version=value.prompt_version,
                 model_identifier=value.model_identifier,
-                payload=compact_request_audit_payload(value, context),
+                payload=persisted_request_payload(value, context),
                 created_at=value.created_at,
             )
             .on_conflict_do_nothing(index_elements=["request_id"])
@@ -334,7 +346,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         return AISignalProposal.model_validate(record.payload) if record else None
 
     @scoped_session
-    async def request_for_state(self, market_state_id: object) -> AIReasoningRequest | None:
+    async def request_for_state(self, market_state_id: object) -> PersistedAIReasoningRequest | None:
         query = (
             select(AIReasoningRequestRecord)
             .where(AIReasoningRequestRecord.market_state_id == market_state_id)
@@ -342,7 +354,23 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             .limit(1)
         )
         record = (await self.session.scalars(query)).first()
-        return AIReasoningRequest.model_validate(record.payload) if record else None
+        if record is None:
+            return None
+        decoded = decode_persisted_request(record)
+        if decoded.compatibility_status == "incompatible":
+            logger.warning(
+                "ai_reasoning.request_payload.incompatible",
+                extra={
+                    "request_id": str(record.request_id),
+                    "cycle_id": str(record.cycle_id),
+                    "market_state_id": str(record.market_state_id),
+                    "payload_format": decoded.payload_format,
+                    "payload_schema_version": decoded.payload_schema_version,
+                    "reason": decoded.compatibility_reason,
+                    "payload_keys": sorted(record.payload),
+                },
+            )
+        return decoded
 
     @scoped_session
     async def forecast_for_state(self, market_state_id: object) -> AIMarketForecast | None:

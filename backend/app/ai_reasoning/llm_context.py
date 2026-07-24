@@ -18,6 +18,7 @@ from .models import AIReasoningRequest
 
 _MAX_SUMMARY_CHARS = 480
 _MAX_REASON_CHARS = 160
+LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION = "2.0"
 
 
 class _ImmutableDTO(BaseModel):
@@ -622,25 +623,3 @@ def build_llm_analysis_context(request: AIReasoningRequest) -> LLMAnalysisContex
         setup_family_registry_version=request.setup_family_registry_version,
         model_identifier=request.model_identifier,
     )
-
-
-def compact_request_audit_payload(
-    request: AIReasoningRequest,
-    context: LLMAnalysisContext,
-) -> dict[str, Any]:
-    """Persist request identity and a fingerprintable compact contract, never engine payloads."""
-
-    return {
-        "schema_version": context.schema_version,
-        "request_id": str(request.request_id),
-        "cycle_id": str(request.cycle_id),
-        "market_state_id": str(request.market_state_id),
-        "quantitative_forecast_id": str(request.quantitative_forecast_id),
-        "instrument": request.instrument,
-        "analysis_timestamp": request.analysis_timestamp.isoformat(),
-        "knowledge_cutoff": request.knowledge_cutoff.isoformat(),
-        "prompt_version": request.prompt_version,
-        "reasoning_policy_version": request.reasoning_policy_version,
-        "model_identifier": request.model_identifier,
-        "context": context.model_dump(mode="json"),
-    }

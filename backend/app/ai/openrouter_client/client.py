@@ -271,6 +271,18 @@ class HttpOpenRouterClient(OpenRouterClient):
             input_cost_per_million_usd=0,
             output_cost_per_million_usd=0,
         )
+        analysis_context = payload.get("analysis_context")
+        response_contract = payload.get("response_contract")
+        request_schema_version = (
+            analysis_context.get("schema_version")
+            if isinstance(analysis_context, dict)
+            else None
+        )
+        response_schema_version = (
+            response_contract.get("schema_version")
+            if isinstance(response_contract, dict)
+            else None
+        )
         started = perf_counter()
         logger.info(
             "openrouter.request.started",
@@ -279,6 +291,8 @@ class HttpOpenRouterClient(OpenRouterClient):
                 "cycle_id": cycle_id,
                 "model": model,
                 "endpoint": endpoint,
+                "request_schema_version": request_schema_version,
+                "response_schema_version": response_schema_version,
                 "failure_phase": None,
                 "serialized_request_bytes": request_metrics.serialized_request_bytes,
                 "estimated_input_tokens": request_metrics.estimated_input_tokens,
@@ -342,6 +356,8 @@ class HttpOpenRouterClient(OpenRouterClient):
                 "model": model,
                 "endpoint": endpoint,
                 "http_status": response.status_code,
+                "request_schema_version": request_schema_version,
+                "response_schema_version": response_schema_version,
                 "response_content_type": _safe_text(response.headers.get("content-type"), limit=128),
                 "response_body_length": len(response.content),
                 "retry_after": _safe_text(response.headers.get("retry-after"), limit=128),
@@ -357,6 +373,8 @@ class HttpOpenRouterClient(OpenRouterClient):
                 "model": model,
                 "endpoint": endpoint,
                 "http_status": response.status_code,
+                "request_schema_version": request_schema_version,
+                "response_schema_version": response_schema_version,
                 "response_content_type": _safe_text(response.headers.get("content-type"), limit=128),
                 "response_body_length": len(response.content),
                 "elapsed_ms": (perf_counter() - started) * 1000,

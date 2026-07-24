@@ -115,6 +115,17 @@ def derive_ai_reasoning_stage(
         )
 
     if request is not None:
+        if getattr(request, "compatibility_status", "compatible") == "incompatible":
+            return StageResult(
+                "failed",
+                "ai_request_history_schema_incompatible",
+                error_code=getattr(request, "compatibility_reason", None),
+                retryable=False,
+                extra={
+                    "payload_format": getattr(request, "payload_format", "incompatible"),
+                    "payload_schema_version": getattr(request, "payload_schema_version", None),
+                },
+            )
         created_at = getattr(request, "created_at", now)
         elapsed_seconds = max(0.0, (now - created_at).total_seconds())
         return StageResult("running", "openrouter_request_in_progress", extra={"elapsed_seconds": elapsed_seconds, "job_state": "running"})
