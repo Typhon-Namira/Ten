@@ -16,7 +16,7 @@ outcomes, calibration, failure rates, latency, request usage, and sample size.
 Closed market candle
   -> UnifiedMarketState (M1/M5/M15, point-in-time)
   -> deterministic quantitative forecast
-  -> Cerebras-primary/Groq-fallback provider router
+  -> ordered four-account Groq provider pool
   -> immutable AI forecast and immutable AI proposal
   -> versioned deterministic HardGateRegistry
   -> persisted FinalSystemAction and every GateEvaluation
@@ -67,7 +67,7 @@ missing Order Block/FVG evidence for unrelated setup families are not general ha
 
 ## LLM failure and cost controls
 
-- Cerebras is primary and Groq is the ordered fallback.
+- Groq accounts are attempted in ordered failover from `groq_1` through `groq_4`.
 - One logical reasoning result is allowed per immutable UMS cycle boundary and provider contract.
 - Calls occur on eligible closed analysis cycles, never per tick.
 - Context and market memory are bounded.

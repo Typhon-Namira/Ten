@@ -187,7 +187,7 @@ def test_all_dashboard_read_endpoints_are_provider_and_persistence_side_effect_f
 
     with TestClient(app) as client:
         app.state.ai_reasoning_service.provider.reason = reasoning_call
-        app.state.cerebras_client.complete_json = transport_call
+        app.state.groq_clients["groq_1"].complete_json = transport_call
         before = len(app.state.ai_reasoning_repository.analyses)
         responses = [client.get(path) for path in paths for _ in range(3)]
         after = len(app.state.ai_reasoning_repository.analyses)
@@ -422,7 +422,7 @@ def test_dashboard_reports_terminal_ai_failure_not_pending_end_to_end() -> None:
     )
     forecast = SimpleNamespace(
         forecast_id=forecast_id, market_state_id=state_id, status="unavailable", generated_at=boundary,
-        failure_state="authentication_failed", model_provider="cerebras", missing_evidence=(), provider_http_status=401, validation_passed=False,
+        failure_state="authentication_failed", model_provider="groq_1", missing_evidence=(), provider_http_status=401, validation_passed=False,
         model_dump=lambda **_: {"forecast_id": str(forecast_id), "market_state_id": str(state_id), "status": "unavailable", "failure_state": "authentication_failed"},
     )
     with TestClient(create_app()) as client:
@@ -436,7 +436,7 @@ def test_dashboard_reports_terminal_ai_failure_not_pending_end_to_end() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["stages"]["ai_reasoning"]["status"] == "failed"
-    assert body["stages"]["ai_reasoning"]["reason"] == "cerebras_returned_http_401"
+    assert body["stages"]["ai_reasoning"]["reason"] == "groq_1_returned_http_401"
     assert body["stages"]["ai_reasoning"]["error_code"] == "authentication_failed"
     assert body["stages"]["ai_reasoning"]["retryable"] is True
     # A terminal provider failure must fail closed to an explicit WAIT, not remain stuck

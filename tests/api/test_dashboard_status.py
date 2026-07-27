@@ -30,7 +30,7 @@ def forecast(**overrides):
         failure_state=None,
         missing_evidence=(),
         provider_http_status=None,
-        model_provider="cerebras",
+        model_provider="groq_1",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -80,7 +80,7 @@ def test_terminal_provider_failure_reports_failed_not_pending():
         cycle_available_at=NOW - timedelta(minutes=5),
     )
     assert result.status == "failed"
-    assert result.reason == "cerebras_returned_http_401"
+    assert result.reason == "groq_1_returned_http_401"
     assert result.error_code == "authentication_failed"
     assert result.retryable is True
     assert result.extra["provider_http_status"] == 401
@@ -129,8 +129,11 @@ def test_all_provider_circuits_open_reports_blocked_with_retry_time_not_pending(
         request=None,
         ai_health=healthy_ai_health(
             providers={
-                "cerebras": {"status": "AUTH_FAILED", "circuit_open_until": backoff_until.isoformat()},
-                "groq": {"status": "AUTH_FAILED", "circuit_open_until": backoff_until.isoformat()},
+                f"groq_{index}": {
+                    "status": "CONFIGURATION_ERROR",
+                    "circuit_open_until": backoff_until.isoformat(),
+                }
+                for index in range(1, 5)
             },
             failure_state="authentication_failed",
         ),

@@ -1,69 +1,65 @@
 # AI Provider Routing
 
-TEN uses one provider-neutral reasoning boundary:
-
-1. Cerebras is attempted first with model `gpt-oss-120b`.
-2. Groq is the ordered fallback with model `llama-3.1-8b-instant`.
-3. A 400 request-validation failure is terminal because the same invalid TEN payload must not be sent elsewhere.
-4. Authentication, quota, rate-limit, model-availability, network, and 5xx failures may fall back.
-5. Each provider receives at most one retry, and only for transient network or 5xx failures.
-
-Cerebras uses strict JSON Schema response formatting. Groq's
-`llama-3.1-8b-instant` uses JSON Object Mode because Groq does not list that model
-for strict constrained JSON Schema output. The same application-side TEN schema
-validator remains mandatory: missing fields, malformed JSON, and unexpected fields
-are rejected. Groq receives at most one correction request after malformed JSON.
-
-The required Railway variables are:
+TEN uses one four-account Groq reasoning pool. Each eligible five-minute job walks
+the accounts in fixed order and stops after the first valid response:
 
 ```text
-TEN_CEREBRAS_API_KEY
-TEN_CEREBRAS_BASE_URL=https://api.cerebras.ai/v1
-TEN_CEREBRAS_MODEL=gpt-oss-120b
-TEN_GROQ_API_KEY
-TEN_GROQ_BASE_URL=https://api.groq.com/openai/v1
-TEN_GROQ_MODEL=llama-3.1-8b-instant
+groq_1 -> groq_2 -> groq_3 -> groq_4
 ```
 
-Remove superseded provider variables from the Railway service after this revision is deployed.
-The application never logs API keys, authorization headers, prompts, compact analysis payloads,
-or raw provider response bodies.
+Each account has an independent state and cooldown. Authentication, configuration,
+quota, rate-limit, and exhausted retryable transport failures advance to the next
+account. Only transport errors and HTTP 408/5xx receive the configured bounded retry
+on the same account. JSON or analysis-schema failures remain validation failures and
+never masquerade as quota or transport errors.
+
+Groq receives JSON Object Mode requests. TEN's strict application schema remains
+authoritative: missing fields, malformed JSON, and unexpected properties are rejected.
+One bounded correction request is allowed on the same account.
+
+## Environment
+
+```text
+TEN_AI_PRIMARY_PROVIDER=groq
+TEN_GROQ_POOL_ENABLED=true
+TEN_GROQ_POOL_SIZE=4
+TEN_GROQ_API_KEY_1
+TEN_GROQ_API_KEY_2
+TEN_GROQ_API_KEY_3
+TEN_GROQ_API_KEY_4
+TEN_GROQ_BASE_URL=https://api.groq.com/openai/v1
+TEN_GROQ_MODEL=gpt-oss-120b
+TEN_GROQ_REQUEST_TIMEOUT_SECONDS=60
+TEN_GROQ_MAX_RETRIES_PER_ACCOUNT=1
+TEN_GROQ_RATE_LIMIT_COOLDOWN_SECONDS=3600
+TEN_GROQ_QUOTA_COOLDOWN_SECONDS=86400
+TEN_GROQ_POOL_STRATEGY=ordered_failover
+```
+
+`TEN_GROQ_API_KEY` is temporarily accepted only when
+`TEN_GROQ_API_KEY_1` is absent. It maps to `groq_1`, emits a deprecation warning,
+and never creates a fifth account.
+
+TEN never logs or returns API keys, authorization headers, prompts, or complete
+provider payloads.
 
 ## Cycle idempotency
 
-Reasoning is eligible for every synchronized UMS cycle, including successive one-minute
-boundaries. The durable key is derived from:
-
-```text
-normalized instrument
-+ exact UMS market-data boundary
-+ UMS schema/cycle version
-+ prompt, context, response-schema, and reasoning-policy contract
-```
-
-Duplicate delivery of the same immutable cycle reuses the persisted forecast. A later UMS
-boundary creates a fresh key and may issue a fresh provider request. Dashboard endpoints only
-read persisted state and cannot invoke the provider router.
+The durable five-minute cycle claim is acquired before pool selection. Failover stays
+inside that single job. Duplicate snapshot delivery, application restarts, concurrent
+workers, and dashboard reads cannot create additional provider calls for a completed
+cycle or more than one persisted analysis.
 
 ## Operational states
 
-Each provider reports one of `HEALTHY`, `STANDBY`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`,
-`AUTH_FAILED`, `UNAVAILABLE`, `CIRCUIT_OPEN`, or `UNCONFIGURED`, including its model, last
-success, last failure, sanitized failure code, and circuit deadline. Rate-limit reset headers
-control short circuits when present; daily quota exhaustion opens a longer circuit. Groq request
-and token limits are tracked separately, and token exhaustion is terminal for that fallback
-attempt even while request quota remains. When both providers fail, TEN persists the typed
-terminal reason and remains fail-closed for publication.
+Each account reports `AVAILABLE`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`,
+`CONFIGURATION_ERROR`, `CIRCUIT_OPEN`, `DISABLED`, or `UNKNOWN`, plus its safe
+HTTP/error metadata, calls, successful analyses, failures, token usage, and cooldown.
+The active account is assigned only after a validated analysis is durable.
 
 ## Deployment verification
 
-Run:
-
-```text
-python -m alembic upgrade head
-python scripts/ai_reasoning_smoke_test.py
-```
-
-Confirm logs show the selected provider/model, cycle boundary, attempt, fallback state, sanitized
-result, latency, rate-limit metadata, and circuit transitions. The smoke script is shadow-only and
-uses in-memory persistence.
+Apply migrations, configure the four account variables, and run the analytical smoke
+cycle. Confirm one eligible cycle produces one successful Groq call, one persisted
+analysis, no calls after the successful account, and no provider calls from repeated
+dashboard reads.

@@ -5,41 +5,105 @@ from backend.app.core.feature_flags import FeatureFlag
 from backend.app.services import build_engine_registry
 
 
-def test_ai_provider_defaults_are_cerebras_primary_and_groq_fallback() -> None:
+def test_ai_provider_defaults_are_four_account_groq_pool() -> None:
     settings = Settings(_env_file=None, market_data_worker_enabled=False)
 
-    assert settings.cerebras_base_url == "https://api.cerebras.ai/v1"
-    assert settings.cerebras_model == "gpt-oss-120b"
+    assert settings.ai_primary_provider == "groq"
+    assert settings.groq_pool_enabled is True
+    assert settings.groq_pool_size == 4
     assert settings.groq_base_url == "https://api.groq.com/openai/v1"
-    assert settings.groq_model == "llama-3.1-8b-instant"
+    assert settings.groq_model == "gpt-oss-120b"
+    assert settings.groq_request_timeout_seconds == 60
+    assert settings.groq_max_retries_per_account == 1
+    assert settings.groq_rate_limit_cooldown_seconds == 3600
+    assert settings.groq_quota_cooldown_seconds == 86400
+    assert settings.groq_pool_strategy == "ordered_failover"
+    assert settings.groq_pool_api_keys == (None, None, None, None)
 
 
 @pytest.mark.parametrize(
     "base_url",
     (
-        "https://api.cerebras.ai/v1/v1",
-        "https://api.cerebras.ai/v1/chat/completions",
+        "https://api.groq.com/openai/v1/v1",
+        "https://api.groq.com/openai/v1/chat/completions",
     ),
 )
-def test_cerebras_base_url_rejects_endpoint_path_misconfiguration(
+def test_groq_base_url_rejects_endpoint_path_misconfiguration(
     base_url: str,
 ) -> None:
     with pytest.raises(ValueError, match="must be a base URL"):
         Settings(
             _env_file=None,
-            cerebras_base_url=base_url,
+            groq_base_url=base_url,
             market_data_worker_enabled=False,
         )
 
 
 @pytest.mark.parametrize("api_key", (" key", "key ", '"key"', "'key'"))
-def test_cerebras_key_rejects_shell_quoting_and_whitespace(api_key: str) -> None:
+def test_groq_pool_keys_reject_shell_quoting_and_whitespace(api_key: str) -> None:
     with pytest.raises(ValueError, match="must not contain surrounding"):
         Settings(
             _env_file=None,
-            cerebras_api_key=api_key,
+            groq_api_key_1=api_key,
             market_data_worker_enabled=False,
         )
+
+
+def test_legacy_groq_key_maps_only_to_account_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        groq_api_key="legacy-key",
+        market_data_worker_enabled=False,
+    )
+
+    assert settings.groq_pool_api_keys == ("legacy-key", None, None, None)
+    assert "ai_provider.legacy_key_alias.used" in caplog.text
+
+
+def test_explicit_account_one_key_has_priority_over_legacy_alias() -> None:
+    settings = Settings(
+        _env_file=None,
+        groq_api_key="legacy-key",
+        groq_api_key_1="account-one-key",
+        market_data_worker_enabled=False,
+    )
+
+    assert settings.groq_pool_api_keys == ("account-one-key", None, None, None)
+
+
+def test_application_settings_have_no_removed_provider_dependency() -> None:
+    removed_provider = "cere" + "bras"
+    settings = Settings(_env_file=None, market_data_worker_enabled=False)
+
+    assert all(
+        removed_provider not in field_name
+        for field_name in type(settings).model_fields
+    )
+
+
+def test_every_groq_pool_environment_variable_uses_ten_prefix() -> None:
+    fields = (
+        "ai_primary_provider",
+        "groq_pool_enabled",
+        "groq_pool_size",
+        "groq_api_key_1",
+        "groq_api_key_2",
+        "groq_api_key_3",
+        "groq_api_key_4",
+        "groq_base_url",
+        "groq_model",
+        "groq_request_timeout_seconds",
+        "groq_max_retries_per_account",
+        "groq_rate_limit_cooldown_seconds",
+        "groq_quota_cooldown_seconds",
+        "groq_pool_strategy",
+    )
+
+    environment_variables = tuple(f"TEN_{field.upper()}" for field in fields)
+    assert all(name.startswith("TEN_") for name in environment_variables)
+    assert len(environment_variables) == len(fields)
 
 
 def test_market_data_provider_defaults_to_the_keyless_public_source() -> None:

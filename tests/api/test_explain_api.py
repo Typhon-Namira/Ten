@@ -32,8 +32,8 @@ VALID_EXPLANATION = {
 
 
 class FakeProviderClient(AIProviderClient):
-    provider = "cerebras"
-    base_url = "https://api.cerebras.ai/v1"
+    provider = "groq_1"
+    base_url = "https://api.groq.test/openai/v1"
     configured = True
 
     def __init__(self, response: dict[str, Any] | None = None, error: Exception | None = None) -> None:
@@ -51,7 +51,7 @@ class FakeProviderClient(AIProviderClient):
         assert self.response is not None
         return AIProviderCompletion(
             content=self.response,
-            provider="cerebras",
+            provider="groq_1",
             model=model,
             status_code=200,
             latency_ms=1,

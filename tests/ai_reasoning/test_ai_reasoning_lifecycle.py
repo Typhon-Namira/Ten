@@ -192,16 +192,20 @@ class ValidProvider:
 
     def metadata(self) -> dict[str, object]:
         return {
-            "provider": "cerebras",
+            "provider": "groq_1",
+            "primary_provider": "Groq pool",
+            "active_provider": "groq_1",
             "model_identifier": "configured-model",
-            "external_ai_apis": ("cerebras",),
+            "external_ai_apis": ("groq",),
+            "configured_account_count": 1,
+            "available_account_count": 1,
+            "providers": {"groq_1": {"status": "AVAILABLE"}},
         }
 
     def metrics(self) -> dict[str, int]:
         return {
             "provider_http_calls": self.calls,
-            "cerebras_calls": self.calls,
-            "groq_fallback_calls": 0,
+            "groq_calls": self.calls,
             "retry_attempts": 0,
             "schema_corrections": 0,
         }
@@ -210,7 +214,7 @@ class ValidProvider:
         self.calls += 1
         return AIProviderResponse(
             raw_output=self.payload,
-            provider="cerebras",
+            provider="groq_1",
             model_identifier=request.model_identifier,
             latency_ms=5,
             token_usage={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
@@ -222,15 +226,33 @@ class InvalidProvider(ValidProvider):
         super().__init__({"proposal": {"direction": "BUY"}})
 
 
+class DegradedValidProvider(ValidProvider):
+    def metadata(self) -> dict[str, object]:
+        metadata = super().metadata()
+        metadata.update(
+            {
+                "configured_account_count": 4,
+                "available_account_count": 3,
+                "providers": {
+                    "groq_1": {"status": "QUOTA_EXHAUSTED"},
+                    "groq_2": {"status": "AVAILABLE"},
+                    "groq_3": {"status": "AVAILABLE"},
+                    "groq_4": {"status": "AVAILABLE"},
+                },
+            }
+        )
+        return metadata
+
+
 class TypedFailureProvider(ValidProvider):
     async def reason(self, request, *, prompt_version: str) -> AIProviderResponse:
         self.calls += 1
         raise AIProviderRequestError(
             AIProviderFailureDetails(
-                provider="cerebras",
+                provider="groq_1",
                 reason_code="authentication_failed",
                 phase="http_request",
-                endpoint="https://api.cerebras.ai/v1/chat/completions",
+                endpoint="https://api.groq.test/openai/v1/chat/completions",
                 model=request.model_identifier,
                 request_id=str(request.request_id),
                 cycle_id=str(request.cycle_id),
@@ -240,14 +262,55 @@ class TypedFailureProvider(ValidProvider):
         )
 
 
+class ExhaustedPoolProvider(TypedFailureProvider):
+    def metadata(self) -> dict[str, object]:
+        return {
+            "provider": None,
+            "primary_provider": "Groq pool",
+            "active_provider": None,
+            "model_identifier": "gpt-oss-120b",
+            "external_ai_apis": ("groq",),
+            "configured_account_count": 4,
+            "available_account_count": 0,
+            "providers": {
+                f"groq_{index}": {"status": "QUOTA_EXHAUSTED"}
+                for index in range(1, 5)
+            },
+        }
+
+    def metrics(self) -> dict[str, int]:
+        return {
+            "provider_http_calls": self.calls * 4,
+            "groq_calls": self.calls * 4,
+            "retry_attempts": 0,
+            "schema_corrections": 0,
+        }
+
+    async def reason(self, request, *, prompt_version: str) -> AIProviderResponse:
+        self.calls += 1
+        raise AIProviderRequestError(
+            AIProviderFailureDetails(
+                provider="groq_4",
+                reason_code="quota_exhausted",
+                phase="http_request",
+                endpoint="https://api.groq.test/openai/v1/chat/completions",
+                model=request.model_identifier,
+                request_id=str(request.request_id),
+                cycle_id=str(request.cycle_id),
+                http_status=429,
+                exception_class="HTTPStatusError",
+            )
+        )
+
+
 class PreflightFailureProvider(ValidProvider):
     async def reason(self, request, *, prompt_version: str) -> AIProviderResponse:
         raise AIProviderRequestError(
             AIProviderFailureDetails(
-                provider="cerebras",
+                provider="groq_1",
                 reason_code="request_too_large",
                 phase="request_validation",
-                endpoint="https://api.cerebras.ai/v1/chat/completions",
+                endpoint="https://api.groq.test/openai/v1/chat/completions",
                 model=request.model_identifier,
                 request_id=str(request.request_id),
                 cycle_id=str(request.cycle_id),
@@ -318,7 +381,7 @@ def test_reasoning_health_is_idle_before_an_eligible_cycle() -> None:
 def test_reasoning_health_returns_to_idle_without_a_recent_eligible_cycle() -> None:
     service = build_service(InMemoryAIReasoningRepository(), ValidProvider())
     service.last_eligible_cycle_at = NOW - timedelta(minutes=11)
-    service.last_cycle_outcome = "primary_success"
+    service.last_cycle_outcome = "pool_success"
 
     assert service.health()["operations_status"] == "idle"
 
@@ -326,10 +389,8 @@ def test_reasoning_health_returns_to_idle_without_a_recent_eligible_cycle() -> N
 @pytest.mark.parametrize(
     ("outcome", "expected"),
     (
-        ("primary_success", "healthy"),
-        ("fallback_success", "degraded"),
+        ("pool_success", "healthy"),
         ("failed", "unhealthy"),
-        ("configuration_error", "configuration_error"),
     ),
 )
 def test_reasoning_health_reflects_latest_recent_cycle_outcome(
@@ -353,6 +414,22 @@ async def test_primary_persisted_analysis_reports_healthy_operations() -> None:
     health = service.health()
     assert health["operations_status"] == "healthy"
     assert health["provider_readiness"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_persisted_analysis_with_one_unavailable_account_is_degraded() -> None:
+    state, quant = await state_and_quant()
+    service = build_service(
+        InMemoryAIReasoningRepository(),
+        DegradedValidProvider(),
+    )
+
+    assert await service.process(state, quant) is not None
+
+    health = service.health()
+    assert health["operations_status"] == "degraded"
+    assert health["available_account_count"] == 3
+    assert health["configured_account_count"] == 4
 
 
 @pytest.mark.asyncio
@@ -394,23 +471,37 @@ async def test_concurrent_workers_share_durable_analysis_claim() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_failure_persists_analysis_failure_without_trade_artifacts() -> None:
+async def test_provider_failure_persists_failure_without_fabricating_analysis() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), TypedFailureProvider()
     assert await build_service(repository, provider).process(state, quant) is None
     assert provider.calls == 1
-    persisted = tuple(repository.analyses.values())
-    assert len(persisted) == 1
-    assert persisted[0].status.value == "failed"
+    assert repository.analyses == {}
     failure = next(iter(repository.failures.values()))
     assert failure.provider_failure is not None
     terminal = failure.provider_failure["terminal"]
-    assert terminal["provider"] == "cerebras"
+    assert terminal["provider"] == "groq_1"
     assert terminal["http_status"] == 401
     assert terminal["reason_code"] == "authentication_failed"
     assert repository.forecasts == {}
     assert repository.proposals == {}
     assert repository.signals == {}
+
+
+@pytest.mark.asyncio
+async def test_all_four_accounts_failing_is_unhealthy_and_persists_no_analysis() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    service = build_service(repository, ExhaustedPoolProvider())
+
+    assert await service.process(state, quant) is None
+
+    health = service.health()
+    assert health["operations_status"] == "unhealthy"
+    assert health["active_provider"] is None
+    assert health["call_control"]["groq_calls"] == 4
+    assert repository.analyses == {}
+    assert len(repository.failures) == 1
 
 
 @pytest.mark.asyncio
@@ -466,7 +557,7 @@ async def test_controlled_twenty_minute_simulation_has_four_provider_calls() -> 
     assert len(repository.analyses) == 4
     assert metrics["eligible_five_minute_cycles"] == 4
     assert metrics["skipped_before_provider_call"] == 16
-    assert metrics["groq_fallback_calls"] == 0
+    assert metrics["groq_calls"] == 4
 
 
 @pytest.mark.asyncio

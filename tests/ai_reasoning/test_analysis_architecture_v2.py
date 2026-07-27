@@ -117,7 +117,7 @@ def analysis(index: int, regime: str = "bullish", confidence: float = 0.8) -> AI
         status=AnalysisStatus.AVAILABLE,
         output=output(regime, confidence),
         provider_metadata=AIProviderMetadata(
-            provider="cerebras",
+            provider="groq_1",
             model="test-analysis-model",
             prompt_version="deep_market_analysis_v2",
             provider_adapter_version="test-v2",
@@ -257,7 +257,7 @@ class AnalysisProvider:
         self.calls += 1
         return AIProviderResponse(
             raw_output=self.payload,
-            provider="cerebras",
+            provider="groq_1",
             model_identifier="test-model",
             latency_ms=2,
             token_usage={"input_tokens": 10, "output_tokens": 20},
@@ -265,7 +265,7 @@ class AnalysisProvider:
 
     def metadata(self) -> dict[str, object]:
         return {
-            "provider": "cerebras",
+            "provider": "groq_1",
             "model_identifier": "test-model",
             "provider_available": True,
         }

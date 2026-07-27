@@ -139,8 +139,7 @@ export function ValidationSummary({ data, unavailableReason }: { data: AIReasoni
 export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard | null; stale: boolean }) {
   const health = data?.health
   const usage = data?.llm_usage
-  const cerebras = health?.providers.cerebras
-  const groq = health?.providers.groq
+  const accounts = ['groq_1', 'groq_2', 'groq_3', 'groq_4'] as const
   return <section className="ai-card ai-card--wide">
     <SectionHeader eyebrow="Operations" title="AI usage and system health" action={<Activity size={19} />} />
     <div className="health-grid">
@@ -148,8 +147,9 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
       <Metric label="Legacy daily calls" value={usage?.legacy_cumulative_daily?.provider_http_calls ?? 'Unavailable'} detail="Pre-policy telemetry retained" />
       <Metric label="Eligible 5-minute cycles" value={health?.call_control.eligible_five_minute_cycles ?? 'Unavailable'} />
       <Metric label="Analyses completed" value={health?.call_control.analyses_successfully_completed ?? 'Unavailable'} />
-      <Metric label="Cerebras calls" value={usage?.cerebras_calls ?? 'Unavailable'} />
-      <Metric label="Groq fallback calls" value={usage?.groq_fallback_calls ?? 'Unavailable'} />
+      <Metric label="Total Groq calls" value={usage?.groq_calls ?? 'Unavailable'} />
+      <Metric label="Configured accounts" value={health?.configured_account_count ?? 0} />
+      <Metric label="Available accounts" value={health?.available_account_count ?? 0} />
       <Metric label="Retries" value={usage?.retries ?? 'Unavailable'} />
       <Metric label="Schema corrections" value={usage?.schema_corrections ?? 'Unavailable'} />
       <Metric label="Skipped before provider" value={health?.call_control.skipped_before_provider_call ?? 'Unavailable'} />
@@ -162,13 +162,18 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
       <Metric label="Concurrency limit" value={health?.guardrails.llm_concurrency_limit ?? 'Unavailable'} />
       <Metric label="AI latency" value={health?.latest_latency_ms == null ? 'Unavailable' : `${health.latest_latency_ms.toFixed(0)} ms`} />
       <Metric label="Data freshness" value={stale ? 'Stale' : 'Fresh'} />
-      <Metric label="Cerebras state" value={cerebras?.status ?? 'UNCONFIGURED'} detail={`HTTP ${cerebras?.last_http_status ?? 'none'} · ${cerebras?.last_provider_error_code ?? cerebras?.last_failure_code ?? 'no error'}`} />
-      <Metric label="Groq state" value={groq?.status ?? 'UNCONFIGURED'} detail={`HTTP ${groq?.last_http_status ?? 'none'} · ${groq?.last_provider_error_code ?? groq?.last_failure_code ?? 'no error'}`} />
-      <Metric label="Primary circuit" value={cerebras?.circuit_open_until ? 'OPEN' : 'CLOSED'} detail={cerebras?.circuit_open_until ?? 'No open circuit'} />
-      <Metric label="Fallback circuit" value={groq?.circuit_open_until ? 'OPEN' : 'CLOSED'} detail={groq?.circuit_open_until ?? 'No open circuit'} />
+      {accounts.map((accountId, index) => {
+        const account = health?.providers[accountId]
+        return <Metric
+          key={accountId}
+          label={`Groq ${index + 1}`}
+          value={account?.status ?? 'DISABLED'}
+          detail={`${account?.circuit_state ?? 'CLOSED'} · HTTP ${account?.last_http_status ?? 'none'} · ${account?.last_provider_error_code ?? account?.last_failure_code ?? 'no error'} · calls ${account?.calls_today ?? 0} · analyses ${account?.successful_analyses ?? 0} · reset ${account?.cooldown_until ?? 'none'}`}
+        />
+      })}
     </div>
     <div className="card-foot">
-      <span>Status {health?.operations_status ?? 'idle'} · primary {health?.primary_provider ?? 'cerebras'} · active {health?.active_provider ?? 'none'} · fallback {health?.fallback_status ?? 'UNCONFIGURED'} · {health?.model_identifier ?? 'Model unavailable'}</span>
+      <span>Status {health?.operations_status ?? 'idle'} · primary {health?.primary_provider ?? 'Groq pool'} · active {health?.active_provider ?? 'none'} · {health?.model_identifier ?? 'Model unavailable'}</span>
       <StatusBadge tone={health?.guardrails.status === 'healthy' && !stale ? 'positive' : 'warning'}>{humanize(health?.guardrails.status ?? 'unavailable')}</StatusBadge>
     </div>
   </section>

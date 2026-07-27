@@ -9,7 +9,7 @@ from backend.app.ai.provider_client import HttpAIProviderClient
 from backend.app.core.exceptions import AIProviderRequestError
 
 
-def client_for(handler, provider: str = "cerebras") -> HttpAIProviderClient:
+def client_for(handler, provider: str = "groq_1") -> HttpAIProviderClient:
     return HttpAIProviderClient(
         provider,
         "safe-test-key",
@@ -37,7 +37,7 @@ async def test_all_5xx_failures_are_typed_provider_unavailable(status: int) -> N
             max_tokens=10,
         )
 
-    assert captured.value.details.provider == "cerebras"
+    assert captured.value.details.provider == "groq_1"
     assert captured.value.details.reason_code == "provider_unavailable"
     assert captured.value.details.http_status == status
 
@@ -61,9 +61,9 @@ async def test_quota_failure_is_sanitized_and_logged(caplog: pytest.LogCaptureFi
         )
 
     client = HttpAIProviderClient(
-        "cerebras",
+        "groq_1",
         api_key,
-        "https://api.cerebras.ai/v1",
+        "https://api.groq.test/openai/v1",
         transport=httpx.MockTransport(handler),
     )
     with caplog.at_level(
@@ -85,8 +85,8 @@ async def test_quota_failure_is_sanitized_and_logged(caplog: pytest.LogCaptureFi
     assert details.reason_code == "quota_exhausted"
     assert details.http_status == 402
     assert details.retry_after == "60"
-    assert details.endpoint_host == "api.cerebras.ai"
-    assert details.endpoint_path == "/v1/chat/completions"
+    assert details.endpoint_host == "api.groq.test"
+    assert details.endpoint_path == "/openai/v1/chat/completions"
     assert details.http_method == "POST"
     assert details.sanitized_response_body == (
         '{"error":{"code":"quota_exhausted","message":"Daily quota exhausted",'
@@ -99,10 +99,10 @@ async def test_quota_failure_is_sanitized_and_logged(caplog: pytest.LogCaptureFi
         record for record in caplog.records
         if record.message == "ai_provider.request.failure_diagnostic"
     )
-    assert failure.provider == "cerebras"
+    assert failure.provider == "groq_1"
     assert failure.request_id == "request-123"
-    assert failure.endpoint_host == "api.cerebras.ai"
-    assert failure.endpoint_path == "/v1/chat/completions"
+    assert failure.endpoint_host == "api.groq.test"
+    assert failure.endpoint_path == "/openai/v1/chat/completions"
     assert failure.http_method == "POST"
     assert failure.status_code == 402
     assert failure.response_content_type == "application/json"
@@ -136,7 +136,7 @@ async def test_timeout_failure_has_safe_network_classification() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ("cerebras", "groq"))
+@pytest.mark.parametrize("provider", ("groq_1", "groq_2"))
 async def test_http_200_invalid_json_is_typed_response_decoding_failure(
     provider: str,
 ) -> None:
@@ -186,7 +186,7 @@ async def test_success_returns_typed_completion_without_logging_payload(
         )
 
     assert result.content == {"decision": "WAIT"}
-    assert result.provider == "cerebras"
+    assert result.provider == "groq_1"
     assert result.token_usage == {
         "input_tokens": 4,
         "output_tokens": 2,
@@ -264,3 +264,30 @@ async def test_groq_token_limit_exhaustion_is_typed_provider_failure() -> None:
     assert details.rate_limit_request_remaining == "14000"
     assert details.rate_limit_token_remaining == "0"
     assert details.rate_limit_token_reset == "8s"
+
+
+@pytest.mark.asyncio
+async def test_daily_quota_is_distinct_from_temporary_rate_limit() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"x-ratelimit-remaining-requests": "0"},
+            json={
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "Requests per day quota exhausted.",
+                }
+            },
+            request=request,
+        )
+
+    with pytest.raises(AIProviderRequestError) as captured:
+        await client_for(handler, "groq_1").complete_json(
+            system_prompt="system",
+            payload={"input": "test"},
+            model="gpt-oss-120b",
+            temperature=0,
+            max_tokens=10,
+        )
+
+    assert captured.value.details.reason_code == "quota_exhausted"

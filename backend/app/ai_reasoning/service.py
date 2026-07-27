@@ -47,9 +47,6 @@ from .validation import StructuredAIOutputError, StructuredAIOutputValidator
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER_REACHABLE_FAILURE_STATES = frozenset({"structured_output_invalid"})
-
-
 class AIAnalysisSkipReason(StrEnum):
     NOT_FIVE_MINUTE_BOUNDARY = "not_five_minute_boundary"
     CYCLE_NOT_COMPLETE = "cycle_not_complete"
@@ -390,6 +387,41 @@ class AIReasoningService:
                 },
             )
 
+        if provider_failure is not None:
+            await self.repository.complete_analysis_cycle(
+                idempotency_key,
+                request.request_id,
+                None,
+                "failed",
+                self.clock(),
+            )
+            self.failed_requests += 1
+            self.last_validation_passed = False
+            self.last_failure_state = failure_state
+            self.last_cycle_outcome = "failed"
+            await self._record_failure(
+                request.request_id,
+                0,
+                request.model_identifier,
+                request.prompt_version,
+                None,
+                failure_errors,
+                failure_state,
+                provider_failure,
+            )
+            await self._record_usage(
+                request,
+                state.state_hash,
+                None,
+                self.last_latency_ms,
+                False,
+                failure_state,
+                model_identifier=request.model_identifier,
+                provider=None,
+                provider_metrics=provider_delta,
+            )
+            return None
+
         analysis = await self.repository.save_analysis(analysis)
         completed_status = (
             "completed"
@@ -448,9 +480,7 @@ class AIReasoningService:
         self.last_validation_passed = True
         self.last_failure_state = None
         assert response is not None
-        self.last_cycle_outcome = (
-            "fallback_success" if response.fallback_used else "primary_success"
-        )
+        self.last_cycle_outcome = "pool_success"
         self.metrics["analyses_successfully_completed"] += 1
         mark_persisted = getattr(self.provider, "mark_analysis_persisted", None)
         if callable(mark_persisted):
@@ -720,8 +750,7 @@ class AIReasoningService:
     def _consume_provider_metrics(self, delta: dict[str, int]) -> None:
         for key in (
             "provider_http_calls",
-            "cerebras_calls",
-            "groq_fallback_calls",
+            "groq_calls",
             "retry_attempts",
             "schema_corrections",
         ):
@@ -732,6 +761,14 @@ class AIReasoningService:
     def health(self) -> dict[str, object]:
         metadata = self.provider.metadata()
         provider_states = metadata.get("providers")
+        configured_count = metadata.get("configured_account_count")
+        available_count = metadata.get("available_account_count")
+        configured_account_count = (
+            configured_count if isinstance(configured_count, int) else 0
+        )
+        available_account_count = (
+            available_count if isinstance(available_count, int) else 0
+        )
         now = self.clock().astimezone(UTC)
         recent_eligible_cycle = (
             self.last_eligible_cycle_at is not None
@@ -739,20 +776,22 @@ class AIReasoningService:
         )
         if not recent_eligible_cycle:
             operations_status = "idle"
-        elif self.last_cycle_outcome == "primary_success":
-            operations_status = "healthy"
-        elif self.last_cycle_outcome == "fallback_success":
-            operations_status = "degraded"
-        elif self.last_cycle_outcome == "configuration_error":
+        elif self.last_cycle_outcome == "pool_success":
+            operations_status = (
+                "healthy"
+                if configured_account_count > 0
+                and available_account_count == configured_account_count
+                else "degraded"
+            )
+        elif available_account_count == 0 and isinstance(provider_states, dict) and all(
+            not isinstance(item, dict)
+            or item.get("status") in {"CONFIGURATION_ERROR", "DISABLED"}
+            for item in provider_states.values()
+        ):
             operations_status = "configuration_error"
         else:
             operations_status = "unhealthy"
         active_provider = metadata.get("active_provider")
-        fallback_provider = (
-            provider_states.get("groq")
-            if isinstance(provider_states, dict)
-            else None
-        )
         return {
             "enabled": self.enabled,
             "shadow_enabled": self.shadow_enabled,
@@ -760,12 +799,7 @@ class AIReasoningService:
             "monitoring_enabled": self.monitoring_enabled,
             "publication_enabled": self.final_decision.publication_enabled if self.final_decision else False,
             "adjustments_enabled": self.final_decision.adjustments_enabled if self.final_decision else False,
-            "provider_available": (
-                self.last_failure_state is None
-                or self.last_failure_state in _PROVIDER_REACHABLE_FAILURE_STATES
-            )
-            if self.requests
-            else None,
+            "provider_available": available_account_count > 0,
             "provider": metadata["provider"],
             "primary_provider": metadata.get("primary_provider"),
             "active_provider": active_provider,
@@ -778,6 +812,9 @@ class AIReasoningService:
                 if self.last_eligible_cycle_at
                 else None
             ),
+            "configured_account_count": configured_account_count,
+            "available_account_count": available_account_count,
+            "pool_strategy": metadata.get("pool_strategy"),
             "model_identifier": metadata["model_identifier"],
             "prompt_version": self.config.prompt_version_new_market,
             "reasoning_policy_version": self.config.reasoning_policy_version,
@@ -795,8 +832,7 @@ class AIReasoningService:
                     "analyses_successfully_completed"
                 ],
                 "provider_http_calls": self.metrics["provider_http_calls"],
-                "cerebras_calls": self.metrics["cerebras_calls"],
-                "groq_fallback_calls": self.metrics["groq_fallback_calls"],
+                "groq_calls": self.metrics["groq_calls"],
                 "retries": self.metrics["retry_attempts"],
                 "schema_corrections": self.metrics["schema_corrections"],
                 "skipped_before_provider_call": self.metrics[
@@ -811,11 +847,6 @@ class AIReasoningService:
             },
             "failure_state": self.last_failure_state,
             "fallback_state": "ai_analysis_unavailable" if self.last_failure_state else None,
-            "fallback_status": (
-                fallback_provider.get("status")
-                if isinstance(fallback_provider, dict)
-                else "UNCONFIGURED"
-            ),
             "shadow_only": True,
             "awaiting_guardrail_validation": True,
             "providers": provider_states,

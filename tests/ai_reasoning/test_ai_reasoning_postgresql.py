@@ -94,7 +94,7 @@ def _request(request_id, market_state_id, quant_id, cycle_id, now):
 def _failed_forecast(forecast_id, request_id, market_state_id, quant_id, cycle_id, now):
     return AIMarketForecast(
         forecast_id=forecast_id, request_id=request_id, market_state_id=market_state_id, quantitative_forecast_id=quant_id, cycle_id=cycle_id,
-        status=AIResultStatus.UNAVAILABLE, model_provider="cerebras", model_identifier="configured-model",
+        status=AIResultStatus.UNAVAILABLE, model_provider="groq_1", model_identifier="configured-model",
         prompt_version="new_market_analysis_v1", reasoning_policy_version="ai_reasoning_policy_v1", setup_family_registry_version="1.0.0",
         quantitative_model_version="1.0.0", feature_schema_version="1.0", market_state_schema_version="1.0",
         validation_passed=False, retry_count=1, failure_state="authentication_failed", failure_phase="http_request",

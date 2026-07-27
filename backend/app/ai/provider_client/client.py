@@ -1,4 +1,4 @@
-"""Provider-neutral OpenAI-compatible transport for Cerebras and Groq."""
+"""Provider-neutral OpenAI-compatible transport used by the Groq account pool."""
 
 from __future__ import annotations
 
@@ -50,13 +50,25 @@ def _reason_code(
     )
     if "context" in error_text and ("limit" in error_text or "length" in error_text):
         return "context_limit_exceeded"
+    if any(
+        marker in error_text
+        for marker in (
+            "daily quota",
+            "daily token",
+            "daily request",
+            "per day",
+            "tokens per day",
+            "requests per day",
+            "project quota",
+            "quota exhausted",
+        )
+    ):
+        return "quota_exhausted"
     if "token" in error_text and any(
         marker in error_text
         for marker in ("quota", "rate limit", "limit reached", "limit exceeded", "exhausted")
     ):
         return "token_quota_exhausted"
-    if any(token in error_text for token in ("daily quota", "project quota", "quota exhausted")):
-        return "quota_exhausted"
     if "quota" in error_text or "rate limit" in error_text:
         return "rate_limited"
     if status is not None and 500 <= status <= 599:

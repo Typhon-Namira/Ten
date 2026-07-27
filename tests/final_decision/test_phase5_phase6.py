@@ -114,13 +114,12 @@ def test_performance_and_readiness_require_measured_samples() -> None:
     assert "profitability_not_guaranteed" in readiness.warnings
 
 
-def test_only_configured_cerebras_and_groq_providers_are_present() -> None:
+def test_only_groq_pool_provider_runtime_is_present() -> None:
     provider_source = Path("backend/app/ai_reasoning/provider.py").read_text(
         encoding="utf-8"
     )
-    assert "class CerebrasProvider" in provider_source
     assert "class GroqProvider" in provider_source
-    assert "class AIProviderRouter" in provider_source
+    assert "class GroqProviderPool" in provider_source
 
 
 def test_operating_profiles_never_enable_broker_execution() -> None:
