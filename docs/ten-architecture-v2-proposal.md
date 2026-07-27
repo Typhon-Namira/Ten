@@ -10,7 +10,7 @@ This proposal is the authoritative target design. It replaces revision 1 where t
 2. Market polling never runs analysis, AI, decisions, publication, or analytical persistence.
 3. The complete analytical cycle starts only at UTC `HH:00`, `HH:05`, …, `HH:55`.
 4. `(symbol, analysis_boundary)` identifies one authoritative cycle. Duplicate scheduler or queue delivery cannot execute it twice.
-5. A live cycle makes one logical AI request through the Cerebras-primary/Groq-fallback router; each provider may receive at most one transient retry.
+5. A live cycle uses one claimed job through the ordered four-account Groq pool; each account may receive at most one transient retry.
 6. Dashboard endpoints are pure reads and cause zero database or runtime-state writes.
 7. Heavy inputs and intermediate analytical objects remain in memory.
 8. PostgreSQL stores canonical M1 candles, bounded cycle control/results, one current-state row, and meaningful lifecycle records only.
@@ -34,7 +34,7 @@ flowchart LR
     Scheduler --> Queue["AnalysisCycleRequested"]
     Queue --> Engine["Bounded Analysis Engine<br/>one cycle then exit"]
     Candles --> Engine
-    Engine --> AIRouter["AI Provider Router<br/>Cerebras then Groq"]
+    Engine --> AIRouter["AI Provider Pool<br/>Groq 1 through Groq 4"]
     Engine --> Current[("One current-state row")]
     Engine --> History[("Meaningful lifecycle history")]
     Engine --> Runtime

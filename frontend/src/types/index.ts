@@ -758,8 +758,7 @@ export interface AIReasoningDashboard {
   llm_usage: {
     request_count: number
     provider_http_calls: number
-    cerebras_calls: number
-    groq_fallback_calls: number
+    groq_calls: number
     retries: number
     schema_corrections: number
     provider_failures: number
@@ -807,7 +806,9 @@ export interface AIReasoningDashboard {
     latest_successful_provider: string | null
     latest_successful_analysis_at: string | null
     latest_eligible_cycle_at: string | null
-    fallback_status: string
+    configured_account_count: number
+    available_account_count: number
+    pool_strategy: 'ordered_failover'
     provider_readiness: 'healthy' | 'degraded' | 'unhealthy' | 'idle' | 'configuration_error'
     operations_status: 'healthy' | 'degraded' | 'unhealthy' | 'idle' | 'configuration_error'
     model_identifier: string
@@ -821,7 +822,10 @@ export interface AIReasoningDashboard {
     shadow_only: boolean
     awaiting_guardrail_validation: boolean
     providers: Record<string, {
-      status: 'HEALTHY' | 'STANDBY' | 'RATE_LIMITED' | 'QUOTA_EXHAUSTED' | 'AUTH_FAILED' | 'UNAVAILABLE' | 'CIRCUIT_OPEN' | 'CONFIGURATION_ERROR' | 'UNCONFIGURED'
+      status: 'AVAILABLE' | 'RATE_LIMITED' | 'QUOTA_EXHAUSTED' | 'CONFIGURATION_ERROR' | 'CIRCUIT_OPEN' | 'DISABLED' | 'UNKNOWN'
+      account_id: string
+      enabled: boolean
+      availability: boolean
       model: string
       last_success_at: string | null
       last_failure_at: string | null
@@ -829,6 +833,18 @@ export interface AIReasoningDashboard {
       last_failure_code: string | null
       last_http_status: number | null
       last_provider_error_code: string | null
+      cooldown_until: string | null
+      circuit_state: 'OPEN' | 'CLOSED'
+      calls_today: number
+      successful_analyses: number
+      provider_failures: number
+      rate_limit_failures: number
+      quota_failures: number
+      token_usage: {
+        input_tokens: number
+        output_tokens: number
+        total_tokens: number
+      }
     }>
     call_control: {
       analysis_timeframe: 'M5'
@@ -836,8 +852,7 @@ export interface AIReasoningDashboard {
       eligible_five_minute_cycles: number
       analyses_successfully_completed: number
       provider_http_calls: number
-      cerebras_calls: number
-      groq_fallback_calls: number
+      groq_calls: number
       retries: number
       schema_corrections: number
       skipped_before_provider_call: number

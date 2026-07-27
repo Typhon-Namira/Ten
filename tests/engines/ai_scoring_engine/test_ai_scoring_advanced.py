@@ -30,8 +30,8 @@ from tests.engines.ai_scoring_engine.test_ai_scoring import NOW, aligned_input, 
 
 
 class FakeClient(AIProviderClient):
-    provider = "cerebras"
-    base_url = "https://api.cerebras.ai/v1"
+    provider = "groq_1"
+    base_url = "https://api.groq.test/openai/v1"
     configured = True
 
     async def available_models(self) -> tuple[str, ...]:
@@ -40,7 +40,7 @@ class FakeClient(AIProviderClient):
     async def complete_json(self, **_: Any) -> AIProviderCompletion:
         return AIProviderCompletion(
             content={"direction": "neutral", "quality_score": 50, "reasoning": ["legacy compatibility"]},
-            provider="cerebras",
+            provider="groq_1",
             model="gpt-oss-120b",
             status_code=200,
             latency_ms=1,

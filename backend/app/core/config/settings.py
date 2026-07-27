@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 import json
+import logging
 import os
 from typing import Annotated, Any
 from urllib.parse import urlparse
@@ -10,6 +11,8 @@ from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from backend.app.core.database.url import normalize_async_database_url
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -30,13 +33,22 @@ class Settings(BaseSettings):
     db_pool_pre_ping: bool = True
     db_statement_timeout_ms: int = Field(default=30_000, ge=1000, le=300_000)
     db_idle_transaction_timeout_ms: int = Field(default=30_000, ge=1000, le=300_000)
-    cerebras_api_key: str | None = None
-    cerebras_base_url: str = "https://api.cerebras.ai/v1"
-    cerebras_model: str = "gpt-oss-120b"
+    ai_primary_provider: str = "groq"
+    groq_pool_enabled: bool = True
+    groq_pool_size: int = Field(default=4, ge=1, le=4)
+    groq_api_key_1: str | None = None
+    groq_api_key_2: str | None = None
+    groq_api_key_3: str | None = None
+    groq_api_key_4: str | None = None
+    # Temporary migration alias for TEN_GROQ_API_KEY_1. It is never a fifth account.
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model: str = "llama-3.1-8b-instant"
-    request_timeout_seconds: float = 30.0
+    groq_model: str = "gpt-oss-120b"
+    groq_request_timeout_seconds: float = Field(default=60, gt=0, le=300)
+    groq_max_retries_per_account: int = Field(default=1, ge=0, le=3)
+    groq_rate_limit_cooldown_seconds: float = Field(default=3600, ge=1, le=86400)
+    groq_quota_cooldown_seconds: float = Field(default=86400, ge=60, le=604800)
+    groq_pool_strategy: str = "ordered_failover"
     integration_enabled: bool = True
     live_pipeline_enabled: bool = True
     integration_worker_enabled: bool = False
@@ -137,7 +149,7 @@ class Settings(BaseSettings):
         }
         return tuple(aliases.get(str(item).strip().lower(), str(item).strip()) for item in items)
 
-    @field_validator("cerebras_base_url", "groq_base_url")
+    @field_validator("groq_base_url")
     @classmethod
     def validate_ai_provider_url(cls, value: str, info: ValidationInfo) -> str:
         parsed = urlparse(value)
@@ -155,7 +167,13 @@ class Settings(BaseSettings):
             )
         return value.rstrip("/")
 
-    @field_validator("cerebras_api_key", "groq_api_key")
+    @field_validator(
+        "groq_api_key",
+        "groq_api_key_1",
+        "groq_api_key_2",
+        "groq_api_key_3",
+        "groq_api_key_4",
+    )
     @classmethod
     def validate_ai_provider_key(
         cls,
@@ -175,7 +193,7 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("cerebras_model", "groq_model")
+    @field_validator("groq_model")
     @classmethod
     def validate_ai_provider_model(cls, value: str, info: ValidationInfo) -> str:
         if not value.strip() or any(character.isspace() for character in value):
@@ -185,6 +203,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def production_security(self) -> "Settings":
+        if self.ai_primary_provider != "groq":
+            raise ValueError("TEN_AI_PRIMARY_PROVIDER must be groq")
+        if self.groq_pool_strategy != "ordered_failover":
+            raise ValueError("TEN_GROQ_POOL_STRATEGY must be ordered_failover")
+        if self.groq_api_key_1 is None and self.groq_api_key is not None:
+            self.groq_api_key_1 = self.groq_api_key
+            logger.warning(
+                "ai_provider.legacy_key_alias.used",
+                extra={
+                    "legacy_variable": "TEN_GROQ_API_KEY",
+                    "replacement_variable": "TEN_GROQ_API_KEY_1",
+                    "account_id": "groq_1",
+                },
+            )
         railway_runtime = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
         if self.environment.lower() == "production" or railway_runtime:
             if "market_data_worker_enabled" not in self.model_fields_set:
@@ -224,6 +256,17 @@ class Settings(BaseSettings):
         if self.market_data_worker_enabled and not self.database_url.startswith(("postgresql+asyncpg://", "sqlite+aiosqlite://")):
             raise ValueError("TEN_DATABASE_URL must use an asynchronous SQLAlchemy driver")
         return self
+
+    @property
+    def groq_pool_api_keys(self) -> tuple[str | None, ...]:
+        """Return the four account keys without exposing them through diagnostics."""
+
+        return (
+            self.groq_api_key_1,
+            self.groq_api_key_2,
+            self.groq_api_key_3,
+            self.groq_api_key_4,
+        )
 
 
 @lru_cache

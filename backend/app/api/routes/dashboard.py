@@ -479,8 +479,7 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
     usage = {
         "request_count": sum(item.request_count for item in usage_rows),
         "provider_http_calls": sum(item.request_count for item in usage_rows),
-        "cerebras_calls": usage_parameter("cerebras_calls"),
-        "groq_fallback_calls": usage_parameter("groq_fallback_calls"),
+        "groq_calls": usage_parameter("groq_calls"),
         "retries": usage_parameter("retry_attempts"),
         "schema_corrections": usage_parameter("schema_corrections"),
         "provider_failures": usage_parameter("provider_failure"),
@@ -502,6 +501,31 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
     readiness = await request.app.state.final_decision_repository.latest_readiness_report()
     quant_health = request.app.state.quant_forecast_service.health()
     ai_health = request.app.state.ai_reasoning_service.health()
+    provider_states = ai_health.get("providers")
+    if isinstance(provider_states, dict):
+        for account_id, provider_state in provider_states.items():
+            if not isinstance(account_id, str) or not isinstance(provider_state, dict):
+                continue
+            provider_state["calls_today"] = usage_parameter(f"{account_id}_calls")
+            provider_state["successful_analyses"] = sum(
+                int(item.success)
+                for item in usage_rows
+                if item.generation_parameters.get("provider") == account_id
+            )
+            provider_state["provider_failures"] = usage_parameter(
+                f"{account_id}_provider_failures"
+            )
+            provider_state["rate_limit_failures"] = usage_parameter(
+                f"{account_id}_rate_limit_failures"
+            )
+            provider_state["quota_failures"] = usage_parameter(
+                f"{account_id}_quota_failures"
+            )
+            provider_state["token_usage"] = {
+                "input_tokens": usage_parameter(f"{account_id}_input_tokens"),
+                "output_tokens": usage_parameter(f"{account_id}_output_tokens"),
+                "total_tokens": usage_parameter(f"{account_id}_total_tokens"),
+            }
     call_control = ai_health.get("call_control")
     if isinstance(call_control, dict):
         usage.update(

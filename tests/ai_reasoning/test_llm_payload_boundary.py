@@ -23,7 +23,6 @@ from backend.app.ai_reasoning.llm_context import LLMAnalysisContext, build_llm_a
 from backend.app.ai_reasoning.memory import MarketMemory
 from backend.app.ai_reasoning.models import MarketMemoryEntry, MarketMemorySummary
 from backend.app.ai_reasoning.provider import (
-    CerebrasProvider,
     GroqProvider,
     reasoning_response_schema,
 )
@@ -44,8 +43,8 @@ from tests.ai_reasoning.test_ai_reasoning_lifecycle import NOW, state_and_quant
 
 
 class CapturingClient(AIProviderClient):
-    provider = "cerebras"
-    base_url = "https://api.cerebras.ai/v1"
+    provider = "groq_1"
+    base_url = "https://api.groq.test/openai/v1"
     configured = True
 
     def __init__(self, response: dict[str, Any] | None = None) -> None:
@@ -63,7 +62,7 @@ class CapturingClient(AIProviderClient):
         self.requests.append(kwargs)
         return AIProviderCompletion(
             content=self.response,
-            provider="cerebras",
+            provider="groq_1",
             model=kwargs["model"],
             status_code=200,
             latency_ms=1,
@@ -98,7 +97,7 @@ def _provider(
     client: CapturingClient,
     config: AIReasoningConfig,
     **overrides: Any,
-) -> CerebrasProvider:
+) -> GroqProvider:
     values = {
         "model": "gpt-oss-120b",
         "temperature": config.temperature,
@@ -116,9 +115,10 @@ def _provider(
         ),
     }
     values.update(overrides)
-    return CerebrasProvider(
+    return GroqProvider(
         client,
         PromptLoader(Path("backend/app/ai_reasoning/prompts")),
+        account_id="groq_1",
         **values,
     )
 
@@ -130,7 +130,8 @@ def _groq_provider(
     return GroqProvider(
         client,
         PromptLoader(Path("backend/app/ai_reasoning/prompts")),
-        model="llama-3.1-8b-instant",
+        account_id="groq_1",
+        model="gpt-oss-120b",
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         target_input_tokens=config.target_input_tokens,
@@ -311,7 +312,7 @@ async def test_oversized_context_is_rejected_before_provider_and_not_typed_as_cr
 
 
 @pytest.mark.asyncio
-async def test_groq_llama_uses_json_object_mode_with_application_validation() -> None:
+async def test_groq_uses_json_object_mode_with_application_validation() -> None:
     _, _, config, request = await _request()
     client = CapturingClient(analysis_output().model_dump(mode="python"))
 
@@ -323,7 +324,7 @@ async def test_groq_llama_uses_json_object_mode_with_application_validation() ->
 
     assert client.calls == 1
     assert client.requests[0]["response_schema"] is None
-    assert response.model_identifier == "llama-3.1-8b-instant"
+    assert response.model_identifier == "gpt-oss-120b"
     assert validated.market_regime.classification.value == "bullish"
 
 

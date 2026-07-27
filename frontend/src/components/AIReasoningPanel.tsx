@@ -72,8 +72,8 @@ export function AIReasoningPanel({ data }: { data: AIReasoningDashboard | null }
       <section>
         <h3>System Health and Usage</h3>
         <dl>
-          <div><dt>Primary / active</dt><dd>{data?.health.primary_provider ?? 'cerebras'} / {data?.health.active_provider ?? 'Not selected'}</dd></div>
-          <div><dt>Fallback</dt><dd>groq · {data?.health.fallback_status ?? 'STANDBY'}</dd></div>
+          <div><dt>Primary / active</dt><dd>{data?.health.primary_provider ?? 'Groq pool'} / {data?.health.active_provider ?? 'Not selected'}</dd></div>
+          <div><dt>Pool capacity</dt><dd>{data?.health.available_account_count ?? 0} / {data?.health.configured_account_count ?? 0} available</dd></div>
           <div><dt>Model</dt><dd>{data?.health.model_identifier ?? '—'}</dd></div>
           <div><dt>Availability</dt><dd>{data?.health.provider_available == null ? 'not called' : data.health.provider_available ? 'available' : 'unavailable'}</dd></div>
           <div><dt>Provider states</dt><dd>{Object.entries(data?.health.providers ?? {}).map(([name, item]) => `${name}: ${item.status}`).join(' · ') || 'not called'}</dd></div>

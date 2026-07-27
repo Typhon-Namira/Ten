@@ -68,7 +68,7 @@ from backend.app.quant_forecasting.provider import DeterministicBaselineProvider
 from backend.app.quant_forecasting.repository import InMemoryQuantForecastRepository, QuantForecastRepository, SqlAlchemyQuantForecastRepository
 from backend.app.quant_forecasting.service import QuantForecastService
 from backend.app.ai_reasoning.config import AIReasoningConfig
-from backend.app.ai_reasoning.provider import AIProviderRouter, CerebrasProvider, GroqProvider
+from backend.app.ai_reasoning.provider import GroqProvider, GroqProviderPool
 from backend.app.ai_reasoning.repository import (
     AIReasoningRepository,
     InMemoryAIReasoningRepository,
@@ -346,33 +346,26 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         await app.state.signal_decision_service.start()
         ai_reasoning_config = configs.load_model("ai_reasoning", AIReasoningConfig)
-        app.state.cerebras_client = HttpAIProviderClient(
-            "cerebras",
-            settings.cerebras_api_key,
-            settings.cerebras_base_url,
-            timeout_seconds=max(
-                1.0,
-                ai_reasoning_config.request_timeout_seconds - 5.0,
-            ),
-        )
-        app.state.groq_client = HttpAIProviderClient(
-            "groq",
-            settings.groq_api_key,
-            settings.groq_base_url,
-            timeout_seconds=max(
-                1.0,
-                ai_reasoning_config.request_timeout_seconds - 5.0,
-            ),
-        )
-        cerebras_model_available, groq_model_available = await asyncio.gather(
-            _verify_ai_provider_model(
-                app.state.cerebras_client,
-                settings.cerebras_model,
-            ),
-            _verify_ai_provider_model(
-                app.state.groq_client,
-                settings.groq_model,
-            ),
+        groq_keys = settings.groq_pool_api_keys
+        app.state.groq_clients = {
+            f"groq_{index}": HttpAIProviderClient(
+                f"groq_{index}",
+                (
+                    key
+                    if settings.groq_pool_enabled
+                    and index <= settings.groq_pool_size
+                    else None
+                ),
+                settings.groq_base_url,
+                timeout_seconds=settings.groq_request_timeout_seconds,
+            )
+            for index, key in enumerate(groq_keys, start=1)
+        }
+        groq_model_availability = await asyncio.gather(
+            *(
+                _verify_ai_provider_model(client, settings.groq_model)
+                for client in app.state.groq_clients.values()
+            )
         )
         integration_config = IntegrationConfig(
             enabled=settings.integration_enabled,
@@ -443,54 +436,47 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         reasoning_prompts = PromptLoader(
             Path(__file__).resolve().parent / "ai_reasoning" / "prompts"
         )
-        cerebras_provider = CerebrasProvider(
-            app.state.cerebras_client,
-            reasoning_prompts,
-            model=settings.cerebras_model,
-            temperature=ai_reasoning_config.temperature,
-            max_tokens=ai_reasoning_config.max_tokens,
-            target_input_tokens=ai_reasoning_config.target_input_tokens,
-            warning_input_tokens=ai_reasoning_config.warning_input_tokens,
-            hard_input_tokens=ai_reasoning_config.hard_input_tokens,
-            absolute_max_output_tokens=ai_reasoning_config.absolute_max_output_tokens,
-            maximum_request_cost_usd=ai_reasoning_config.maximum_request_cost_usd,
-            input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
-            output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
-            setup_family_ids=setup_family_ids,
+        groq_providers = tuple(
+            GroqProvider(
+                client,
+                reasoning_prompts,
+                account_id=account_id,
+                model=settings.groq_model,
+                temperature=ai_reasoning_config.temperature,
+                max_tokens=ai_reasoning_config.max_tokens,
+                target_input_tokens=ai_reasoning_config.target_input_tokens,
+                warning_input_tokens=ai_reasoning_config.warning_input_tokens,
+                hard_input_tokens=ai_reasoning_config.hard_input_tokens,
+                absolute_max_output_tokens=ai_reasoning_config.absolute_max_output_tokens,
+                maximum_request_cost_usd=ai_reasoning_config.maximum_request_cost_usd,
+                input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
+                output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
+                setup_family_ids=setup_family_ids,
+            )
+            for account_id, client in app.state.groq_clients.items()
         )
-        groq_provider = GroqProvider(
-            app.state.groq_client,
-            reasoning_prompts,
-            model=settings.groq_model,
-            temperature=ai_reasoning_config.temperature,
-            max_tokens=ai_reasoning_config.max_tokens,
-            target_input_tokens=ai_reasoning_config.target_input_tokens,
-            warning_input_tokens=ai_reasoning_config.warning_input_tokens,
-            hard_input_tokens=ai_reasoning_config.hard_input_tokens,
-            absolute_max_output_tokens=ai_reasoning_config.absolute_max_output_tokens,
-            maximum_request_cost_usd=ai_reasoning_config.maximum_request_cost_usd,
-            input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
-            output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
-            setup_family_ids=setup_family_ids,
+        ai_provider = GroqProviderPool(
+            groq_providers,
+            maximum_retries=settings.groq_max_retries_per_account,
+            rate_limit_cooldown_seconds=settings.groq_rate_limit_cooldown_seconds,
+            quota_cooldown_seconds=settings.groq_quota_cooldown_seconds,
+            configuration_cooldown_seconds=settings.groq_quota_cooldown_seconds,
+            transport_circuit_seconds=ai_reasoning_config.provider_backoff_initial_seconds,
         )
-        ai_provider = AIProviderRouter(
-            cerebras_provider,
-            groq_provider,
-            maximum_retries=ai_reasoning_config.maximum_retries,
-            circuit_seconds=ai_reasoning_config.provider_backoff_initial_seconds,
-            auth_circuit_seconds=ai_reasoning_config.provider_backoff_max_seconds,
-        )
-        if cerebras_model_available is False:
-            ai_provider.mark_model_unavailable("cerebras")
-        if groq_model_available is False:
-            ai_provider.mark_model_unavailable("groq")
+        for account_id, model_available in zip(
+            app.state.groq_clients,
+            groq_model_availability,
+            strict=True,
+        ):
+            if model_available is False:
+                ai_provider.mark_model_unavailable(account_id)
         app.state.ai_reasoning_repository = ai_repository
         app.state.ai_reasoning_service = AIReasoningService(
             ai_repository,
             ai_provider,
             AIReasoningRequestBuilder(
                 ai_reasoning_config,
-                model_identifier=settings.cerebras_model,
+                model_identifier=settings.groq_model,
             ),
             StructuredAIOutputValidator(),
             ai_reasoning_config,

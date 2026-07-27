@@ -1,15 +1,16 @@
-"""Provider-neutral Cerebras-primary/Groq-fallback AI reasoning boundary."""
+"""Ordered four-account Groq pool for TEN's AI reasoning boundary."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 import json
 import logging
 import random
+import re
 from time import perf_counter
 from typing import Any, Protocol, cast
 
@@ -44,21 +45,21 @@ def _bounded_provider_json(value: str) -> tuple[str, bool]:
 
 
 class ProviderStatus(StrEnum):
-    HEALTHY = "HEALTHY"
-    STANDBY = "STANDBY"
+    AVAILABLE = "AVAILABLE"
     RATE_LIMITED = "RATE_LIMITED"
     QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
-    AUTH_FAILED = "AUTH_FAILED"
-    UNAVAILABLE = "UNAVAILABLE"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
     CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
-    UNCONFIGURED = "UNCONFIGURED"
+    DISABLED = "DISABLED"
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass
 class ProviderRuntimeState:
     status: ProviderStatus
     model: str
+    account_id: str
+    enabled: bool
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
     circuit_open_until: datetime | None = None
@@ -66,10 +67,22 @@ class ProviderRuntimeState:
     last_http_status: int | None = None
     last_provider_error_code: str | None = None
     recent_failures: list[datetime] = field(default_factory=list)
+    calls_today: int = 0
+    successful_analyses: int = 0
+    provider_failures: int = 0
+    rate_limit_failures: int = 0
+    quota_failures: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    metrics_date: str | None = None
 
     def snapshot(self) -> dict[str, object]:
         return {
             "status": self.status.value,
+            "account_id": self.account_id,
+            "enabled": self.enabled,
+            "availability": self.status == ProviderStatus.AVAILABLE,
             "model": self.model,
             "last_success_at": self.last_success_at.isoformat() if self.last_success_at else None,
             "last_failure_at": self.last_failure_at.isoformat() if self.last_failure_at else None,
@@ -79,6 +92,24 @@ class ProviderRuntimeState:
             "last_failure_code": self.last_failure_code,
             "last_http_status": self.last_http_status,
             "last_provider_error_code": self.last_provider_error_code,
+            "cooldown_until": (
+                self.circuit_open_until.isoformat()
+                if self.circuit_open_until
+                else None
+            ),
+            "circuit_state": (
+                "OPEN" if self.circuit_open_until is not None else "CLOSED"
+            ),
+            "calls_today": self.calls_today,
+            "successful_analyses": self.successful_analyses,
+            "provider_failures": self.provider_failures,
+            "rate_limit_failures": self.rate_limit_failures,
+            "quota_failures": self.quota_failures,
+            "token_usage": {
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "total_tokens": self.total_tokens,
+            },
         }
 
 
@@ -106,7 +137,7 @@ class AIReasoningProvider(Protocol):
 
 
 def reasoning_response_schema() -> dict[str, Any]:
-    """Strict analysis-only schema accepted by both configured providers."""
+    """Strict application schema used for Groq JSON-output validation."""
 
     unsupported_keywords = {
         "title",
@@ -119,8 +150,7 @@ def reasoning_response_schema() -> dict[str, Any]:
         "maxItems",
         # Numeric bounds remain enforced by the unchanged Pydantic
         # domain schema after decoding. Omitting them from the wire
-        # contract keeps Cerebras below its 5,000-character schema
-        # ceiling without weakening application validation.
+        # contract stays compact without weakening application validation.
         "minimum",
         "maximum",
         "exclusiveMinimum",
@@ -390,16 +420,46 @@ class _OpenAICompatibleReasoningProvider:
         }
 
 
-class CerebrasProvider(_OpenAICompatibleReasoningProvider):
-    provider_name = "cerebras"
-
-
 class GroqProvider(_OpenAICompatibleReasoningProvider):
     provider_name = "groq"
-    # llama-3.1-8b-instant supports JSON Object Mode, but not Groq's strict
-    # json_schema constrained-decoding mode. TEN's unchanged application validator
-    # remains the authoritative schema boundary.
+    # JSON Object Mode plus TEN's unchanged application validator is the
+    # portable contract for every account in the pool.
     supports_strict_json_schema = False
+
+    def __init__(
+        self,
+        client: AIProviderClient,
+        prompts: PromptLoader,
+        *,
+        account_id: str,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        target_input_tokens: int,
+        warning_input_tokens: int,
+        hard_input_tokens: int,
+        absolute_max_output_tokens: int,
+        maximum_request_cost_usd: float,
+        input_cost_per_million_usd: float,
+        output_cost_per_million_usd: float,
+        setup_family_ids: tuple[str, ...],
+    ) -> None:
+        self.provider_name = account_id
+        super().__init__(
+            client,
+            prompts,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            target_input_tokens=target_input_tokens,
+            warning_input_tokens=warning_input_tokens,
+            hard_input_tokens=hard_input_tokens,
+            absolute_max_output_tokens=absolute_max_output_tokens,
+            maximum_request_cost_usd=maximum_request_cost_usd,
+            input_cost_per_million_usd=input_cost_per_million_usd,
+            output_cost_per_million_usd=output_cost_per_million_usd,
+            setup_family_ids=setup_family_ids,
+        )
 
     async def reason(
         self,
@@ -491,43 +551,67 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         )
 
 
-class AIProviderRouter:
-    """Sequential primary/fallback router with bounded retries and provider circuits."""
+class GroqProviderPool:
+    """Ordered Groq account failover with independent account cooldowns."""
 
     def __init__(
         self,
-        primary: CerebrasProvider,
-        fallback: GroqProvider,
+        providers: tuple[GroqProvider, ...],
         *,
         maximum_retries: int = 1,
-        circuit_seconds: float = 300,
-        auth_circuit_seconds: float = 3600,
+        rate_limit_cooldown_seconds: float = 3600,
+        quota_cooldown_seconds: float = 86400,
+        configuration_cooldown_seconds: float = 86400,
+        transport_circuit_seconds: float = 300,
         circuit_failure_threshold: int = 2,
         circuit_rolling_window_seconds: float = 60,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self.primary = primary
-        self.fallback = fallback
+        if len(providers) != 4:
+            raise ValueError("GroqProviderPool requires exactly four account slots")
+        self.providers = providers
+        self.providers_by_id = {
+            provider.provider_name: provider for provider in providers
+        }
         self.maximum_retries = maximum_retries
-        self.circuit_seconds = circuit_seconds
-        self.auth_circuit_seconds = auth_circuit_seconds
+        self.rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
+        self.quota_cooldown_seconds = quota_cooldown_seconds
+        self.configuration_cooldown_seconds = configuration_cooldown_seconds
+        self.transport_circuit_seconds = transport_circuit_seconds
         self.circuit_failure_threshold = circuit_failure_threshold
         self.circuit_rolling_window_seconds = circuit_rolling_window_seconds
         self.clock = clock or (lambda: datetime.now(UTC))
         self.states = {
-            "cerebras": ProviderRuntimeState(
-                ProviderStatus.STANDBY if primary.configured else ProviderStatus.UNCONFIGURED,
-                primary.model,
-            ),
-            "groq": ProviderRuntimeState(
-                ProviderStatus.STANDBY if fallback.configured else ProviderStatus.UNCONFIGURED,
-                fallback.model,
-            ),
+            provider.provider_name: ProviderRuntimeState(
+                status=(
+                    ProviderStatus.AVAILABLE
+                    if provider.configured
+                    else ProviderStatus.DISABLED
+                ),
+                model=provider.model,
+                account_id=provider.provider_name,
+                enabled=provider.configured,
+            )
+            for provider in providers
         }
         self.active_provider: str | None = None
         self.latest_successful_analysis_at: datetime | None = None
         self.retry_attempts = 0
-        self.fallback_attempts = 0
+        # Monotonic process counters are separate from the UTC-day runtime
+        # counters. Service-level metric deltas are persisted per request, so
+        # they must not roll backwards at midnight.
+        self._telemetry = {
+            provider.provider_name: {
+                "calls": 0,
+                "provider_failures": 0,
+                "rate_limit_failures": 0,
+                "quota_failures": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
+            for provider in providers
+        }
 
     async def reason(
         self,
@@ -536,198 +620,97 @@ class AIProviderRouter:
         prompt_version: str,
     ) -> AIProviderResponse:
         now = self.clock()
-        fallback_reason: str | None = None
-        primary_eligible = self._eligible("cerebras", now)
+        last_error: AIProviderRequestError | None = None
         logger.info(
-            "ai_provider.routing.entered",
+            "groq_pool.routing.entered",
             extra={
-                "provider": "cerebras",
-                "model": self.primary.model,
+                "provider": "groq_pool",
                 "instrument": request.instrument,
                 "cycle_id": str(request.cycle_id),
                 "ums_boundary": request.analysis_timestamp.isoformat(),
-                "primary_provider": "cerebras",
-                "primary_eligible": primary_eligible,
-                "primary_status": self.states["cerebras"].status.value,
-                "primary_circuit_open_until": (
-                    self.states["cerebras"].circuit_open_until.isoformat()
-                    if self.states["cerebras"].circuit_open_until
-                    else None
-                ),
-                "fallback_status": self.states["groq"].status.value,
+                "strategy": "ordered_failover",
+                "account_order": tuple(self.providers_by_id),
             },
         )
-        if primary_eligible:
+        for index, provider in enumerate(self.providers):
+            account_id = provider.provider_name
+            if not self._eligible(account_id, now):
+                account_state = self.states[account_id]
+                cooldown_until = account_state.circuit_open_until
+                logger.info(
+                    "groq_pool.account.skipped",
+                    extra={
+                        "provider": account_id,
+                        "model": provider.model,
+                        "cycle_id": str(request.cycle_id),
+                        "status": account_state.status.value,
+                        "cooldown_until": (
+                            cooldown_until.isoformat()
+                            if cooldown_until
+                            else None
+                        ),
+                    },
+                )
+                continue
             logger.info(
-                "ai_provider.primary.started",
+                "groq_pool.account.started",
                 extra={
-                    "provider": "cerebras",
-                    "model": self.primary.model,
+                    "provider": account_id,
+                    "model": provider.model,
                     "instrument": request.instrument,
                     "cycle_id": str(request.cycle_id),
                     "ums_boundary": request.analysis_timestamp.isoformat(),
+                    "account_position": index + 1,
                 },
             )
             try:
                 response = await self._attempt(
-                    self.primary,
+                    provider,
                     request,
                     prompt_version,
-                    fallback_used=False,
-                    fallback_reason=None,
+                    fallback_used=index > 0,
+                    fallback_reason=(
+                        last_error.details.reason_code if last_error else None
+                    ),
                 )
-                self._success("cerebras")
+                self._success(account_id, response)
                 return response
             except AIProviderRequestError as exc:
-                self._failure("cerebras", exc.details)
+                last_error = exc
+                self._failure(account_id, exc.details)
                 logger.warning(
-                    "ai_provider.primary.failed",
+                    "groq_pool.account.failed",
                     extra={
-                        "provider": "cerebras",
-                        "model": self.primary.model,
+                        "provider": account_id,
+                        "model": provider.model,
                         "instrument": request.instrument,
                         "cycle_id": str(request.cycle_id),
                         "ums_boundary": request.analysis_timestamp.isoformat(),
                         "status_code": exc.details.http_status,
                         "sanitized_error_code": exc.details.reason_code,
-                        "fallback_allowed": self._fallback_allowed(exc.details),
+                        "next_account_allowed": self._failover_allowed(exc.details),
                     },
                 )
-                if not self._fallback_allowed(exc.details):
+                if not self._failover_allowed(exc.details):
                     raise
-                fallback_reason = f"cerebras_{exc.details.reason_code}"
-        else:
-            primary_state = self.states["cerebras"]
-            fallback_reason = (
-                "cerebras_unconfigured"
-                if primary_state.status == ProviderStatus.UNCONFIGURED
-                else (
-                    f"cerebras_{primary_state.last_failure_code}"
-                    if primary_state.last_failure_code
-                    else None
-                )
-                or "cerebras_circuit_open"
-            )
-            logger.warning(
-                "ai_provider.primary.skipped",
-                extra={
-                    "provider": "cerebras",
-                    "model": self.primary.model,
-                    "instrument": request.instrument,
-                    "cycle_id": str(request.cycle_id),
-                    "ums_boundary": request.analysis_timestamp.isoformat(),
-                    "skip_reason": fallback_reason,
-                    "primary_status": self.states["cerebras"].status.value,
-                    "circuit_open_until": (
-                        self.states["cerebras"].circuit_open_until.isoformat()
-                        if self.states["cerebras"].circuit_open_until
-                        else None
-                    ),
-                },
-            )
-            if primary_state.status == ProviderStatus.UNCONFIGURED or (
-                primary_state.last_failure_code
-                not in {"rate_limited", "provider_unavailable", "request_timeout"}
-            ):
-                raise AIProviderRequestError(
-                    AIProviderFailureDetails(
-                        provider="cerebras",
-                        reason_code=(
-                            primary_state.last_failure_code
-                            or "provider_unconfigured"
-                        ),
-                        phase="provider_routing",
-                        endpoint=f"{self.primary.client.base_url}/chat/completions",
-                        model=self.primary.model,
-                        request_id=str(request.request_id),
-                        cycle_id=str(request.cycle_id),
-                        exception_class="AIProviderRoutingError",
-                    )
-                )
-
-        logger.info(
-            "ai_provider.fallback.started",
-            extra={
-                "provider": "groq",
-                "model": self.fallback.model,
-                "instrument": request.instrument,
-                "cycle_id": str(request.cycle_id),
-                "ums_boundary": request.analysis_timestamp.isoformat(),
-                "fallback_used": True,
-                "fallback_reason": fallback_reason,
-            },
-        )
-        if not self._eligible("groq", now):
-            details = AIProviderFailureDetails(
-                provider="groq",
-                reason_code=(
-                    "provider_unconfigured"
-                    if self.states["groq"].status == ProviderStatus.UNCONFIGURED
-                    else "provider_circuit_open"
-                ),
+        if last_error is not None:
+            raise last_error
+        raise AIProviderRequestError(
+            AIProviderFailureDetails(
+                provider="groq_pool",
+                reason_code="provider_pool_unavailable",
                 phase="provider_routing",
-                endpoint=f"{self.fallback.client.base_url}/chat/completions",
-                model=self.fallback.model,
+                endpoint=self.providers[0].client.base_url,
+                model=self.providers[0].model,
                 request_id=str(request.request_id),
                 cycle_id=str(request.cycle_id),
-                fallback_used=True,
-                fallback_reason=fallback_reason,
-                exception_class="AIProviderRoutingError",
+                exception_class="AIProviderPoolUnavailable",
             )
-            raise AIProviderRequestError(details)
-        self.fallback_attempts += 1
-        try:
-            response = await self._attempt(
-                self.fallback,
-                request,
-                prompt_version,
-                fallback_used=True,
-                fallback_reason=fallback_reason,
-            )
-        except AIProviderRequestError as exc:
-            self._failure("groq", exc.details)
-            details = replace(
-                exc.details,
-                fallback_used=True,
-                fallback_reason=fallback_reason,
-            )
-            logger.error(
-                "ai_provider.fallback.completed",
-                extra={
-                    "provider": "groq",
-                    "model": self.fallback.model,
-                    "instrument": request.instrument,
-                    "cycle_id": str(request.cycle_id),
-                    "ums_boundary": request.analysis_timestamp.isoformat(),
-                    "fallback_used": True,
-                    "fallback_reason": fallback_reason,
-                    "provider_status": "failed",
-                    "reasoning_status": "degraded",
-                    "publication_eligible": False,
-                    "sanitized_error_code": details.reason_code,
-                },
-            )
-            raise AIProviderRequestError(details) from exc
-        self._success("groq")
-        logger.info(
-            "ai_provider.fallback.completed",
-            extra={
-                "provider": "groq",
-                "model": self.fallback.model,
-                "instrument": request.instrument,
-                "cycle_id": str(request.cycle_id),
-                "ums_boundary": request.analysis_timestamp.isoformat(),
-                "fallback_used": True,
-                "fallback_reason": fallback_reason,
-                "provider_status": "success",
-                "reasoning_status": "valid",
-            },
         )
-        return response
 
     async def _attempt(
         self,
-        provider: _OpenAICompatibleReasoningProvider,
+        provider: GroqProvider,
         request: AIReasoningRequest,
         prompt_version: str,
         *,
@@ -738,6 +721,7 @@ class AIProviderRouter:
         for attempt in range(1, self.maximum_retries + 2):
             if attempt > 1:
                 self.retry_attempts += 1
+            calls_before = provider.http_calls
             try:
                 return await provider.reason(
                     request,
@@ -755,31 +739,82 @@ class AIProviderRouter:
                 if not retryable or attempt > self.maximum_retries:
                     raise
                 await asyncio.sleep(random.uniform(0.05, 0.15))
+            finally:
+                self._record_calls(
+                    provider.provider_name,
+                    provider.http_calls - calls_before,
+                )
         assert last_error is not None
         raise last_error
 
     def _eligible(self, provider: str, now: datetime) -> bool:
         state = self.states[provider]
-        if state.status == ProviderStatus.UNCONFIGURED:
+        self._roll_daily_metrics(state, now)
+        if not state.enabled or state.status == ProviderStatus.DISABLED:
             return False
         if state.circuit_open_until is None or now >= state.circuit_open_until:
             if state.circuit_open_until is not None:
                 logger.info(
-                    "ai_provider.circuit.closed",
+                    "groq_pool.account.cooldown_completed",
                     extra={"provider": provider, "model": state.model},
                 )
                 state.circuit_open_until = None
-                state.status = ProviderStatus.STANDBY
+                state.status = ProviderStatus.AVAILABLE
             return True
         return False
 
-    def _success(self, provider: str) -> None:
+    def _record_calls(self, provider: str, count: int) -> None:
+        if count <= 0:
+            return
+        state = self.states[provider]
+        self._roll_daily_metrics(state, self.clock())
+        state.calls_today += count
+        self._telemetry[provider]["calls"] += count
+
+    @staticmethod
+    def _roll_daily_metrics(
+        state: ProviderRuntimeState,
+        now: datetime,
+    ) -> None:
+        current_date = now.astimezone(UTC).date().isoformat()
+        if state.metrics_date == current_date:
+            return
+        state.metrics_date = current_date
+        state.calls_today = 0
+        state.successful_analyses = 0
+        state.provider_failures = 0
+        state.rate_limit_failures = 0
+        state.quota_failures = 0
+        state.input_tokens = 0
+        state.output_tokens = 0
+        state.total_tokens = 0
+
+    def _success(self, provider: str, response: AIProviderResponse) -> None:
         state = self.states[provider]
         was_open = state.circuit_open_until is not None
-        state.status = ProviderStatus.HEALTHY
+        state.status = ProviderStatus.AVAILABLE
         state.last_success_at = self.clock()
         state.circuit_open_until = None
         state.last_failure_code = None
+        status_code = (
+            response.operational_metadata.get("status_code")
+            if response.operational_metadata
+            else None
+        )
+        state.last_http_status = status_code if isinstance(status_code, int) else 200
+        usage = response.token_usage or {}
+        state.input_tokens += int(usage.get("input_tokens", 0))
+        state.output_tokens += int(usage.get("output_tokens", 0))
+        state.total_tokens += int(usage.get("total_tokens", 0))
+        self._telemetry[provider]["input_tokens"] += int(
+            usage.get("input_tokens", 0)
+        )
+        self._telemetry[provider]["output_tokens"] += int(
+            usage.get("output_tokens", 0)
+        )
+        self._telemetry[provider]["total_tokens"] += int(
+            usage.get("total_tokens", 0)
+        )
         if was_open:
             logger.info(
                 "ai_provider.circuit.closed",
@@ -793,13 +828,15 @@ class AIProviderRouter:
         state.last_failure_code = details.reason_code
         state.last_http_status = details.http_status
         state.last_provider_error_code = details.error_code
+        state.provider_failures += 1
+        self._telemetry[provider]["provider_failures"] += 1
         state.recent_failures = [
             value
             for value in state.recent_failures
             if (now - value).total_seconds() <= self.circuit_rolling_window_seconds
         ]
         state.recent_failures.append(now)
-        duration = self.circuit_seconds
+        duration = self.transport_circuit_seconds
         configuration_failure = details.reason_code in {
             "authentication_failed",
             "invalid_request",
@@ -808,19 +845,27 @@ class AIProviderRouter:
         }
         if details.reason_code == "authentication_failed":
             state.status = ProviderStatus.CONFIGURATION_ERROR
-            duration = self.auth_circuit_seconds
+            duration = self.configuration_cooldown_seconds
         elif details.reason_code in {"invalid_request", "model_unavailable", "provider_unconfigured"}:
             state.status = ProviderStatus.CONFIGURATION_ERROR
-            duration = self.auth_circuit_seconds
+            duration = self.configuration_cooldown_seconds
         elif details.reason_code == "quota_exhausted":
             state.status = ProviderStatus.QUOTA_EXHAUSTED
-            duration = max(self.circuit_seconds, 3600)
+            state.quota_failures += 1
+            self._telemetry[provider]["quota_failures"] += 1
+            duration = self.quota_cooldown_seconds
         elif details.reason_code == "token_quota_exhausted":
             state.status = ProviderStatus.RATE_LIMITED
+            state.rate_limit_failures += 1
+            self._telemetry[provider]["rate_limit_failures"] += 1
+            duration = self.rate_limit_cooldown_seconds
         elif details.reason_code == "rate_limited":
             state.status = ProviderStatus.RATE_LIMITED
+            state.rate_limit_failures += 1
+            self._telemetry[provider]["rate_limit_failures"] += 1
+            duration = self.rate_limit_cooldown_seconds
         else:
-            state.status = ProviderStatus.UNAVAILABLE
+            state.status = ProviderStatus.UNKNOWN
         should_open = (
             configuration_failure
             or details.reason_code
@@ -830,6 +875,13 @@ class AIProviderRouter:
         state.circuit_open_until = (
             self._reset_at(details, now, duration) if should_open else None
         )
+        if (
+            state.circuit_open_until is not None
+            and not configuration_failure
+            and details.reason_code
+            not in {"quota_exhausted", "token_quota_exhausted", "rate_limited"}
+        ):
+            state.status = ProviderStatus.CIRCUIT_OPEN
         logger.warning(
             "ai_provider.failure.recorded",
             extra={
@@ -865,23 +917,60 @@ class AIProviderRouter:
                     return datetime.fromtimestamp(value, tz=UTC)
                 return now + timedelta(seconds=max(1, value))
             except ValueError:
-                pass
+                compact = raw.strip().lower().replace(" ", "")
+                matches = re.findall(r"(\d+(?:\.\d+)?)(ms|s|m|h|d)", compact)
+                if matches and "".join(
+                    f"{number}{unit}" for number, unit in matches
+                ) == compact:
+                    factors = {
+                        "ms": 0.001,
+                        "s": 1.0,
+                        "m": 60.0,
+                        "h": 3600.0,
+                        "d": 86400.0,
+                    }
+                    seconds = sum(
+                        float(number) * factors[unit]
+                        for number, unit in matches
+                    )
+                    return now + timedelta(seconds=max(1, seconds))
+                try:
+                    reset_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+                else:
+                    if reset_at.tzinfo is not None:
+                        return reset_at.astimezone(UTC)
         return now + timedelta(seconds=default_seconds)
 
     @staticmethod
-    def _fallback_allowed(details: AIProviderFailureDetails) -> bool:
+    def _failover_allowed(details: AIProviderFailureDetails) -> bool:
         if details.phase in {"request_validation", "response_decoding", "domain_parsing"}:
             return False
         return details.reason_code in {
+            "authentication_failed",
+            "invalid_request",
+            "model_unavailable",
+            "provider_unconfigured",
+            "quota_exhausted",
+            "token_quota_exhausted",
             "rate_limited",
             "provider_unavailable",
             "request_timeout",
         }
 
     def metadata(self) -> dict[str, object]:
+        now = self.clock()
+        available_accounts = sum(
+            self._eligible(provider.provider_name, now)
+            for provider in self.providers
+        )
+        configured_accounts = sum(
+            state.enabled for state in self.states.values()
+        )
         return {
-            "provider": self.active_provider,
-            "primary_provider": "cerebras",
+            "provider": "groq_pool",
+            "primary_provider": "Groq pool",
             "active_provider": self.active_provider,
             "latest_successful_provider": self.active_provider,
             "latest_successful_analysis_at": (
@@ -889,14 +978,11 @@ class AIProviderRouter:
                 if self.latest_successful_analysis_at
                 else None
             ),
-            "model_identifier": (
-                self.primary.model
-                if self.active_provider == "cerebras"
-                else self.fallback.model
-                if self.active_provider == "groq"
-                else self.primary.model
-            ),
-            "external_ai_apis": ("cerebras", "groq"),
+            "model_identifier": self.providers[0].model,
+            "external_ai_apis": ("groq",),
+            "configured_account_count": configured_accounts,
+            "available_account_count": available_accounts,
+            "pool_strategy": "ordered_failover",
             "providers": {
                 name: state.snapshot() for name, state in self.states.items()
             },
@@ -904,12 +990,19 @@ class AIProviderRouter:
             "circuit_policy": {
                 "failure_threshold": self.circuit_failure_threshold,
                 "rolling_window_seconds": self.circuit_rolling_window_seconds,
-                "open_duration_seconds": self.circuit_seconds,
-                "configuration_open_duration_seconds": self.auth_circuit_seconds,
+                "transport_open_duration_seconds": self.transport_circuit_seconds,
+                "rate_limit_cooldown_seconds": self.rate_limit_cooldown_seconds,
+                "quota_cooldown_seconds": self.quota_cooldown_seconds,
+                "configuration_open_duration_seconds": self.configuration_cooldown_seconds,
                 "half_open_probe": "one eligible request after open duration",
                 "success_threshold_to_close": 1,
                 "permanent_4xx_retried": False,
-                "fallback_failure_classes": (
+                "account_failover_failure_classes": (
+                    "authentication_failed",
+                    "invalid_request",
+                    "model_unavailable",
+                    "quota_exhausted",
+                    "token_quota_exhausted",
                     "rate_limited",
                     "provider_unavailable",
                     "request_timeout",
@@ -926,24 +1019,40 @@ class AIProviderRouter:
 
         self.active_provider = provider
         self.latest_successful_analysis_at = persisted_at.astimezone(UTC)
+        self.states[provider].successful_analyses += 1
 
     def metrics(self) -> dict[str, int]:
-        cerebras_calls = self.primary.http_calls
-        groq_calls = self.fallback.http_calls
-        return {
-            "provider_http_calls": cerebras_calls + groq_calls,
-            "cerebras_calls": cerebras_calls,
-            "groq_fallback_calls": groq_calls,
+        groq_calls = sum(provider.http_calls for provider in self.providers)
+        metrics = {
+            "provider_http_calls": groq_calls,
+            "groq_calls": groq_calls,
             "retry_attempts": self.retry_attempts,
-            "fallback_attempts": self.fallback_attempts,
             "schema_corrections": (
-                self.primary.correction_attempts
-                + self.fallback.correction_attempts
+                sum(provider.correction_attempts for provider in self.providers)
             ),
         }
+        for provider in self.providers:
+            account_id = provider.provider_name
+            telemetry = self._telemetry[account_id]
+            metrics.update(
+                {
+                    f"{account_id}_calls": telemetry["calls"],
+                    f"{account_id}_provider_failures": telemetry[
+                        "provider_failures"
+                    ],
+                    f"{account_id}_rate_limit_failures": telemetry[
+                        "rate_limit_failures"
+                    ],
+                    f"{account_id}_quota_failures": telemetry["quota_failures"],
+                    f"{account_id}_input_tokens": telemetry["input_tokens"],
+                    f"{account_id}_output_tokens": telemetry["output_tokens"],
+                    f"{account_id}_total_tokens": telemetry["total_tokens"],
+                }
+            )
+        return metrics
 
     def mark_model_unavailable(self, provider: str) -> None:
-        selected = self.primary if provider == "cerebras" else self.fallback
+        selected = self.providers_by_id[provider]
         self._failure(
             provider,
             AIProviderFailureDetails(

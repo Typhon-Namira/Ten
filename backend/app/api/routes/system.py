@@ -136,18 +136,38 @@ async def diagnostics(request: Request) -> dict[str, object]:
             "latest_scenario": signal.model_dump(mode="json") if signal and signal.state == "eligible" else None,
         },
         "ai": {
-            "configured": bool(settings.cerebras_api_key or settings.groq_api_key),
+            "configured": settings.groq_pool_enabled and any(
+                key is not None
+                for index, key in enumerate(
+                    settings.groq_pool_api_keys,
+                    start=1,
+                )
+                if index <= settings.groq_pool_size
+            ),
+            "primary_provider": "Groq pool",
+            "configured_account_count": sum(
+                settings.groq_pool_enabled
+                and index <= settings.groq_pool_size
+                and key is not None
+                for index, key in enumerate(
+                    settings.groq_pool_api_keys,
+                    start=1,
+                )
+            ),
             "providers": {
-                "cerebras": {
-                    "configured": bool(settings.cerebras_api_key),
-                    "base_url_configured": bool(settings.cerebras_base_url),
-                    "model": settings.cerebras_model,
-                },
-                "groq": {
-                    "configured": bool(settings.groq_api_key),
+                f"groq_{index}": {
+                    "configured": (
+                        settings.groq_pool_enabled
+                        and index <= settings.groq_pool_size
+                        and key is not None
+                    ),
                     "base_url_configured": bool(settings.groq_base_url),
                     "model": settings.groq_model,
-                },
+                }
+                for index, key in enumerate(
+                    settings.groq_pool_api_keys,
+                    start=1,
+                )
             },
             "latest_status": app.state.ai_scoring_service.metrics.snapshot(),
         },

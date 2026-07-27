@@ -124,6 +124,32 @@ async def latest(
 
     performance = await final_repository.latest_performance_report()
     readiness = await final_repository.latest_readiness_report()
+    health = service.health()
+    provider_states = health.get("providers")
+    if isinstance(provider_states, dict):
+        for account_id, provider_state in provider_states.items():
+            if not isinstance(account_id, str) or not isinstance(provider_state, dict):
+                continue
+            provider_state["calls_today"] = usage_parameter(f"{account_id}_calls")
+            provider_state["successful_analyses"] = sum(
+                int(item.success)
+                for item in usage
+                if item.generation_parameters.get("provider") == account_id
+            )
+            provider_state["provider_failures"] = usage_parameter(
+                f"{account_id}_provider_failures"
+            )
+            provider_state["rate_limit_failures"] = usage_parameter(
+                f"{account_id}_rate_limit_failures"
+            )
+            provider_state["quota_failures"] = usage_parameter(
+                f"{account_id}_quota_failures"
+            )
+            provider_state["token_usage"] = {
+                "input_tokens": usage_parameter(f"{account_id}_input_tokens"),
+                "output_tokens": usage_parameter(f"{account_id}_output_tokens"),
+                "total_tokens": usage_parameter(f"{account_id}_total_tokens"),
+            }
     return {
         "analysis": analysis.model_dump(mode="json") if analysis else None,
         "forecast": forecast.model_dump(mode="json") if forecast else None,
@@ -135,8 +161,7 @@ async def latest(
         "llm_usage": {
             "request_count": sum(item.request_count for item in usage),
             "provider_http_calls": sum(item.request_count for item in usage),
-            "cerebras_calls": usage_parameter("cerebras_calls"),
-            "groq_fallback_calls": usage_parameter("groq_fallback_calls"),
+            "groq_calls": usage_parameter("groq_calls"),
             "retries": usage_parameter("retry_attempts"),
             "schema_corrections": usage_parameter("schema_corrections"),
             "provider_failures": usage_parameter("provider_failure"),
@@ -154,7 +179,7 @@ async def latest(
         "performance": performance.model_dump(mode="json") if performance else None,
         "production_readiness": readiness.model_dump(mode="json") if readiness else None,
         "runtime": _runtime_state(request),
-        "health": {**service.health(), "guardrails": final_service.health()},
+        "health": {**health, "guardrails": final_service.health()},
     }
 
 

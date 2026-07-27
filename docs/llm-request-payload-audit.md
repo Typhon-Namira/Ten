@@ -40,7 +40,7 @@ AIReasoningRequestBuilder.build
   backend/app/ai_reasoning/request_builder.py
   → converted every UMS EvidenceItem into AIReasoningRequest
 
-AIProviderRouter.reason
+GroqProviderPool.reason
   backend/app/ai_reasoning/provider.py
   → loaded prompt
   → serialized request.model_dump()
