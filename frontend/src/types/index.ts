@@ -757,6 +757,13 @@ export interface AIReasoningDashboard {
   publications: Record<string, PublishedAnalyticalSignal | null>
   llm_usage: {
     request_count: number
+    provider_http_calls: number
+    cerebras_calls: number
+    groq_fallback_calls: number
+    retries: number
+    schema_corrections: number
+    provider_failures: number
+    validation_failures: number
     total_tokens: number | null
     successful_requests: number
     failed_requests: number
@@ -805,7 +812,22 @@ export interface AIReasoningDashboard {
       circuit_open_until: string | null
       last_failure_code: string | null
     }>
-    deduplicated_market_states: number
+    call_control: {
+      analysis_timeframe: 'M5'
+      interval_minutes: 5
+      eligible_five_minute_cycles: number
+      analyses_successfully_completed: number
+      provider_http_calls: number
+      cerebras_calls: number
+      groq_fallback_calls: number
+      retries: number
+      schema_corrections: number
+      skipped_before_provider_call: number
+      deduplicated_before_provider_call: number
+      provider_failures: number
+      validation_failures: number
+      skip_reasons: Record<string, number>
+    }
     guardrails: {
       status: string
       publication_enabled: boolean

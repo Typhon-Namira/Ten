@@ -89,7 +89,7 @@ def _install(client: TestClient, fake: FakeProviderClient) -> None:
     client.app.state.explainability_service = ExplainabilityService(fake, PromptLoader(PROMPTS_DIR), model="test-model")
 
 
-def test_explain_current_grounds_context_and_cites_evidence() -> None:
+def test_explain_current_is_read_only_and_cites_persisted_evidence() -> None:
     fake = FakeProviderClient(response=VALID_EXPLANATION)
     with TestClient(create_app()) as client:
         _install(client, fake)
@@ -97,41 +97,37 @@ def test_explain_current_grounds_context_and_cites_evidence() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["error"] is None
-    assert body["explanation"] == VALID_EXPLANATION
+    assert body["explanation"]["summary"]
+    assert "deterministic read" in body["explanation"]["caveats"][0]
     assert body["explainability_score"]["engines_total"] == 8
     assert isinstance(body["evidence"], list)
     assert len(body["engines"]) == 8
-    # The grounded payload sent to the model must contain the same engine facts the response cites.
-    sent_payload = fake.calls[0]["payload"]
-    assert sent_payload["instrument"] == body["instrument"]
-    assert len(sent_payload["engines"]) == 8
+    assert fake.calls == []
 
 
-def test_explain_current_degrades_gracefully_when_provider_fails() -> None:
-    """A failing provider call must never 500 and never fabricate an explanation — it degrades
-    to `explanation: null` with the failure reported in `error`."""
+def test_explain_current_never_contacts_a_failing_provider() -> None:
     fake = FakeProviderClient(error=ExternalServiceError("Provider returned an invalid scoring response"))
     with TestClient(create_app(), raise_server_exceptions=False) as client:
         _install(client, fake)
         response = client.get("/api/v1/explain/current")
     assert response.status_code == 200
     body = response.json()
-    assert body["explanation"] is None
-    assert body["error"]
+    assert body["explanation"]["summary"]
+    assert body["error"] is None
     assert body["explainability_score"]["engines_total"] == 8
+    assert fake.calls == []
 
 
-def test_explain_current_degrades_when_model_returns_an_invalid_shape() -> None:
-    """The model returning JSON that doesn't match `Explanation` (e.g. missing `summary`) must
-    also degrade instead of 500ing or being rendered as-is."""
+def test_explain_current_ignores_provider_output_entirely() -> None:
     fake = FakeProviderClient(response={"primary_reasons": ["not a valid explanation"]})
     with TestClient(create_app(), raise_server_exceptions=False) as client:
         _install(client, fake)
         response = client.get("/api/v1/explain/current")
     assert response.status_code == 200
     body = response.json()
-    assert body["explanation"] is None
-    assert body["error"]
+    assert body["explanation"]["summary"]
+    assert body["error"] is None
+    assert fake.calls == []
 
 
 def test_explain_decision_not_found_returns_404() -> None:
@@ -152,7 +148,7 @@ def test_explain_rejection_rejects_an_eligible_decision_with_422() -> None:
     assert response.status_code == 422
 
 
-def test_explain_rejection_explains_a_blocked_decision_with_a_rejection_specific_question() -> None:
+def test_explain_rejection_projects_a_blocked_decision_without_provider_call() -> None:
     fake = FakeProviderClient(response=VALID_EXPLANATION)
     decision = FakeDecision(state="blocked")
     with TestClient(create_app()) as client:
@@ -161,13 +157,11 @@ def test_explain_rejection_explains_a_blocked_decision_with_a_rejection_specific
         response = client.get(f"/api/v1/explain/rejection/{decision.decision_id}")
     assert response.status_code == 200
     body = response.json()
-    assert body["explanation"] == VALID_EXPLANATION
-    sent_payload = fake.calls[0]["payload"]
-    assert "rejected" in sent_payload["question"].lower()
-    assert sent_payload["decision"]["state"] == "blocked"
+    assert "blocked" in body["explanation"]["summary"]
+    assert fake.calls == []
 
 
-def test_explain_chat_folds_conversation_history_into_the_grounded_payload() -> None:
+def test_explain_chat_is_a_read_only_persisted_evidence_projection() -> None:
     fake = FakeProviderClient(response=VALID_EXPLANATION)
     with TestClient(create_app()) as client:
         _install(client, fake)
@@ -177,10 +171,5 @@ def test_explain_chat_folds_conversation_history_into_the_grounded_payload() -> 
         )
     assert response.status_code == 200
     body = response.json()
-    assert body["explanation"] == VALID_EXPLANATION
-    sent_payload = fake.calls[0]["payload"]
-    assert sent_payload["question"] == "Why is confidence low?"
-    assert sent_payload["conversation_history"] == [
-        {"role": "user", "content": "Explain the current market."},
-        {"role": "assistant", "content": "Confidence is currently unavailable."},
-    ]
+    assert body["explanation"]["summary"]
+    assert fake.calls == []

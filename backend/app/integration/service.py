@@ -13,6 +13,10 @@ from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.engines.market_data_engine.events import NewCandle
 from backend.app.engines.signal_decision_engine import DecisionMode, DecisionRequest, DecisionState
 from backend.app.events import Event, EventBus
+from backend.app.ai_reasoning.cadence import (
+    AI_ANALYSIS_TIMEFRAME,
+    five_minute_window_start,
+)
 
 from .config import IntegrationConfig
 from .models import CanonicalEventEnvelope, DataQualityIssue, DataQualityStatus, EvidenceReference, IntegrationMode, IntegrationSnapshot, IntegrationTraceRecord, MarketCandlePayload, OperationalSignal, SnapshotStatus, TraceStatus, canonical_hash, semantic_uuid
@@ -337,6 +341,25 @@ class FullSystemIntegrationService:
                                     **gate_context,
                                     "market_state_id": str(getattr(market_state, "state_id", "unknown")),
                                     "skip_reason": "quantitative_forecast_not_ready",
+                                },
+                            )
+                        elif (
+                            str(getattr(market_state, "trigger_timeframe", "")).upper()
+                            != AI_ANALYSIS_TIMEFRAME
+                            or market_state.market_data_boundary.astimezone(UTC)
+                            != five_minute_window_start(
+                                market_state.market_data_boundary
+                            )
+                        ):
+                            logger.info(
+                                "ai_reasoning.gate.skipped",
+                                extra={
+                                    **gate_context,
+                                    "market_state_id": str(
+                                        getattr(market_state, "state_id", "unknown")
+                                    ),
+                                    "skip_reason": "not_five_minute_boundary",
+                                    "provider_call_made": False,
                                 },
                             )
                         elif self.ai_reasoning is None:

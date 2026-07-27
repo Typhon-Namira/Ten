@@ -1100,6 +1100,21 @@ class AIReasoningCycleLockRecord(Base):
             "instrument",
             "ums_boundary",
         ),
+        Index(
+            "ux_ai_reasoning_five_minute_cycle",
+            "instrument",
+            "analysis_timeframe",
+            "five_minute_window_start",
+            "analysis_contract_version",
+            unique=True,
+        ),
+        Index(
+            "ux_ai_reasoning_market_state_contract",
+            "instrument",
+            "market_state_hash",
+            "analysis_contract_version",
+            unique=True,
+        ),
     )
 
     idempotency_key: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -1107,6 +1122,17 @@ class AIReasoningCycleLockRecord(Base):
     ums_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     cycle_version: Mapped[str] = mapped_column(String(32))
     provider_contract_version: Mapped[str] = mapped_column(String(128))
+    analysis_timeframe: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    five_minute_window_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    market_state_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    analysis_contract_version: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(24))
     request_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),

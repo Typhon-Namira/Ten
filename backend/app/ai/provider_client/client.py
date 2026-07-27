@@ -157,6 +157,9 @@ class AIProviderClient(Protocol):
         cycle_id: str | None = None,
         instrument: str | None = None,
         ums_boundary: str | None = None,
+        trigger: str | None = None,
+        idempotency_key: str | None = None,
+        time_bucket: str | None = None,
         attempt: int = 1,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
@@ -274,7 +277,51 @@ class HttpAIProviderClient:
                 )
                 response.raise_for_status()
                 data = response.json().get("data", ())
-        except (httpx.HTTPError, ValueError, AttributeError):
+        except httpx.HTTPStatusError as exc:
+            code, message, error_type, provider_code = _error_fields(exc.response)
+            logger.warning(
+                "ai_provider.model_check.failed",
+                extra={
+                    "provider": self.provider,
+                    "endpoint": endpoint,
+                    "status_code": exc.response.status_code,
+                    "sanitized_error_code": _reason_code(
+                        exc.response.status_code,
+                        code,
+                        message,
+                        error_type,
+                    ),
+                    "provider_error_code": code,
+                    "provider_error_message": message,
+                    "provider_error_type": error_type,
+                    "provider_code": provider_code,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            return ()
+        except httpx.RequestError as exc:
+            logger.warning(
+                "ai_provider.model_check.failed",
+                extra={
+                    "provider": self.provider,
+                    "endpoint": endpoint,
+                    "status_code": None,
+                    "sanitized_error_code": "provider_unavailable",
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            return ()
+        except (ValueError, AttributeError) as exc:
+            logger.warning(
+                "ai_provider.model_check.failed",
+                extra={
+                    "provider": self.provider,
+                    "endpoint": endpoint,
+                    "status_code": response.status_code,
+                    "sanitized_error_code": "response_decoding_failed",
+                    "exception_type": type(exc).__name__,
+                },
+            )
             return ()
         return tuple(
             str(item["id"])
@@ -295,6 +342,9 @@ class HttpAIProviderClient:
         cycle_id: str | None = None,
         instrument: str | None = None,
         ums_boundary: str | None = None,
+        trigger: str | None = None,
+        idempotency_key: str | None = None,
+        time_bucket: str | None = None,
         attempt: int = 1,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
@@ -323,6 +373,9 @@ class HttpAIProviderClient:
             "instrument": instrument,
             "cycle_id": cycle_id,
             "ums_boundary": ums_boundary,
+            "trigger": trigger,
+            "idempotency_key": idempotency_key,
+            "time_bucket": time_bucket,
             "attempt": attempt,
             "fallback_used": fallback_used,
             "fallback_reason": fallback_reason,

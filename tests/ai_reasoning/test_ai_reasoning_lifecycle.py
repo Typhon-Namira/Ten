@@ -18,6 +18,7 @@ from backend.app.core.exceptions import AIProviderFailureDetails, AIProviderRequ
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
 from backend.app.market_state import InMemoryUnifiedMarketStateRepository, UnifiedMarketStateService
+from backend.app.market_state.service import expected_closed_boundary
 from backend.app.quant_forecasting.config import QuantForecastingConfig
 from backend.app.quant_forecasting.features import PointInTimeFeatureExtractor
 from backend.app.quant_forecasting.provider import DeterministicBaselineProvider
@@ -40,10 +41,15 @@ class EngineOutput(BaseModel):
     structure: dict[str, object] = {"direction": "bullish", "bos": True}
 
 
-def candle(timeframe: Timeframe) -> Candle:
+def candle(
+    timeframe: Timeframe,
+    *,
+    boundary: datetime = BOUNDARY,
+    now: datetime = NOW,
+) -> Candle:
     return Candle(
-        timestamp=BOUNDARY - timeframe.duration,
-        ingestion_timestamp=NOW,
+        timestamp=boundary - timeframe.duration,
+        ingestion_timestamp=now,
         symbol="XAUUSD",
         timeframe=timeframe,
         open=3300,
@@ -56,13 +62,22 @@ def candle(timeframe: Timeframe) -> Candle:
     )
 
 
-async def state_and_quant():
+async def state_and_quant(
+    boundary: datetime = BOUNDARY,
+    *,
+    trigger: Timeframe = Timeframe.M5,
+):
+    now = boundary + timedelta(seconds=5)
     state_service = UnifiedMarketStateService(
         InMemoryUnifiedMarketStateRepository(),
-        clock=lambda: NOW,
+        clock=lambda: now,
     )
     outputs = {
-        name: EngineOutput(snapshot_id=f"{name}-snapshot")
+        name: EngineOutput(
+            snapshot_id=f"{name}-snapshot-{boundary.isoformat()}",
+            analysis_timestamp=boundary,
+            created_at=now,
+        )
         for name in (
             "smc",
             "liquidity",
@@ -73,18 +88,25 @@ async def state_and_quant():
         )
     }
     state = None
-    for timeframe in (Timeframe.M1, Timeframe.M5, Timeframe.M15):
-        envelope = CanonicalEventEnvelope.final_candle(candle(timeframe), uuid4(), NOW)
+    timeframes = [Timeframe.M1, Timeframe.M15]
+    timeframes.append(trigger)
+    for timeframe in timeframes:
+        frame_boundary = expected_closed_boundary(boundary, timeframe.value)
+        envelope = CanonicalEventEnvelope.final_candle(
+            candle(timeframe, boundary=frame_boundary, now=now),
+            uuid4(),
+            now,
+        )
         state = await state_service.capture_cycle(envelope, outputs)
     assert state is not None
     config = YamlConfigRepository().load_model("quant_forecasting", QuantForecastingConfig)
     quant = await QuantForecastService(
         InMemoryQuantForecastRepository(),
-        DeterministicBaselineProvider(config, clock=lambda: NOW),
-        PointInTimeFeatureExtractor(config.feature_schema_version, clock=lambda: NOW),
+        DeterministicBaselineProvider(config, clock=lambda: now),
+        PointInTimeFeatureExtractor(config.feature_schema_version, clock=lambda: now),
         config,
         enabled=True,
-        clock=lambda: NOW,
+        clock=lambda: now,
     ).forecast(state)
     assert quant is not None
     return state, quant
@@ -175,6 +197,15 @@ class ValidProvider:
             "external_ai_apis": ("cerebras",),
         }
 
+    def metrics(self) -> dict[str, int]:
+        return {
+            "provider_http_calls": self.calls,
+            "cerebras_calls": self.calls,
+            "groq_fallback_calls": 0,
+            "retry_attempts": 0,
+            "schema_corrections": 0,
+        }
+
     async def reason(self, request, *, prompt_version: str) -> AIProviderResponse:
         self.calls += 1
         return AIProviderResponse(
@@ -209,6 +240,22 @@ class TypedFailureProvider(ValidProvider):
         )
 
 
+class PreflightFailureProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version: str) -> AIProviderResponse:
+        raise AIProviderRequestError(
+            AIProviderFailureDetails(
+                provider="cerebras",
+                reason_code="request_too_large",
+                phase="request_validation",
+                endpoint="https://api.cerebras.ai/v1/chat/completions",
+                model=request.model_identifier,
+                request_id=str(request.request_id),
+                cycle_id=str(request.cycle_id),
+                exception_class="AIProviderRequestBudgetError",
+            )
+        )
+
+
 def build_service(
     repository: InMemoryAIReasoningRepository,
     provider: ValidProvider,
@@ -216,6 +263,7 @@ def build_service(
     shadow: bool = True,
     proposals: bool = False,
     monitoring: bool = False,
+    now: datetime = NOW,
 ) -> AIReasoningService:
     config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig)
     return AIReasoningService(
@@ -224,14 +272,14 @@ def build_service(
         AIReasoningRequestBuilder(
             config,
             model_identifier="configured-model",
-            clock=lambda: NOW,
+            clock=lambda: now,
         ),
         StructuredAIOutputValidator(),
         config,
         shadow_enabled=shadow,
         proposals_enabled=proposals,
         monitoring_enabled=monitoring,
-        clock=lambda: NOW,
+        clock=lambda: now,
     )
 
 
@@ -308,3 +356,93 @@ async def test_provider_failure_persists_analysis_failure_without_trade_artifact
     assert repository.forecasts == {}
     assert repository.proposals == {}
     assert repository.signals == {}
+
+
+@pytest.mark.asyncio
+async def test_only_m5_trigger_at_utc_five_minute_boundary_is_eligible() -> None:
+    state, quant = await state_and_quant()
+    repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
+    service = build_service(repository, provider)
+
+    minute_state = state.model_copy(update={"trigger_timeframe": "M1"})
+    assert await service.process(minute_state, quant) is None
+    assert provider.calls == 0
+    assert (
+        service.health()["call_control"]["skip_reasons"]["not_five_minute_boundary"]
+        == 1
+    )
+
+    assert await service.process(state, quant) is not None
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_inside_same_window_reuses_durable_claim() -> None:
+    state, quant = await state_and_quant()
+    repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
+
+    assert await build_service(repository, provider).process(state, quant) is not None
+    restarted = build_service(repository, provider)
+    assert await restarted.process(state, quant) is not None
+
+    assert provider.calls == 1
+    assert len(repository.analyses) == 1
+    assert restarted.health()["call_control"]["provider_http_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_controlled_twenty_minute_simulation_has_four_provider_calls() -> None:
+    repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
+    service = build_service(
+        repository,
+        provider,
+        now=BOUNDARY + timedelta(minutes=20),
+    )
+
+    for offset in range(20):
+        cycle_boundary = BOUNDARY + timedelta(minutes=offset - offset % 5)
+        state, quant = await state_and_quant(cycle_boundary)
+        if offset % 5:
+            state = state.model_copy(update={"trigger_timeframe": "M1"})
+        await service.process(state, quant)
+
+    metrics = service.health()["call_control"]
+    assert provider.calls == 4
+    assert len(repository.analyses) == 4
+    assert metrics["eligible_five_minute_cycles"] == 4
+    assert metrics["skipped_before_provider_call"] == 16
+    assert metrics["groq_fallback_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_market_data_is_rejected_before_provider_call() -> None:
+    state, quant = await state_and_quant()
+    stale_frames = tuple(
+        item.model_copy(update={"stale": True})
+        if item.timeframe == "M1"
+        else item
+        for item in state.timeframes
+    )
+    state = state.model_copy(update={"timeframes": stale_frames})
+    repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
+    service = build_service(repository, provider)
+
+    assert await service.process(state, quant) is None
+    assert provider.calls == 0
+    assert service.health()["call_control"]["skip_reasons"]["market_data_stale"] == 1
+
+
+@pytest.mark.asyncio
+async def test_request_preflight_failure_is_a_skip_not_a_provider_failure() -> None:
+    state, quant = await state_and_quant()
+    repository, provider = InMemoryAIReasoningRepository(), PreflightFailureProvider()
+    service = build_service(repository, provider)
+
+    assert await service.process(state, quant) is None
+
+    metrics = service.health()["call_control"]
+    assert provider.calls == 0
+    assert metrics["provider_http_calls"] == 0
+    assert metrics["provider_failures"] == 0
+    assert metrics["skip_reasons"]["request_preflight_failed"] == 1
+    assert repository.analyses == {}

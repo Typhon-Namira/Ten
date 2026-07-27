@@ -448,8 +448,22 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
     )
 
     usage_rows = await request.app.state.final_decision_repository.usage_for_date(now.date().isoformat())
+    def usage_parameter(name: str) -> int:
+        return sum(
+            int(item.generation_parameters.get(name, 0))
+            for item in usage_rows
+            if isinstance(item.generation_parameters.get(name, 0), (int, float))
+        )
+
     usage = {
         "request_count": sum(item.request_count for item in usage_rows),
+        "provider_http_calls": sum(item.request_count for item in usage_rows),
+        "cerebras_calls": usage_parameter("cerebras_calls"),
+        "groq_fallback_calls": usage_parameter("groq_fallback_calls"),
+        "retries": usage_parameter("retry_attempts"),
+        "schema_corrections": usage_parameter("schema_corrections"),
+        "provider_failures": usage_parameter("provider_failure"),
+        "validation_failures": usage_parameter("validation_failure"),
         "total_tokens": (
             sum(item.total_tokens or 0 for item in usage_rows)
             if any(item.total_tokens is not None for item in usage_rows)
@@ -465,6 +479,28 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
     readiness = await request.app.state.final_decision_repository.latest_readiness_report()
     quant_health = request.app.state.quant_forecast_service.health()
     ai_health = request.app.state.ai_reasoning_service.health()
+    call_control = ai_health.get("call_control")
+    if isinstance(call_control, dict):
+        usage.update(
+            {
+                "eligible_five_minute_cycles": call_control.get(
+                    "eligible_five_minute_cycles",
+                    0,
+                ),
+                "analyses_successfully_completed": call_control.get(
+                    "analyses_successfully_completed",
+                    0,
+                ),
+                "skipped_before_provider_call": call_control.get(
+                    "skipped_before_provider_call",
+                    0,
+                ),
+                "deduplicated_before_provider_call": call_control.get(
+                    "deduplicated_before_provider_call",
+                    0,
+                ),
+            }
+        )
     guardrail_health = request.app.state.final_decision_service.health()
     runtime = {
         "operating_profile": (

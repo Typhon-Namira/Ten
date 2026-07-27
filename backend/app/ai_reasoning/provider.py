@@ -102,12 +102,38 @@ class AIReasoningProvider(Protocol):
 def reasoning_response_schema() -> dict[str, Any]:
     """Strict analysis-only schema accepted by both configured providers."""
 
-    def compact(value: Any) -> Any:
+    unsupported_keywords = {
+        "title",
+        "default",
+        "description",
+        "format",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        # Numeric bounds remain enforced by the unchanged Pydantic
+        # domain schema after decoding. Omitting them from the wire
+        # contract keeps Cerebras below its 5,000-character schema
+        # ceiling without weakening application validation.
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+    }
+
+    def compact(value: Any, *, property_map: bool = False) -> Any:
         if isinstance(value, dict):
             return {
-                key: compact(item)
+                key: compact(item, property_map=key == "properties")
                 for key, item in value.items()
-                if key not in {"title", "default"}
+                # A model may legitimately define a property named
+                # "description". Only remove schema metadata keywords, never
+                # names inside a JSON Schema "properties" map.
+                if property_map or key not in unsupported_keywords
+                # Enum membership already constrains each value. The unchanged
+                # application model enforces the concrete string type.
+                if not (key == "type" and "enum" in value)
             }
         if isinstance(value, list):
             return [compact(item) for item in value]
@@ -150,6 +176,8 @@ class _OpenAICompatibleReasoningProvider:
         self.input_cost_per_million_usd = input_cost_per_million_usd
         self.output_cost_per_million_usd = output_cost_per_million_usd
         self.setup_family_ids = setup_family_ids
+        self.http_calls = 0
+        self.correction_attempts = 0
 
     @property
     def configured(self) -> bool:
@@ -240,6 +268,9 @@ class _OpenAICompatibleReasoningProvider:
                     fallback_reason=fallback_reason,
                 )
             )
+        # This increment is intentionally adjacent to the transport call. Preflight
+        # rejections, scheduler ticks, cache reads, and dashboard reads never reach it.
+        self.http_calls += 1
         completion = await self.client.complete_json(
             system_prompt=system_prompt,
             payload=payload,
@@ -251,6 +282,13 @@ class _OpenAICompatibleReasoningProvider:
             cycle_id=str(request.cycle_id),
             instrument=request.instrument,
             ums_boundary=request.analysis_timestamp.isoformat(),
+            trigger="five_minute_analysis_worker",
+            idempotency_key=request.idempotency_key,
+            time_bucket=(
+                request.analysis_time_bucket.isoformat()
+                if request.analysis_time_bucket
+                else None
+            ),
             attempt=attempt,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
@@ -426,6 +464,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         # One and only one bounded correction request. A second malformed or
         # schema-invalid response is returned to the application validator, which
         # persists the typed failure and keeps publication fail-closed.
+        self.correction_attempts += 1
         return await super().reason(
             request,
             prompt_version=prompt_version,
@@ -466,6 +505,8 @@ class AIProviderRouter:
             ),
         }
         self.active_provider = "cerebras"
+        self.retry_attempts = 0
+        self.fallback_attempts = 0
 
     async def reason(
         self,
@@ -593,6 +634,7 @@ class AIProviderRouter:
                 exception_class="AIProviderRoutingError",
             )
             raise AIProviderRequestError(details)
+        self.fallback_attempts += 1
         try:
             response = await self._attempt(
                 self.fallback,
@@ -655,6 +697,8 @@ class AIProviderRouter:
     ) -> AIProviderResponse:
         last_error: AIProviderRequestError | None = None
         for attempt in range(1, self.maximum_retries + 2):
+            if attempt > 1:
+                self.retry_attempts += 1
             try:
                 return await provider.reason(
                     request,
@@ -779,6 +823,22 @@ class AIProviderRouter:
             "providers": {
                 name: state.snapshot() for name, state in self.states.items()
             },
+            "call_metrics": self.metrics(),
+        }
+
+    def metrics(self) -> dict[str, int]:
+        cerebras_calls = self.primary.http_calls
+        groq_calls = self.fallback.http_calls
+        return {
+            "provider_http_calls": cerebras_calls + groq_calls,
+            "cerebras_calls": cerebras_calls,
+            "groq_fallback_calls": groq_calls,
+            "retry_attempts": self.retry_attempts,
+            "fallback_attempts": self.fallback_attempts,
+            "schema_corrections": (
+                self.primary.correction_attempts
+                + self.fallback.correction_attempts
+            ),
         }
 
     def mark_model_unavailable(self, provider: str) -> None:

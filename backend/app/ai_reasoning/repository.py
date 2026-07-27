@@ -62,6 +62,11 @@ class AIReasoningRepository(Protocol):
         cycle_version: str,
         provider_contract_version: str,
         claimed_at: datetime,
+        *,
+        analysis_timeframe: str | None = None,
+        five_minute_window_start: datetime | None = None,
+        market_state_hash: str | None = None,
+        analysis_contract_version: str | None = None,
     ) -> bool: ...
     async def complete_reasoning_cycle(
         self,
@@ -79,11 +84,17 @@ class AIReasoningRepository(Protocol):
     async def complete_analysis_cycle(
         self,
         idempotency_key: str,
-        request_id: object,
-        analysis_id: object,
+        request_id: object | None,
+        analysis_id: object | None,
         status: str,
         completed_at: datetime,
     ) -> None: ...
+    async def analysis_for_market_state_hash(
+        self,
+        instrument: str,
+        market_state_hash: str,
+        analysis_contract_version: str,
+    ) -> AIMarketAnalysis | None: ...
     async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis: ...
     async def latest_analysis(self, instrument: str, timeframe: str | None = None) -> AIMarketAnalysis | None: ...
     async def analyses_before(
@@ -151,15 +162,46 @@ class InMemoryAIReasoningRepository:
         cycle_version: str,
         provider_contract_version: str,
         claimed_at: datetime,
+        *,
+        analysis_timeframe: str | None = None,
+        five_minute_window_start: datetime | None = None,
+        market_state_hash: str | None = None,
+        analysis_contract_version: str | None = None,
     ) -> bool:
         async with self._lock:
-            if idempotency_key in self.reasoning_cycles:
+            duplicate = any(
+                item.get("instrument") == instrument
+                and (
+                    item.get("idempotency_key") == idempotency_key
+                    or (
+                        analysis_timeframe is not None
+                        and item.get("analysis_timeframe") == analysis_timeframe
+                        and item.get("five_minute_window_start")
+                        == five_minute_window_start
+                        and item.get("analysis_contract_version")
+                        == analysis_contract_version
+                    )
+                    or (
+                        market_state_hash is not None
+                        and item.get("market_state_hash") == market_state_hash
+                        and item.get("analysis_contract_version")
+                        == analysis_contract_version
+                    )
+                )
+                for item in self.reasoning_cycles.values()
+            )
+            if idempotency_key in self.reasoning_cycles or duplicate:
                 return False
             self.reasoning_cycles[idempotency_key] = {
+                "idempotency_key": idempotency_key,
                 "instrument": instrument,
                 "ums_boundary": ums_boundary,
                 "cycle_version": cycle_version,
                 "provider_contract_version": provider_contract_version,
+                "analysis_timeframe": analysis_timeframe,
+                "five_minute_window_start": five_minute_window_start,
+                "market_state_hash": market_state_hash,
+                "analysis_contract_version": analysis_contract_version,
                 "status": "claimed",
                 "claimed_at": claimed_at,
             }
@@ -214,8 +256,8 @@ class InMemoryAIReasoningRepository:
     async def complete_analysis_cycle(
         self,
         idempotency_key: str,
-        request_id: object,
-        analysis_id: object,
+        request_id: object | None,
+        analysis_id: object | None,
         status: str,
         completed_at: datetime,
     ) -> None:
@@ -225,6 +267,30 @@ class InMemoryAIReasoningRepository:
                 analysis_id=analysis_id,
                 status=status,
                 completed_at=completed_at,
+            )
+
+    async def analysis_for_market_state_hash(
+        self,
+        instrument: str,
+        market_state_hash: str,
+        analysis_contract_version: str,
+    ) -> AIMarketAnalysis | None:
+        async with self._lock:
+            cycle = next(
+                (
+                    item
+                    for item in self.reasoning_cycles.values()
+                    if item.get("instrument") == instrument
+                    and item.get("market_state_hash") == market_state_hash
+                    and item.get("analysis_contract_version")
+                    == analysis_contract_version
+                ),
+                None,
+            )
+            return (
+                self.analyses.get(cycle.get("analysis_id"))
+                if cycle is not None
+                else None
             )
 
     async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis:
@@ -439,6 +505,11 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         cycle_version: str,
         provider_contract_version: str,
         claimed_at: datetime,
+        *,
+        analysis_timeframe: str | None = None,
+        five_minute_window_start: datetime | None = None,
+        market_state_hash: str | None = None,
+        analysis_contract_version: str | None = None,
     ) -> bool:
         statement = (
             insert(AIReasoningCycleLockRecord)
@@ -448,10 +519,14 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 ums_boundary=ums_boundary,
                 cycle_version=cycle_version,
                 provider_contract_version=provider_contract_version,
+                analysis_timeframe=analysis_timeframe,
+                five_minute_window_start=five_minute_window_start,
+                market_state_hash=market_state_hash,
+                analysis_contract_version=analysis_contract_version,
                 status="claimed",
                 claimed_at=claimed_at,
             )
-            .on_conflict_do_nothing(index_elements=["idempotency_key"])
+            .on_conflict_do_nothing()
             .returning(AIReasoningCycleLockRecord.idempotency_key)
         )
         claimed = (await self.session.execute(statement)).scalar_one_or_none() is not None
@@ -541,8 +616,8 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
     async def complete_analysis_cycle(
         self,
         idempotency_key: str,
-        request_id: object,
-        analysis_id: object,
+        request_id: object | None,
+        analysis_id: object | None,
         status: str,
         completed_at: datetime,
     ) -> None:
@@ -557,6 +632,32 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             )
         )
         await self.session.commit()
+
+    @scoped_session
+    async def analysis_for_market_state_hash(
+        self,
+        instrument: str,
+        market_state_hash: str,
+        analysis_contract_version: str,
+    ) -> AIMarketAnalysis | None:
+        lock = (
+            await self.session.scalars(
+                select(AIReasoningCycleLockRecord)
+                .where(
+                    AIReasoningCycleLockRecord.instrument == instrument,
+                    AIReasoningCycleLockRecord.market_state_hash
+                    == market_state_hash,
+                    AIReasoningCycleLockRecord.analysis_contract_version
+                    == analysis_contract_version,
+                )
+                .order_by(AIReasoningCycleLockRecord.claimed_at.desc())
+                .limit(1)
+            )
+        ).first()
+        if lock is None or lock.analysis_id is None:
+            return None
+        record = await self.session.get(AIMarketAnalysisRecord, lock.analysis_id)
+        return AIMarketAnalysis.model_validate(record.payload) if record else None
 
     @scoped_session
     async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis:

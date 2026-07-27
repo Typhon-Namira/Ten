@@ -1,9 +1,4 @@
-"""AI Explainability API — natural-language explanations grounded entirely in TEN's own,
-already-persisted engine outputs. See `backend.app.explainability` for the grounding/prose
-separation this router relies on: every route below assembles a context with plain Python, then
-asks the LLM only to write prose about it. A failing provider call degrades to
-`explanation: null` + a reported `error`, never a 500 and never a fabricated explanation.
-"""
+"""Read-only explainability projections over already-persisted TEN evidence."""
 
 from __future__ import annotations
 
@@ -12,8 +7,8 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from backend.app.core.exceptions import ConfigurationError, ExternalServiceError
 from backend.app.explainability import ChatTurn
+from backend.app.explainability.models import EngineInfluence, Explanation
 from backend.app.explainability.context import build_context
 
 from .system import _default_selection
@@ -21,23 +16,59 @@ from .system import _default_selection
 router = APIRouter(prefix="/api/v1/explain", tags=["explainability"])
 
 
+def _persisted_explanation(context: object) -> Explanation:
+    engines = list(getattr(context, "engines", ()))
+    available = [item for item in engines if item.available]
+    unavailable = [item for item in engines if not item.available]
+    decision = getattr(context, "decision", None)
+    decision_state = (
+        str(decision.get("state", "not available"))
+        if isinstance(decision, dict)
+        else "not available"
+    )
+    return Explanation(
+        summary=(
+            f"Persisted TEN evidence reports {len(available)} of {len(engines)} "
+            f"analytical engines available; decision state is {decision_state}."
+        ),
+        primary_reasons=[
+            f"{item.engine} has persisted evidence for this cycle."
+            for item in available[:5]
+        ],
+        opposing_factors=[
+            f"{item.engine} is unavailable: {item.error or 'no persisted evidence'}."
+            for item in unavailable[:5]
+        ],
+        engine_breakdown=[
+            EngineInfluence(
+                engine=item.engine,
+                influence="available" if item.available else "unavailable",
+                note=(
+                    "Persisted evidence is available."
+                    if item.available
+                    else item.error or "No persisted evidence is available."
+                ),
+            )
+            for item in engines
+        ],
+        required_for_change=[],
+        caveats=[
+            "This explanation is a deterministic read of persisted evidence; "
+            "dashboard requests never call an AI provider."
+        ],
+    )
+
+
 async def _explain_response(request: Request, *, instrument: str, timeframe: str, question: str | None = None, decision: object | None = None) -> dict[str, object]:
     app = request.app
     context = await build_context(app, instrument=instrument, timeframe=timeframe, question=question, decision=decision)
-    explanation = None
-    error = None
-    try:
-        explanation = await app.state.explainability_service.explain(context)
-    except (ConfigurationError, ExternalServiceError) as exc:
-        error = str(exc)
-    except Exception as exc:  # the model returned a shape Explanation can't validate — degrade, don't 500
-        error = f"{type(exc).__name__}: could not parse the model's response"
+    explanation = _persisted_explanation(context)
     return {
         "instrument": context.instrument,
         "timeframe": context.timeframe,
         "generated_at": context.generated_at,
-        "explanation": explanation.model_dump(mode="json") if explanation else None,
-        "error": error,
+        "explanation": explanation.model_dump(mode="json"),
+        "error": None,
         "explainability_score": context.explainability_score(),
         "evidence": [item.model_dump(mode="json") for item in context.evidence_list()],
         "engines": [item.model_dump(mode="json") for item in context.engines],
@@ -93,20 +124,13 @@ async def explain_chat(request: Request, body: ChatRequest) -> dict[str, object]
     instrument = (body.instrument or default_instrument).upper()
     timeframe = body.timeframe or default_timeframe
     context = await build_context(app, instrument=instrument, timeframe=timeframe, question=body.message)
-    explanation = None
-    error = None
-    try:
-        explanation = await app.state.explainability_service.chat(context, tuple(body.history))
-    except (ConfigurationError, ExternalServiceError) as exc:
-        error = str(exc)
-    except Exception as exc:
-        error = f"{type(exc).__name__}: could not parse the model's response"
+    explanation = _persisted_explanation(context)
     return {
         "instrument": context.instrument,
         "timeframe": context.timeframe,
         "generated_at": context.generated_at,
-        "explanation": explanation.model_dump(mode="json") if explanation else None,
-        "error": error,
+        "explanation": explanation.model_dump(mode="json"),
+        "error": None,
         "explainability_score": context.explainability_score(),
         "evidence": [item.model_dump(mode="json") for item in context.evidence_list()],
     }

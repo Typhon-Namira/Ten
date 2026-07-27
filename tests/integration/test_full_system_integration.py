@@ -82,8 +82,13 @@ class UnexpectedShadowCapture:
 
 
 class CompleteShadowCapture:
-    async def capture_cycle(self, *_: object, **__: object) -> object:
-        return object()
+    async def capture_cycle(self, envelope: CanonicalEventEnvelope, *_: object, **__: object) -> object:
+        payload = envelope.payload
+        return SimpleNamespace(
+            state_id=uuid4(),
+            trigger_timeframe=payload.timeframe,
+            market_data_boundary=payload.close_time,
+        )
 
 
 class FailingQuantForecast:
@@ -105,9 +110,14 @@ class RecordingUnifiedState:
     def __init__(self, stages: list[str]) -> None:
         self.stages = stages
 
-    async def capture_cycle(self, *_: object, **__: object) -> object:
+    async def capture_cycle(self, envelope: CanonicalEventEnvelope, *_: object, **__: object) -> object:
         self.stages.append("unified_market_state")
-        return object()
+        payload = envelope.payload
+        return SimpleNamespace(
+            state_id=uuid4(),
+            trigger_timeframe=payload.timeframe,
+            market_data_boundary=payload.close_time,
+        )
 
 
 class RecordingQuantForecast:
@@ -130,8 +140,8 @@ class RecordingAIAndFinalDecision:
 NOW = datetime(2026, 7, 19, 12, 30, tzinfo=UTC)
 
 
-def candle() -> Candle:
-    return Candle(timestamp=NOW - timedelta(minutes=15), ingestion_timestamp=NOW, symbol="XAU/USD", timeframe=Timeframe.M15, open=3300, high=3305, low=3298, close=3302, volume=100, provider="golden")
+def candle(timeframe: Timeframe = Timeframe.M15) -> Candle:
+    return Candle(timestamp=NOW - timeframe.duration, ingestion_timestamp=NOW, symbol="XAU/USD", timeframe=timeframe, open=3300, high=3305, low=3298, close=3302, volume=100, provider="golden")
 
 
 def service(bus: InMemoryEventBus, repository: InMemoryIntegrationRepository) -> FullSystemIntegrationService:
@@ -489,7 +499,9 @@ async def test_disabled_ai_centric_shadow_path_cannot_change_legacy_production_r
     coordinator.unified_market_state = UnexpectedShadowCapture()
     coordinator.ai_centric_shadow_mode = False
 
-    result = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+    result = await coordinator.process(
+        CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW)
+    )
 
     assert result is None
     assert repository.metrics()["snapshots"] == 1
@@ -536,7 +548,9 @@ async def test_ai_reasoning_failure_is_isolated_from_scoring_and_publication() -
     coordinator.ai_reasoning = FailingAIReasoning()
     coordinator.ai_centric_shadow_mode = True
 
-    result = await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+    result = await coordinator.process(
+        CanonicalEventEnvelope.final_candle(candle(Timeframe.M5), uuid4(), NOW)
+    )
 
     assert result is None
     assert repository.metrics()["snapshots"] == 1
@@ -566,7 +580,9 @@ async def test_degraded_volume_evidence_continues_through_unified_state_quant_an
         original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(target_logger, "info", capture_info)
-    await coordinator.process(CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW))
+    await coordinator.process(
+        CanonicalEventEnvelope.final_candle(candle(Timeframe.M5), uuid4(), NOW)
+    )
 
     assert stages == ["unified_market_state", "quant_forecast", "ai_reasoning", "final_decision"]
     assert repository.metrics()["snapshots"] == 1
@@ -589,6 +605,7 @@ async def test_market_regime_retry_is_idempotent_and_reaches_the_full_shadow_dec
 
     bus, repository = InMemoryEventBus(), InMemoryIntegrationRepository()
     coordinator = service(bus, repository)
+    coordinator.market_data = FakeMarketData(candle(Timeframe.M5))
     regime_repository = InMemoryMarketRegimeRepository()
     coordinator.market_regime = MarketRegimeService(
         coordinator.market_data,
@@ -607,7 +624,11 @@ async def test_market_regime_retry_is_idempotent_and_reaches_the_full_shadow_dec
     coordinator.ai_centric_shadow_mode = True
     decision = FailFirstDecision()
     coordinator.signal_decision = decision
-    envelope = CanonicalEventEnvelope.final_candle(candle(), uuid4(), NOW)
+    envelope = CanonicalEventEnvelope.final_candle(
+        candle(Timeframe.M5),
+        uuid4(),
+        NOW,
+    )
 
     with pytest.raises(RuntimeError, match="fail after market-regime persistence"):
         await coordinator.process(envelope)
@@ -616,7 +637,7 @@ async def test_market_regime_retry_is_idempotent_and_reaches_the_full_shadow_dec
     result = await coordinator.process(envelope)
 
     assert result is None
-    assert len(await regime_repository.list_snapshots("XAUUSD", Timeframe.M15)) == 1
+    assert len(await regime_repository.list_snapshots("XAUUSD", Timeframe.M5)) == 1
     assert repository.metrics()["processed"] == 1
     assert decision.calls == 2
     assert stages == [

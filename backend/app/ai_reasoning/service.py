@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from hashlib import sha256
 import json
 import logging
@@ -28,6 +30,11 @@ from .analysis import (
     ValidatedAIAnalysis,
     analysis_reference,
 )
+from .cadence import (
+    AI_ANALYSIS_INTERVAL_MINUTES,
+    AI_ANALYSIS_TIMEFRAME,
+    five_minute_window_start,
+)
 from .config import AIReasoningConfig
 from .llm_context import LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION, build_llm_analysis_context
 from .memory import MarketMemory
@@ -42,11 +49,25 @@ logger = logging.getLogger(__name__)
 _PROVIDER_REACHABLE_FAILURE_STATES = frozenset({"structured_output_invalid"})
 
 
+class AIAnalysisSkipReason(StrEnum):
+    NOT_FIVE_MINUTE_BOUNDARY = "not_five_minute_boundary"
+    CYCLE_NOT_COMPLETE = "cycle_not_complete"
+    ANALYSIS_ALREADY_EXISTS = "analysis_already_exists"
+    CYCLE_ALREADY_CLAIMED = "cycle_already_claimed"
+    DUPLICATE_MARKET_STATE = "duplicate_market_state"
+    MARKET_DATA_INCOMPLETE = "market_data_incomplete"
+    MARKET_DATA_STALE = "market_data_stale"
+    AI_DISABLED = "ai_disabled"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    REQUEST_PREFLIGHT_FAILED = "request_preflight_failed"
+
+
 def reasoning_cycle_idempotency_key(
     instrument: str,
-    ums_boundary: datetime,
-    cycle_version: str,
-    provider_contract_version: str,
+    analysis_timeframe: str,
+    five_minute_window: datetime,
+    market_state_hash: str,
+    analysis_contract_version: str,
 ) -> str:
     normalized_instrument = "".join(
         character
@@ -56,9 +77,10 @@ def reasoning_cycle_idempotency_key(
     material = "|".join(
         (
             normalized_instrument,
-            ums_boundary.astimezone(UTC).isoformat(),
-            cycle_version,
-            provider_contract_version,
+            analysis_timeframe.upper(),
+            five_minute_window.astimezone(UTC).isoformat(),
+            market_state_hash,
+            analysis_contract_version,
         )
     )
     return sha256(material.encode()).hexdigest()
@@ -97,6 +119,8 @@ class AIReasoningService:
         self.last_validation_passed: bool | None = None
         self.last_retry_count = 0
         self.last_failure_state: str | None = None
+        self.metrics: Counter[str] = Counter()
+        self.skip_reasons: Counter[str] = Counter()
 
     @property
     def enabled(self) -> bool:
@@ -117,16 +141,20 @@ class AIReasoningService:
             "trigger": "integration_worker",
             "artifact_type": "ai_market_analysis",
         }
+        self.metrics["scheduler_ticks"] += 1
         logger.info("ai_reasoning.worker.received", extra=worker_context)
         if not self.enabled:
-            logger.info(
-                "ai_reasoning.gate.skipped",
-                extra={**worker_context, "skip_reason": "ai_analysis_disabled"},
-            )
+            self._skip(AIAnalysisSkipReason.AI_DISABLED, worker_context)
             return None
         state = UnifiedMarketState.model_validate(state.model_dump(mode="python"))
         quant = QuantForecastResult.model_validate(quant.model_dump(mode="python"))
         boundary = state.market_data_boundary.astimezone(UTC)
+        window_start = five_minute_window_start(boundary)
+        eligibility_failure = self._eligibility_failure(state, boundary, window_start)
+        if eligibility_failure is not None:
+            self._skip(eligibility_failure, worker_context, window_start=window_start)
+            return None
+        self.metrics["eligible_five_minute_cycles"] += 1
         contract_version = ":".join(
             (
                 LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION,
@@ -136,33 +164,67 @@ class AIReasoningService:
         )
         idempotency_key = reasoning_cycle_idempotency_key(
             state.instrument,
-            boundary,
-            state.schema_version,
+            AI_ANALYSIS_TIMEFRAME,
+            window_start,
+            state.state_hash,
             contract_version,
         )
-        cached = await self.repository.analysis_for_reasoning_cycle(idempotency_key)
-        if cached is not None:
-            logger.info(
-                "ai_analysis.result.reused",
-                extra={
-                    **worker_context,
-                    "analysis_id": str(cached.analysis_id),
-                    "idempotency_key": idempotency_key,
-                    "provider_call_made": False,
-                },
-            )
-            return await self._validated_analysis(cached)
         claimed = await self.repository.claim_reasoning_cycle(
             idempotency_key,
             state.instrument,
-            boundary,
+            window_start,
             state.schema_version,
             contract_version,
             self.clock(),
+            analysis_timeframe=AI_ANALYSIS_TIMEFRAME,
+            five_minute_window_start=window_start,
+            market_state_hash=state.state_hash,
+            analysis_contract_version=contract_version,
         )
         if not claimed:
             cached = await self.repository.analysis_for_reasoning_cycle(idempotency_key)
-            return await self._validated_analysis(cached) if cached is not None else None
+            if cached is not None:
+                self.metrics["analyses_reused"] += 1
+                self._skip(
+                    AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS,
+                    worker_context,
+                    window_start=window_start,
+                    idempotency_key=idempotency_key,
+                )
+                return await self._validated_analysis(cached)
+            duplicate = await self.repository.analysis_for_market_state_hash(
+                state.instrument,
+                state.state_hash,
+                contract_version,
+            )
+            reason = (
+                AIAnalysisSkipReason.DUPLICATE_MARKET_STATE
+                if duplicate is not None
+                else AIAnalysisSkipReason.CYCLE_ALREADY_CLAIMED
+            )
+            self._skip(
+                reason,
+                worker_context,
+                window_start=window_start,
+                idempotency_key=idempotency_key,
+            )
+            return await self._validated_analysis(duplicate) if duplicate is not None else None
+
+        if not self._primary_provider_eligible():
+            self._skip(
+                AIAnalysisSkipReason.PROVIDER_UNAVAILABLE,
+                worker_context,
+                window_start=window_start,
+                idempotency_key=idempotency_key,
+            )
+            await self.repository.complete_analysis_cycle(
+                idempotency_key,
+                None,
+                None,
+                "skipped",
+                self.clock(),
+            )
+            return None
 
         recent_memory = await self.repository.recent_memory(
             state.instrument,
@@ -176,9 +238,16 @@ class AIReasoningService:
             previous_forecast=None,
             previous_proposal=None,
         )
+        request = request.model_copy(
+            update={
+                "idempotency_key": idempotency_key,
+                "analysis_time_bucket": window_start,
+            }
+        )
         await self.repository.save_request(request)
-        self.requests += 1
         response = None
+        provider_metrics_before = self._provider_metrics()
+        provider_delta: dict[str, int] = {}
         failure_state = "llm_unavailable"
         failure_errors: tuple[str, ...] = ()
         try:
@@ -195,6 +264,12 @@ class AIReasoningService:
                     self.provider.reason(request, prompt_version=request.prompt_version),
                     timeout=self.config.request_timeout_seconds,
                 )
+            provider_delta = self._metric_delta(
+                provider_metrics_before,
+                self._provider_metrics(),
+            )
+            self._consume_provider_metrics(provider_delta)
+            self.last_latency_ms = response.latency_ms
             output = self.validator.validate_analysis(response.raw_output)
             analysis = AIMarketAnalysis(
                 analysis_id=uuid5(
@@ -233,6 +308,7 @@ class AIReasoningService:
                 None,
                 model_identifier=response.model_identifier,
                 provider=response.provider,
+                provider_metrics=provider_delta,
             )
             logger.info(
                 "structured_validation.completed",
@@ -245,6 +321,13 @@ class AIReasoningService:
                 },
             )
         except StructuredAIOutputError as exc:
+            if not provider_delta:
+                provider_delta = self._metric_delta(
+                    provider_metrics_before,
+                    self._provider_metrics(),
+                )
+                self._consume_provider_metrics(provider_delta)
+            self.metrics["validation_failures"] += 1
             failure_state = "structured_output_invalid"
             failure_errors = exc.errors
             logger.error(
@@ -264,6 +347,28 @@ class AIReasoningService:
             )
             analysis = self._failed_analysis(request, failure_state, failure_errors)
         except AIProviderRequestError as exc:
+            provider_delta = self._metric_delta(
+                provider_metrics_before,
+                self._provider_metrics(),
+            )
+            self._consume_provider_metrics(provider_delta)
+            if exc.details.phase == "request_validation":
+                self._skip(
+                    AIAnalysisSkipReason.REQUEST_PREFLIGHT_FAILED,
+                    worker_context,
+                    window_start=window_start,
+                    idempotency_key=idempotency_key,
+                )
+                await self.repository.complete_analysis_cycle(
+                    idempotency_key,
+                    request.request_id,
+                    None,
+                    "skipped",
+                    self.clock(),
+                )
+                return None
+            self.metrics["provider_failures"] += 1
+            self.last_latency_ms = exc.details.elapsed_ms
             failure_state = exc.details.reason_code
             failure_errors = tuple(
                 str(item)
@@ -276,6 +381,11 @@ class AIReasoningService:
             )
             analysis = self._failed_analysis(request, failure_state, failure_errors)
         except Exception as exc:
+            provider_delta = self._metric_delta(
+                provider_metrics_before,
+                self._provider_metrics(),
+            )
+            self._consume_provider_metrics(provider_delta)
             failure_errors = (type(exc).__name__, str(exc)[:200])
             analysis = self._failed_analysis(request, failure_state, failure_errors)
             logger.exception(
@@ -314,10 +424,26 @@ class AIReasoningService:
                 failure_state,
                 None,
             )
+            await self._record_usage(
+                request,
+                state.state_hash,
+                response.token_usage if response is not None else None,
+                response.latency_ms if response is not None else None,
+                False,
+                failure_state,
+                model_identifier=(
+                    response.model_identifier
+                    if response is not None
+                    else request.model_identifier
+                ),
+                provider=response.provider if response is not None else None,
+                provider_metrics=provider_delta,
+            )
             return None
 
         self.last_validation_passed = True
         self.last_failure_state = None
+        self.metrics["analyses_successfully_completed"] += 1
         logger.info(
             "ai_reasoning.persist.completed",
             extra={
@@ -443,6 +569,7 @@ class AIReasoningService:
         *,
         model_identifier: str | None = None,
         provider: str | None = None,
+        provider_metrics: dict[str, int] | None = None,
     ) -> None:
         if self.final_decision is None:
             return
@@ -460,8 +587,17 @@ class AIReasoningService:
                 "temperature": self.config.temperature,
                 "max_tokens": self.config.max_tokens,
                 "provider": provider,
+                **(provider_metrics or {}),
+                "provider_failure": int(
+                    failure_state is not None
+                    and failure_state != "structured_output_invalid"
+                    and (provider_metrics or {}).get("provider_http_calls", 0) > 0
+                ),
+                "validation_failure": int(
+                    failure_state == "structured_output_invalid"
+                ),
             },
-            request_count=1,
+            request_count=(provider_metrics or {}).get("provider_http_calls", 0),
             input_tokens=token_usage.get("input_tokens") if token_usage else None,
             output_tokens=token_usage.get("output_tokens") if token_usage else None,
             total_tokens=total,
@@ -499,6 +635,98 @@ class AIReasoningService:
         )
         await self.repository.save_failure(failure)
 
+    def _eligibility_failure(
+        self,
+        state: UnifiedMarketState,
+        boundary: datetime,
+        window_start: datetime,
+    ) -> AIAnalysisSkipReason | None:
+        if (
+            state.trigger_timeframe.upper() != AI_ANALYSIS_TIMEFRAME
+            or boundary != window_start
+        ):
+            return AIAnalysisSkipReason.NOT_FIVE_MINUTE_BOUNDARY
+        if self.clock().astimezone(UTC) < boundary:
+            return AIAnalysisSkipReason.CYCLE_NOT_COMPLETE
+        frames = {item.timeframe.upper(): item for item in state.timeframes}
+        if set(frames) != {"M1", "M5", "M15"}:
+            return AIAnalysisSkipReason.MARKET_DATA_INCOMPLETE
+        if any(item.stale for item in frames.values()):
+            return AIAnalysisSkipReason.MARKET_DATA_STALE
+        return None
+
+    def _primary_provider_eligible(self) -> bool:
+        providers = self.provider.metadata().get("providers")
+        if not isinstance(providers, dict):
+            return True
+        primary = providers.get("cerebras")
+        return (
+            isinstance(primary, dict)
+            and primary.get("status") in {"HEALTHY", "STANDBY"}
+        )
+
+    def _skip(
+        self,
+        reason: AIAnalysisSkipReason,
+        context: Mapping[str, object],
+        *,
+        window_start: datetime | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.skip_reasons[reason.value] += 1
+        self.metrics["skipped_before_provider_call"] += 1
+        if reason in {
+            AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS,
+            AIAnalysisSkipReason.CYCLE_ALREADY_CLAIMED,
+            AIAnalysisSkipReason.DUPLICATE_MARKET_STATE,
+        }:
+            self.metrics["deduplicated_before_provider_call"] += 1
+        logger.info(
+            "ai_reasoning.gate.skipped",
+            extra={
+                **context,
+                "skip_reason": reason.value,
+                "five_minute_window_start": (
+                    window_start.isoformat() if window_start else None
+                ),
+                "idempotency_key": idempotency_key,
+                "provider_call_made": False,
+            },
+        )
+
+    def _provider_metrics(self) -> dict[str, int]:
+        metrics = getattr(self.provider, "metrics", None)
+        if not callable(metrics):
+            return {}
+        value = metrics()
+        return {
+            str(key): int(item)
+            for key, item in value.items()
+            if isinstance(item, int)
+        }
+
+    @staticmethod
+    def _metric_delta(
+        before: dict[str, int],
+        after: dict[str, int],
+    ) -> dict[str, int]:
+        return {
+            key: max(0, value - before.get(key, 0))
+            for key, value in after.items()
+        }
+
+    def _consume_provider_metrics(self, delta: dict[str, int]) -> None:
+        for key in (
+            "provider_http_calls",
+            "cerebras_calls",
+            "groq_fallback_calls",
+            "retry_attempts",
+            "schema_corrections",
+        ):
+            self.metrics[key] += delta.get(key, 0)
+        self.requests = self.metrics["provider_http_calls"]
+        self.last_retry_count = delta.get("retry_attempts", 0)
+
     def health(self) -> dict[str, object]:
         metadata = self.provider.metadata()
         provider_states = metadata.get("providers")
@@ -535,6 +763,30 @@ class AIReasoningService:
             "latest_validation_passed": self.last_validation_passed,
             "latest_retry_count": self.last_retry_count,
             "failed_requests": self.failed_requests,
+            "call_control": {
+                "analysis_timeframe": AI_ANALYSIS_TIMEFRAME,
+                "interval_minutes": AI_ANALYSIS_INTERVAL_MINUTES,
+                "eligible_five_minute_cycles": self.metrics[
+                    "eligible_five_minute_cycles"
+                ],
+                "analyses_successfully_completed": self.metrics[
+                    "analyses_successfully_completed"
+                ],
+                "provider_http_calls": self.metrics["provider_http_calls"],
+                "cerebras_calls": self.metrics["cerebras_calls"],
+                "groq_fallback_calls": self.metrics["groq_fallback_calls"],
+                "retries": self.metrics["retry_attempts"],
+                "schema_corrections": self.metrics["schema_corrections"],
+                "skipped_before_provider_call": self.metrics[
+                    "skipped_before_provider_call"
+                ],
+                "deduplicated_before_provider_call": self.metrics[
+                    "deduplicated_before_provider_call"
+                ],
+                "provider_failures": self.metrics["provider_failures"],
+                "validation_failures": self.metrics["validation_failures"],
+                "skip_reasons": dict(self.skip_reasons),
+            },
             "failure_state": self.last_failure_state,
             "fallback_state": "ai_analysis_unavailable" if self.last_failure_state else None,
             "fallback_status": (

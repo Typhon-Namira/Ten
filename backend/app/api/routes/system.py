@@ -328,7 +328,11 @@ async def performance(request: Request, instrument: str | None = None, timeframe
             "writes": market.cache.statistics.writes,
             **market.cache.metrics(),
         },
-        "analysis": {"ai_scoring": app.state.ai_scoring_service.metrics.snapshot(), "signal_decision": app.state.signal_decision_service.metrics.snapshot()},
+        "analysis": {
+            "ai_scoring": app.state.ai_scoring_service.metrics.snapshot(),
+            "signal_decision": app.state.signal_decision_service.metrics.snapshot(),
+            "ai_reasoning": app.state.ai_reasoning_service.health()["call_control"],
+        },
         "queue_length": integration_metrics.get("outbox_backlog"),
         "workers": {
             "market_data_worker": app.state.market_data_worker.status(),
