@@ -164,6 +164,40 @@ def test_repeated_dashboard_refreshes_never_invoke_ai_provider() -> None:
     provider_call.assert_not_awaited()
 
 
+def test_all_dashboard_read_endpoints_are_provider_and_persistence_side_effect_free() -> None:
+    app = create_app()
+    reasoning_call = AsyncMock(
+        side_effect=AssertionError("dashboard must not invoke AI reasoning"),
+    )
+    transport_call = AsyncMock(
+        side_effect=AssertionError("dashboard must not invoke provider transport"),
+    )
+    paths = (
+        "/api/v1/dashboard/latest?instrument=XAUUSD",
+        "/api/dashboard/system-status?instrument=XAUUSD",
+        "/api/v1/system/selection",
+        "/api/v1/system/diagnostics?instrument=XAUUSD&timeframe=M1",
+        "/api/v1/system/market-intelligence?instrument=XAUUSD&timeframe=M1",
+        "/api/v1/system/performance?instrument=XAUUSD&timeframe=M1",
+        "/api/v1/ai-reasoning/health",
+        "/api/v1/ai-reasoning/latest?instrument=XAUUSD",
+        "/api/v1/ai-reasoning/analyses?instrument=XAUUSD&timeframe=M5",
+        "/api/v1/explain/current?instrument=XAUUSD&timeframe=M1",
+    )
+
+    with TestClient(app) as client:
+        app.state.ai_reasoning_service.provider.reason = reasoning_call
+        app.state.cerebras_client.complete_json = transport_call
+        before = len(app.state.ai_reasoning_repository.analyses)
+        responses = [client.get(path) for path in paths for _ in range(3)]
+        after = len(app.state.ai_reasoning_repository.analyses)
+
+    assert all(response.status_code == 200 for response in responses)
+    assert before == after
+    reasoning_call.assert_not_awaited()
+    transport_call.assert_not_awaited()
+
+
 def test_repeated_market_status_reads_are_stable_and_read_only() -> None:
     app = create_app()
     evaluated = datetime(2026, 7, 23, 14, tzinfo=UTC)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -39,6 +40,35 @@ def test_reasoning_schema_is_strict_at_every_nested_object() -> None:
     assert_strict(schema)
 
 
+def test_cerebras_wire_schema_stays_within_supported_strict_schema_subset() -> None:
+    schema = reasoning_response_schema()
+    encoded = json.dumps(schema, separators=(",", ":"))
+    unsupported = {
+        "description",
+        "format",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+    }
+
+    def schema_keywords(value: object, *, property_map: bool = False) -> set[str]:
+        if isinstance(value, dict):
+            own = set() if property_map else set(value)
+            return own.union(
+                *(
+                    schema_keywords(item, property_map=key == "properties")
+                    for key, item in value.items()
+                ),
+            )
+        if isinstance(value, list):
+            return set().union(*(schema_keywords(item) for item in value))
+        return set()
+
+    assert len(encoded) <= 5_000
+    assert schema_keywords(schema).isdisjoint(unsupported)
+
+
 class StubProvider:
     def __init__(
         self,
@@ -53,9 +83,11 @@ class StubProvider:
         self.client = SimpleNamespace(base_url=f"https://api.{name}.test/v1")
         self.outcomes = outcomes
         self.calls = 0
+        self.cycle_ids: list[str] = []
 
-    async def reason(self, *_: Any, **kwargs: Any) -> AIProviderResponse:
+    async def reason(self, request: Any, **kwargs: Any) -> AIProviderResponse:
         self.calls += 1
+        self.cycle_ids.append(str(request.cycle_id))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, AIProviderRequestError):
             raise outcome
@@ -145,6 +177,7 @@ async def test_typed_primary_failures_fall_back_without_retry(
     assert result.fallback_reason == f"cerebras_{reason_code}"
     assert primary.calls == 1
     assert fallback.calls == 1
+    assert primary.cycle_ids == fallback.cycle_ids == ["cycle-1"]
 
 
 @pytest.mark.asyncio

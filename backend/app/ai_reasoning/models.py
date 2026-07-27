@@ -112,6 +112,8 @@ class AIReasoningRequest(ImmutableAIModel):
     analysis_timestamp: datetime
     knowledge_cutoff: datetime
     trigger_timeframe: str
+    idempotency_key: str | None = Field(default=None, min_length=64, max_length=64)
+    analysis_time_bucket: datetime | None = None
     current_price: float = Field(gt=0)
     supported_timeframe_states: tuple[dict[str, Any], ...]
     market_regime: tuple[dict[str, Any], ...] = ()
@@ -157,9 +159,16 @@ class AIReasoningRequest(ImmutableAIModel):
     market_state_schema_version: str
     created_at: datetime
 
-    @field_validator("analysis_timestamp", "knowledge_cutoff", "created_at")
+    @field_validator(
+        "analysis_timestamp",
+        "knowledge_cutoff",
+        "analysis_time_bucket",
+        "created_at",
+    )
     @classmethod
-    def aware(cls, value: datetime) -> datetime:
+    def aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
         if value.tzinfo is None:
             raise ValueError("AI reasoning timestamps must be timezone-aware")
         return value.astimezone(UTC)
@@ -168,6 +177,13 @@ class AIReasoningRequest(ImmutableAIModel):
     def point_in_time_integrity(self) -> AIReasoningRequest:
         if self.analysis_timestamp > self.knowledge_cutoff or self.created_at < self.analysis_timestamp:
             raise ValueError("AI request violates its point-in-time boundary")
+        if self.analysis_time_bucket is not None and (
+            self.analysis_time_bucket > self.analysis_timestamp
+            or self.analysis_time_bucket.second != 0
+            or self.analysis_time_bucket.microsecond != 0
+            or self.analysis_time_bucket.minute % 5 != 0
+        ):
+            raise ValueError("AI request has an invalid UTC five-minute bucket")
         probabilities = [value for value in self.quantitative_probabilities.values() if value is not None]
         if probabilities and (any(value < 0 or value > 1 for value in probabilities) or abs(sum(probabilities) - 1) > 1e-8):
             raise ValueError("quantitative probabilities must be valid and sum to one")

@@ -96,6 +96,13 @@ async def latest(
         for signal in signals
     }
     usage = await final_repository.usage_for_date(service.clock().date().isoformat())
+    def usage_parameter(name: str) -> int:
+        return sum(
+            int(item.generation_parameters.get(name, 0))
+            for item in usage
+            if isinstance(item.generation_parameters.get(name, 0), (int, float))
+        )
+
     performance = await final_repository.latest_performance_report()
     readiness = await final_repository.latest_readiness_report()
     return {
@@ -108,6 +115,13 @@ async def latest(
         "publications": publications,
         "llm_usage": {
             "request_count": sum(item.request_count for item in usage),
+            "provider_http_calls": sum(item.request_count for item in usage),
+            "cerebras_calls": usage_parameter("cerebras_calls"),
+            "groq_fallback_calls": usage_parameter("groq_fallback_calls"),
+            "retries": usage_parameter("retry_attempts"),
+            "schema_corrections": usage_parameter("schema_corrections"),
+            "provider_failures": usage_parameter("provider_failure"),
+            "validation_failures": usage_parameter("validation_failure"),
             "total_tokens": (
                 sum(item.total_tokens or 0 for item in usage)
                 if any(item.total_tokens is not None for item in usage)

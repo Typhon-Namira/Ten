@@ -142,11 +142,20 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
   return <section className="ai-card ai-card--wide">
     <SectionHeader eyebrow="Operations" title="AI usage and system health" action={<Activity size={19} />} />
     <div className="health-grid">
-      <Metric label="AI provider calls today" value={usage?.request_count ?? 'Unavailable'} detail={`Allowance ${health?.guardrails.daily_request_allowance ?? 'Unavailable'}`} />
+      <Metric label="AI provider calls today" value={usage?.provider_http_calls ?? 'Unavailable'} detail={`Allowance ${health?.guardrails.daily_request_allowance ?? 'Unavailable'}`} />
+      <Metric label="Eligible 5-minute cycles" value={health?.call_control.eligible_five_minute_cycles ?? 'Unavailable'} />
+      <Metric label="Analyses completed" value={health?.call_control.analyses_successfully_completed ?? 'Unavailable'} />
+      <Metric label="Cerebras calls" value={usage?.cerebras_calls ?? 'Unavailable'} />
+      <Metric label="Groq fallback calls" value={usage?.groq_fallback_calls ?? 'Unavailable'} />
+      <Metric label="Retries" value={usage?.retries ?? 'Unavailable'} />
+      <Metric label="Schema corrections" value={usage?.schema_corrections ?? 'Unavailable'} />
+      <Metric label="Skipped before provider" value={health?.call_control.skipped_before_provider_call ?? 'Unavailable'} />
+      <Metric label="Deduplicated before provider" value={health?.call_control.deduplicated_before_provider_call ?? 'Unavailable'} />
+      <Metric label="Provider failures" value={usage?.provider_failures ?? 'Unavailable'} />
+      <Metric label="Validation failures" value={usage?.validation_failures ?? 'Unavailable'} />
       <Metric label="Recorded tokens" value={usage?.total_tokens?.toLocaleString() ?? 'Unavailable'} detail={`Allowance ${health?.guardrails.daily_token_allowance?.toLocaleString() ?? 'Unavailable'}`} />
       <Metric label="Failures" value={usage?.failed_requests ?? health?.failed_requests ?? 'Unavailable'} />
       <Metric label="Latest retry count" value={health?.latest_retry_count ?? 'Unavailable'} />
-      <Metric label="Deduplicated states" value={health?.deduplicated_market_states ?? 'Unavailable'} />
       <Metric label="Concurrency limit" value={health?.guardrails.llm_concurrency_limit ?? 'Unavailable'} />
       <Metric label="AI latency" value={health?.latest_latency_ms == null ? 'Unavailable' : `${health.latest_latency_ms.toFixed(0)} ms`} />
       <Metric label="Data freshness" value={stale ? 'Stale' : 'Fresh'} />

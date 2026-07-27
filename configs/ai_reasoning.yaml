@@ -2,6 +2,8 @@ version: "1.0"
 request_schema_version: "1.0"
 reasoning_policy_version: "ai_reasoning_policy_v1"
 setup_family_registry_version: "setup_families_v1"
+analysis_timeframe: "M5"
+analysis_interval_minutes: 5
 prompt_version_new_market: "deep_market_analysis_v2"
 prompt_version_existing_signal: "existing_position_market_analysis_v2"
 maximum_memory_entries: 20

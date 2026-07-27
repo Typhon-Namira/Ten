@@ -60,7 +60,6 @@ from backend.app.integration.activity_log import PipelineActivityLog
 from backend.app.integration.stage_tracker import PipelineStageTracker
 from backend.app.ai.provider_client import AIProviderClient, HttpAIProviderClient
 from backend.app.ai.prompts.loader import PromptLoader
-from backend.app.explainability import ExplainabilityService
 from backend.app.core.feature_flags import FeatureFlag
 from backend.app.market_state import InMemoryUnifiedMarketStateRepository, SqlAlchemyUnifiedMarketStateRepository, UnifiedMarketStateRepository, UnifiedMarketStateService
 from backend.app.quant_forecasting.config import QuantForecastingConfig
@@ -374,12 +373,6 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 app.state.groq_client,
                 settings.groq_model,
             ),
-        )
-        app.state.llm_client = app.state.cerebras_client
-        app.state.explainability_service = ExplainabilityService(
-            app.state.llm_client,
-            PromptLoader(Path(__file__).resolve().parent / "explainability" / "prompts"),
-            model=settings.cerebras_model,
         )
         integration_config = IntegrationConfig(
             enabled=settings.integration_enabled,
