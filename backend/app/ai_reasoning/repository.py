@@ -16,7 +16,7 @@ from backend.app.storage.models import (
     AIForecastScenarioRecord,
     AIMarketForecastRecord,
     AIReasoningRequestRecord,
-    AIReasoningWindowLockRecord,
+    AIReasoningCycleLockRecord,
     AISetupFamilyVersionRecord,
     AISignalProposalRecord,
     LLMStructuredOutputFailureRecord,
@@ -54,15 +54,16 @@ logger = logging.getLogger(__name__)
 
 
 class AIReasoningRepository(Protocol):
-    async def claim_reasoning_window(
+    async def claim_reasoning_cycle(
         self,
         idempotency_key: str,
         instrument: str,
-        ten_minute_bucket: datetime,
-        market_state_version: str,
+        ums_boundary: datetime,
+        cycle_version: str,
+        provider_contract_version: str,
         claimed_at: datetime,
     ) -> bool: ...
-    async def complete_reasoning_window(
+    async def complete_reasoning_cycle(
         self,
         idempotency_key: str,
         request_id: object,
@@ -70,7 +71,7 @@ class AIReasoningRepository(Protocol):
         status: str,
         completed_at: datetime,
     ) -> None: ...
-    async def result_for_reasoning_window(
+    async def result_for_reasoning_cycle(
         self,
         idempotency_key: str,
     ) -> tuple[AIMarketForecast, AISignalProposal | None] | None: ...
@@ -109,30 +110,32 @@ class InMemoryAIReasoningRepository:
         self.monitoring: dict[object, SignalMonitoringEvaluation] = {}
         self.outcomes: dict[object, SignalOutcome] = {}
         self.memory: dict[object, MarketMemoryEntry] = {}
-        self.reasoning_windows: dict[str, dict[str, object]] = {}
+        self.reasoning_cycles: dict[str, dict[str, object]] = {}
         self._lock = asyncio.Lock()
 
-    async def claim_reasoning_window(
+    async def claim_reasoning_cycle(
         self,
         idempotency_key: str,
         instrument: str,
-        ten_minute_bucket: datetime,
-        market_state_version: str,
+        ums_boundary: datetime,
+        cycle_version: str,
+        provider_contract_version: str,
         claimed_at: datetime,
     ) -> bool:
         async with self._lock:
-            if idempotency_key in self.reasoning_windows:
+            if idempotency_key in self.reasoning_cycles:
                 return False
-            self.reasoning_windows[idempotency_key] = {
+            self.reasoning_cycles[idempotency_key] = {
                 "instrument": instrument,
-                "ten_minute_bucket": ten_minute_bucket,
-                "market_state_version": market_state_version,
+                "ums_boundary": ums_boundary,
+                "cycle_version": cycle_version,
+                "provider_contract_version": provider_contract_version,
                 "status": "claimed",
                 "claimed_at": claimed_at,
             }
             return True
 
-    async def complete_reasoning_window(
+    async def complete_reasoning_cycle(
         self,
         idempotency_key: str,
         request_id: object,
@@ -141,23 +144,23 @@ class InMemoryAIReasoningRepository:
         completed_at: datetime,
     ) -> None:
         async with self._lock:
-            window = self.reasoning_windows[idempotency_key]
-            window.update(
+            cycle = self.reasoning_cycles[idempotency_key]
+            cycle.update(
                 request_id=request_id,
                 forecast_id=forecast_id,
                 status=status,
                 completed_at=completed_at,
             )
 
-    async def result_for_reasoning_window(
+    async def result_for_reasoning_cycle(
         self,
         idempotency_key: str,
     ) -> tuple[AIMarketForecast, AISignalProposal | None] | None:
         async with self._lock:
-            window = self.reasoning_windows.get(idempotency_key)
-            if window is None or window.get("status") not in {"completed", "failed"}:
+            cycle = self.reasoning_cycles.get(idempotency_key)
+            if cycle is None or cycle.get("status") not in {"completed", "failed"}:
                 return None
-            request_id = window.get("request_id")
+            request_id = cycle.get("request_id")
             forecast = self.forecasts.get(request_id)
             if forecast is None:
                 return None
@@ -296,33 +299,35 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         super().__init__(session_factory)
 
     @scoped_session
-    async def claim_reasoning_window(
+    async def claim_reasoning_cycle(
         self,
         idempotency_key: str,
         instrument: str,
-        ten_minute_bucket: datetime,
-        market_state_version: str,
+        ums_boundary: datetime,
+        cycle_version: str,
+        provider_contract_version: str,
         claimed_at: datetime,
     ) -> bool:
         statement = (
-            insert(AIReasoningWindowLockRecord)
+            insert(AIReasoningCycleLockRecord)
             .values(
                 idempotency_key=idempotency_key,
                 instrument=instrument,
-                ten_minute_bucket=ten_minute_bucket,
-                market_state_version=market_state_version,
+                ums_boundary=ums_boundary,
+                cycle_version=cycle_version,
+                provider_contract_version=provider_contract_version,
                 status="claimed",
                 claimed_at=claimed_at,
             )
             .on_conflict_do_nothing(index_elements=["idempotency_key"])
-            .returning(AIReasoningWindowLockRecord.idempotency_key)
+            .returning(AIReasoningCycleLockRecord.idempotency_key)
         )
         claimed = (await self.session.execute(statement)).scalar_one_or_none() is not None
         await self.session.commit()
         return claimed
 
     @scoped_session
-    async def complete_reasoning_window(
+    async def complete_reasoning_cycle(
         self,
         idempotency_key: str,
         request_id: object,
@@ -331,8 +336,8 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         completed_at: datetime,
     ) -> None:
         await self.session.execute(
-            update(AIReasoningWindowLockRecord)
-            .where(AIReasoningWindowLockRecord.idempotency_key == idempotency_key)
+            update(AIReasoningCycleLockRecord)
+            .where(AIReasoningCycleLockRecord.idempotency_key == idempotency_key)
             .values(
                 request_id=request_id,
                 forecast_id=forecast_id,
@@ -343,16 +348,16 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         await self.session.commit()
 
     @scoped_session
-    async def result_for_reasoning_window(
+    async def result_for_reasoning_cycle(
         self,
         idempotency_key: str,
     ) -> tuple[AIMarketForecast, AISignalProposal | None] | None:
         window = (
             await self.session.scalars(
-                select(AIReasoningWindowLockRecord)
+                select(AIReasoningCycleLockRecord)
                 .where(
-                    AIReasoningWindowLockRecord.idempotency_key == idempotency_key,
-                    AIReasoningWindowLockRecord.status.in_(("completed", "failed")),
+                    AIReasoningCycleLockRecord.idempotency_key == idempotency_key,
+                    AIReasoningCycleLockRecord.status.in_(("completed", "failed")),
                 )
                 .limit(1)
             )

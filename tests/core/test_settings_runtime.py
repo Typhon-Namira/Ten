@@ -5,6 +5,15 @@ from backend.app.core.feature_flags import FeatureFlag
 from backend.app.services import build_engine_registry
 
 
+def test_ai_provider_defaults_are_cerebras_primary_and_groq_fallback() -> None:
+    settings = Settings(_env_file=None, market_data_worker_enabled=False)
+
+    assert settings.cerebras_base_url == "https://api.cerebras.ai/v1"
+    assert settings.cerebras_model == "gpt-oss-120b"
+    assert settings.groq_base_url == "https://api.groq.com/openai/v1"
+    assert settings.groq_model == "llama-3.1-8b-instant"
+
+
 def test_market_data_provider_defaults_to_the_keyless_public_source() -> None:
     assert Settings(_env_file=None, market_data_worker_enabled=False).market_data_provider == "lbma_gold_price"
 

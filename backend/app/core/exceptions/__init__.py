@@ -2,8 +2,8 @@ from .base import (
     ConfigurationError,
     EngineError,
     ExternalServiceError,
-    OpenRouterFailureDetails,
-    OpenRouterRequestError,
+    AIProviderFailureDetails,
+    AIProviderRequestError,
     TenError,
 )
 
@@ -11,8 +11,8 @@ __all__ = [
     "ConfigurationError",
     "EngineError",
     "ExternalServiceError",
-    "OpenRouterFailureDetails",
-    "OpenRouterRequestError",
+    "AIProviderFailureDetails",
+    "AIProviderRequestError",
     "TenError",
 ]
 

@@ -136,9 +136,19 @@ async def diagnostics(request: Request) -> dict[str, object]:
             "latest_scenario": signal.model_dump(mode="json") if signal and signal.state == "eligible" else None,
         },
         "ai": {
-            "configured": bool(settings.openrouter_api_key),
-            "base_url_configured": bool(settings.openrouter_base_url),
-            "model": settings.openrouter_model,
+            "configured": bool(settings.cerebras_api_key or settings.groq_api_key),
+            "providers": {
+                "cerebras": {
+                    "configured": bool(settings.cerebras_api_key),
+                    "base_url_configured": bool(settings.cerebras_base_url),
+                    "model": settings.cerebras_model,
+                },
+                "groq": {
+                    "configured": bool(settings.groq_api_key),
+                    "base_url_configured": bool(settings.groq_base_url),
+                    "model": settings.groq_model,
+                },
+            },
             "latest_status": app.state.ai_scoring_service.metrics.snapshot(),
         },
         "replay": {"enabled": replay_enabled, "status": "enabled" if replay_enabled else "disabled"},

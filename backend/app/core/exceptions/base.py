@@ -22,9 +22,10 @@ class ExternalServiceError(TenError):
 
 
 @dataclass(frozen=True)
-class OpenRouterFailureDetails:
+class AIProviderFailureDetails:
     """Sanitized provider failure data safe to persist and expose operationally."""
 
+    provider: str
     reason_code: str
     phase: str
     endpoint: str
@@ -39,15 +40,27 @@ class OpenRouterFailureDetails:
     content_type: str | None = None
     body_length: int | None = None
     retry_after: str | None = None
+    rate_limit_limit: str | None = None
+    rate_limit_remaining: str | None = None
+    rate_limit_reset: str | None = None
+    rate_limit_request_limit: str | None = None
+    rate_limit_request_remaining: str | None = None
+    rate_limit_request_reset: str | None = None
+    rate_limit_token_limit: str | None = None
+    rate_limit_token_remaining: str | None = None
+    rate_limit_token_reset: str | None = None
+    provider_request_id: str | None = None
+    fallback_used: bool = False
+    fallback_reason: str | None = None
     elapsed_ms: float | None = None
     exception_class: str | None = None
 
 
-class OpenRouterRequestError(ExternalServiceError):
-    """OpenRouter failure carrying only sanitized diagnostic details."""
+class AIProviderRequestError(ExternalServiceError):
+    """AI-provider failure carrying only sanitized diagnostic details."""
 
-    def __init__(self, details: OpenRouterFailureDetails) -> None:
+    def __init__(self, details: AIProviderFailureDetails) -> None:
         self.details = details
         message = details.error_message or details.exception_class or details.reason_code
-        super().__init__(f"{details.reason_code}: {message}")
+        super().__init__(f"{details.provider}:{details.reason_code}: {message}")
 

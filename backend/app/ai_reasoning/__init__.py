@@ -1,7 +1,12 @@
 """Phase 3/4 AI market reasoning and persistent signal lifecycle."""
 
 from .config import AIReasoningConfig
-from .provider import AIReasoningProvider, ExistingOpenRouterReasoningProvider
+from .provider import (
+    AIProviderRouter,
+    AIReasoningProvider,
+    CerebrasProvider,
+    GroqProvider,
+)
 from .repository import AIReasoningRepository, InMemoryAIReasoningRepository, SqlAlchemyAIReasoningRepository
 from .service import AIReasoningService
 from .setup_families import SetupFamilyRegistry
@@ -11,7 +16,9 @@ __all__ = [
     "AIReasoningProvider",
     "AIReasoningRepository",
     "AIReasoningService",
-    "ExistingOpenRouterReasoningProvider",
+    "AIProviderRouter",
+    "CerebrasProvider",
+    "GroqProvider",
     "InMemoryAIReasoningRepository",
     "SetupFamilyRegistry",
     "SqlAlchemyAIReasoningRepository",

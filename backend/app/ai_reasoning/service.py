@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from hashlib import sha256
 import json
 import logging
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from backend.app.core.exceptions import OpenRouterRequestError
+from backend.app.core.exceptions import AIProviderRequestError
 from backend.app.engines.market_data_engine.sessions import MarketSessionEngine
 from backend.app.final_decision.models import ExecutionContext, LLMUsageMetric, OperationMode
 from backend.app.final_decision.service import FinalDecisionService
@@ -42,15 +42,11 @@ logger = logging.getLogger(__name__)
 _PROVIDER_REACHABLE_FAILURE_STATES = frozenset({"structured_output_invalid"})
 
 
-def ten_minute_bucket(value: datetime) -> datetime:
-    value = value.astimezone(UTC)
-    return value.replace(minute=(value.minute // 10) * 10, second=0, microsecond=0)
-
-
-def reasoning_idempotency_key(
+def reasoning_cycle_idempotency_key(
     instrument: str,
-    bucket: datetime,
-    market_state_version: str,
+    ums_boundary: datetime,
+    cycle_version: str,
+    provider_contract_version: str,
 ) -> str:
     normalized_instrument = "".join(
         character
@@ -60,22 +56,12 @@ def reasoning_idempotency_key(
     material = "|".join(
         (
             normalized_instrument,
-            bucket.astimezone(UTC).isoformat(),
-            market_state_version,
+            ums_boundary.astimezone(UTC).isoformat(),
+            cycle_version,
+            provider_contract_version,
         )
     )
     return sha256(material.encode()).hexdigest()
-
-
-def _temporary_provider_failure(details: Any) -> bool:
-    status = getattr(details, "http_status", None)
-    if isinstance(status, int):
-        return 500 <= status <= 599
-    return (
-        getattr(details, "phase", None) == "http_request"
-        and getattr(details, "reason_code", None)
-        in {"provider_unavailable", "openrouter_provider_unavailable", "openrouter_transport_error"}
-    )
 
 
 def _first_validation_issue_fields(issues: tuple[str, ...]) -> dict[str, Any]:
@@ -129,8 +115,6 @@ class AIReasoningService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self._llm_semaphore = asyncio.Semaphore(config.llm_concurrency_limit)
         self._processed_state_hashes: set[str] = set()
-        self._provider_failure_streak = 0
-        self._provider_backoff_until: datetime | None = None
         self.memory = MarketMemory(config.maximum_memory_entries)
         metadata = provider.metadata()
         self.lifecycle = SignalLifecycleService(
@@ -177,20 +161,29 @@ class AIReasoningService:
         quant = QuantForecastResult.model_validate(quant.model_dump(mode="python"))
         if state.market_data_boundary > state.knowledge_cutoff:
             raise ValueError("AI reasoning requires a legally closed point-in-time state")
-        bucket = ten_minute_bucket(self.clock())
-        market_state_version = state.schema_version
-        idempotency_key = reasoning_idempotency_key(
+        ums_boundary = state.market_data_boundary.astimezone(UTC)
+        cycle_version = state.schema_version
+        provider_contract_version = ":".join(
+            (
+                LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION,
+                AI_REASONING_RESPONSE_SCHEMA_VERSION,
+                self.config.reasoning_policy_version,
+            )
+        )
+        idempotency_key = reasoning_cycle_idempotency_key(
             state.instrument,
-            bucket,
-            market_state_version,
+            ums_boundary,
+            cycle_version,
+            provider_contract_version,
         )
         invocation_context = {
             **worker_context,
             "idempotency_key": idempotency_key,
-            "ten_minute_bucket": bucket.isoformat(),
-            "market_state_version": market_state_version,
+            "ums_boundary": ums_boundary.isoformat(),
+            "cycle_version": cycle_version,
+            "provider_contract_version": provider_contract_version,
         }
-        cached = await self.repository.result_for_reasoning_window(idempotency_key)
+        cached = await self.repository.result_for_reasoning_cycle(idempotency_key)
         if cached is not None:
             forecast, proposal = cached
             logger.info(
@@ -206,27 +199,18 @@ class AIReasoningService:
                 forecast,
                 proposal,
             )
-        if self._provider_backoff_until is not None and self.clock() < self._provider_backoff_until:
-            logger.info(
-                "ai_reasoning.gate.skipped",
-                extra={
-                    **invocation_context,
-                    "skip_reason": "provider_backoff_active",
-                    "provider_backoff_until": self._provider_backoff_until.isoformat(),
-                },
-            )
-            return None
-        claimed = await self.repository.claim_reasoning_window(
+        claimed = await self.repository.claim_reasoning_cycle(
             idempotency_key,
             state.instrument,
-            bucket,
-            market_state_version,
+            ums_boundary,
+            cycle_version,
+            provider_contract_version,
             self.clock(),
         )
         if not claimed:
             # Another process owns the durable unique claim. It may have completed between the
             # first read and this insert, so read once more before reporting in-flight.
-            cached = await self.repository.result_for_reasoning_window(idempotency_key)
+            cached = await self.repository.result_for_reasoning_cycle(idempotency_key)
             if cached is not None:
                 forecast, proposal = cached
                 logger.info(
@@ -246,7 +230,7 @@ class AIReasoningService:
                 "ai_reasoning.gate.skipped",
                 extra={
                     **invocation_context,
-                    "skip_reason": "ten_minute_window_claimed_by_another_worker",
+                    "skip_reason": "analytical_cycle_claimed_by_another_worker",
                     "provider_call_made": False,
                 },
             )
@@ -295,10 +279,9 @@ class AIReasoningService:
         failure_state = "unavailable"
         failure_errors: tuple[str, ...] = ()
         provider_failure: dict[str, Any] | None = None
-        # One scheduled invocation owns this ten-minute window. Only a transient transport/5xx
-        # failure may receive one immediate controlled retry; 4xx and validation failures never do.
-        for attempt in range(2):
-            controlled_retry = False
+        # The router owns provider-specific transient retries and fallback. The orchestration
+        # layer invokes it exactly once for this immutable analytical-cycle boundary.
+        for attempt in range(1):
             try:
                 async with self._llm_semaphore:
                     logger.info(
@@ -320,12 +303,25 @@ class AIReasoningService:
                         "request_id": str(request.request_id),
                         "attempt": attempt + 1,
                         "result": "success",
+                        "provider": response.provider,
+                        "model": response.model_identifier,
+                        "fallback_used": response.fallback_used,
+                        "fallback_reason": response.fallback_reason,
                         "latency_ms": response.latency_ms,
                     },
                 )
                 last_raw = response.raw_output
                 self.last_latency_ms = response.latency_ms
-                await self._record_usage(request, state.state_hash, response.token_usage, response.latency_ms, True, None)
+                await self._record_usage(
+                    request,
+                    state.state_hash,
+                    response.token_usage,
+                    response.latency_ms,
+                    True,
+                    None,
+                    model_identifier=response.model_identifier,
+                    provider=response.provider,
+                )
                 candidate = self.validator.validate(response.raw_output, request=request, state=state, quant=quant)
                 forecast = candidate.forecast.model_copy(
                     update={
@@ -333,6 +329,11 @@ class AIReasoningService:
                         "validation_passed": not candidate.degraded_validation,
                         "retry_count": attempt,
                         "token_usage": response.token_usage,
+                        "model_provider": response.provider,
+                        "model_identifier": response.model_identifier,
+                        "provider_fallback_used": response.fallback_used,
+                        "provider_fallback_reason": response.fallback_reason,
+                        "provider_operational_metadata": response.operational_metadata,
                         "failure_state": (
                             "degraded_structured_output"
                             if candidate.degraded_validation
@@ -347,7 +348,13 @@ class AIReasoningService:
                 )
                 validated = ValidatedAIOutput(
                     forecast=forecast,
-                    proposal=candidate.proposal,
+                    proposal=(
+                        candidate.proposal.model_copy(
+                            update={"model_identifier": response.model_identifier}
+                        )
+                        if candidate.proposal is not None
+                        else None
+                    ),
                     validation_issues=candidate.validation_issues,
                     repaired_fields=candidate.repaired_fields,
                 )
@@ -358,6 +365,10 @@ class AIReasoningService:
                         "request_id": str(request.request_id),
                         "request_schema_version": LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION,
                         "response_schema_version": AI_REASONING_RESPONSE_SCHEMA_VERSION,
+                        "provider": response.provider,
+                        "model": response.model_identifier,
+                        "fallback_used": response.fallback_used,
+                        "fallback_reason": response.fallback_reason,
                         "validation_status": (
                             "degraded" if candidate.degraded_validation else "valid"
                         ),
@@ -367,11 +378,23 @@ class AIReasoningService:
                         **_first_validation_issue_fields(candidate.validation_issues),
                     },
                 )
+                logger.info(
+                    "ai_provider.response.validated",
+                    extra={
+                        **invocation_context,
+                        "request_id": str(request.request_id),
+                        "provider": response.provider,
+                        "model": response.model_identifier,
+                        "fallback_used": response.fallback_used,
+                        "fallback_reason": response.fallback_reason,
+                        "validation_status": (
+                            "degraded" if candidate.degraded_validation else "valid"
+                        ),
+                    },
+                )
                 self.last_validation_passed = not candidate.degraded_validation
                 self.last_retry_count = attempt
                 self.last_failure_state = None
-                self._provider_failure_streak = 0
-                self._provider_backoff_until = None
                 break
             except StructuredAIOutputError as exc:
                 logger.info(
@@ -414,7 +437,7 @@ class AIReasoningService:
                         ),
                     },
                 )
-            except OpenRouterRequestError as exc:
+            except AIProviderRequestError as exc:
                 logger.info(
                     "ai_reasoning.provider_call.completed",
                     extra={
@@ -439,34 +462,16 @@ class AIReasoningService:
                     if value
                 )
                 self.last_latency_ms = exc.details.elapsed_ms
-                provider_backoff_failures = {
-                    "authentication_failed",
-                    "payment_blocked",
-                    "key_limit_exhausted",
-                    "rate_limited",
-                    "provider_unavailable",
-                    # Backward-compatible codes from already-deployed adapters.
-                    "openrouter_authentication_failed",
-                    "openrouter_insufficient_credits",
-                    "openrouter_rate_limited",
-                    "openrouter_provider_unavailable",
-                    "openrouter_transport_error",
-                }
-                if failure_state in provider_backoff_failures:
-                    self._provider_failure_streak += 1
-                    backoff = min(
-                        self.config.provider_backoff_initial_seconds
-                        * (2 ** (self._provider_failure_streak - 1)),
-                        self.config.provider_backoff_max_seconds,
-                    )
-                    self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
-                else:
-                    # Local payload/context/cost validation is deterministic and must not be
-                    # mislabeled as provider payment backoff.
-                    self._provider_failure_streak = 0
-                    self._provider_backoff_until = None
-                await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
-                controlled_retry = attempt == 0 and _temporary_provider_failure(exc.details)
+                await self._record_usage(
+                    request,
+                    state.state_hash,
+                    None,
+                    self.last_latency_ms,
+                    False,
+                    failure_state,
+                    model_identifier=exc.details.model,
+                    provider=exc.details.provider,
+                )
             except TimeoutError as exc:
                 logger.info(
                     "ai_reasoning.provider_call.completed",
@@ -488,13 +493,6 @@ class AIReasoningService:
                     "exception_class": type(exc).__name__,
                     "configured_timeout_seconds": self.config.request_timeout_seconds,
                 }
-                self._provider_failure_streak += 1
-                backoff = min(
-                    self.config.provider_backoff_initial_seconds
-                    * (2 ** (self._provider_failure_streak - 1)),
-                    self.config.provider_backoff_max_seconds,
-                )
-                self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
                 await self._record_usage(
                     request,
                     state.state_hash,
@@ -503,7 +501,6 @@ class AIReasoningService:
                     False,
                     failure_state,
                 )
-                controlled_retry = attempt == 0
             except Exception as exc:
                 logger.info(
                     "ai_reasoning.provider_call.completed",
@@ -525,35 +522,21 @@ class AIReasoningService:
                     "model": request.model_identifier,
                     "exception_class": type(exc).__name__,
                 }
-                self._provider_failure_streak += 1
-                backoff = min(
-                    self.config.provider_backoff_initial_seconds * (2 ** (self._provider_failure_streak - 1)),
-                    self.config.provider_backoff_max_seconds,
-                )
-                self._provider_backoff_until = self.clock() + timedelta(seconds=backoff)
                 await self._record_usage(request, state.state_hash, None, self.last_latency_ms, False, failure_state)
             await self._record_failure(
                 request.request_id,
                 attempt,
-                request.model_identifier,
+                (
+                    str(provider_failure["model"])
+                    if provider_failure and provider_failure.get("model")
+                    else request.model_identifier
+                ),
                 request.prompt_version,
                 last_raw,
                 failure_errors,
                 failure_state,
                 provider_failure,
             )
-            if controlled_retry:
-                logger.warning(
-                    "ai_reasoning.provider_call.retry_scheduled",
-                    extra={
-                        **invocation_context,
-                        "request_id": str(request.request_id),
-                        "completed_attempt": attempt + 1,
-                        "next_attempt": attempt + 2,
-                        "failure_reason_code": failure_state,
-                    },
-                )
-                continue
             break
 
         if validated is None:
@@ -581,7 +564,7 @@ class AIReasoningService:
                 )
                 raise
             self._processed_state_hashes.add(state.state_hash)
-            await self.repository.complete_reasoning_window(
+            await self.repository.complete_reasoning_cycle(
                 idempotency_key,
                 request.request_id,
                 unavailable.forecast_id,
@@ -596,6 +579,11 @@ class AIReasoningService:
                     "forecast_id": str(unavailable.forecast_id),
                     "status": unavailable.status.value,
                     "failure_reason_code": unavailable.failure_state,
+                    "provider_status": "failed",
+                    "reasoning_status": "degraded",
+                    "fallback_used": unavailable.provider_fallback_used,
+                    "fallback_reason": unavailable.provider_fallback_reason,
+                    "publication_eligible": False,
                 },
             )
             logger.info(
@@ -606,6 +594,11 @@ class AIReasoningService:
                     "forecast_id": str(unavailable.forecast_id),
                     "status": unavailable.status.value,
                     "failure_reason_code": unavailable.failure_state,
+                    "provider_status": "failed",
+                    "reasoning_status": "degraded",
+                    "fallback_used": unavailable.provider_fallback_used,
+                    "fallback_reason": unavailable.provider_fallback_reason,
+                    "publication_eligible": False,
                 },
             )
             return ValidatedAIOutput(forecast=unavailable, proposal=None)
@@ -683,7 +676,7 @@ class AIReasoningService:
                 )
         await self._append_memory(state, quant, validated.forecast, proposal, signal)
         self._processed_state_hashes.add(state.state_hash)
-        await self.repository.complete_reasoning_window(
+        await self.repository.complete_reasoning_cycle(
             idempotency_key,
             request.request_id,
             validated.forecast.forecast_id,
@@ -707,6 +700,18 @@ class AIReasoningService:
                 "request_id": str(request.request_id),
                 "forecast_id": str(validated.forecast.forecast_id),
                 "status": validated.forecast.status.value,
+                "provider_status": "success",
+                "reasoning_status": (
+                    "degraded"
+                    if validated.degraded_validation
+                    else "valid"
+                ),
+                "fallback_used": validated.forecast.provider_fallback_used,
+                "fallback_reason": validated.forecast.provider_fallback_reason,
+                "publication_eligible": bool(
+                    validated.proposal is not None
+                    and validated.forecast.validation_passed
+                ),
             },
         )
         return validated
@@ -752,6 +757,9 @@ class AIReasoningService:
         latency_ms: float | None,
         success: bool,
         failure_state: str | None,
+        *,
+        model_identifier: str | None = None,
+        provider: str | None = None,
     ) -> None:
         if self.final_decision is None:
             return
@@ -763,9 +771,13 @@ class AIReasoningService:
             usage_date=self.clock().date().isoformat(),
             request_hash=request_hash,
             market_state_hash=state_hash,
-            model_identifier=request.model_identifier,
+            model_identifier=model_identifier or request.model_identifier,
             prompt_version=request.prompt_version,
-            generation_parameters={"temperature": self.config.temperature, "max_tokens": self.config.max_tokens},
+            generation_parameters={
+                "temperature": self.config.temperature,
+                "max_tokens": self.config.max_tokens,
+                "provider": provider,
+            },
             request_count=1,
             input_tokens=token_usage.get("input_tokens") if token_usage else None,
             output_tokens=token_usage.get("output_tokens") if token_usage else None,
@@ -909,8 +921,20 @@ class AIReasoningService:
             quantitative_forecast_id=request.quantitative_forecast_id,
             cycle_id=request.cycle_id,
             status=AIResultStatus.INVALID if failure_state == "structured_output_invalid" else AIResultStatus.UNAVAILABLE,
-            model_provider=str(self.provider.metadata()["provider"]),
-            model_identifier=request.model_identifier,
+            model_provider=(
+                str(provider_failure["provider"])
+                if provider_failure and provider_failure.get("provider")
+                else str(
+                    self.provider.metadata().get("active_provider")
+                    or self.provider.metadata().get("provider")
+                    or "unavailable"
+                )
+            ),
+            model_identifier=(
+                str(provider_failure["model"])
+                if provider_failure and provider_failure.get("model")
+                else request.model_identifier
+            ),
             prompt_version=request.prompt_version,
             reasoning_policy_version=request.reasoning_policy_version,
             setup_family_registry_version=request.setup_family_registry_version,
@@ -936,6 +960,14 @@ class AIReasoningService:
             provider_metadata_provider_code=(
                 str(provider_failure.get("metadata_provider_code"))
                 if provider_failure and provider_failure.get("metadata_provider_code")
+                else None
+            ),
+            provider_fallback_used=bool(
+                provider_failure and provider_failure.get("fallback_used")
+            ),
+            provider_fallback_reason=(
+                str(provider_failure["fallback_reason"])
+                if provider_failure and provider_failure.get("fallback_reason")
                 else None
             ),
             fallback_state="no_ai_proposal",
@@ -996,6 +1028,17 @@ class AIReasoningService:
 
     def health(self) -> dict[str, object]:
         metadata = self.provider.metadata()
+        provider_states = metadata.get("providers")
+        ready_provider_count = (
+            sum(
+                1
+                for item in provider_states.values()
+                if isinstance(item, dict)
+                and item.get("status") in {"HEALTHY", "STANDBY"}
+            )
+            if isinstance(provider_states, dict)
+            else 0
+        )
         return {
             "enabled": self.enabled,
             "shadow_enabled": self.shadow_enabled,
@@ -1010,6 +1053,8 @@ class AIReasoningService:
             if self.requests
             else None,
             "provider": metadata["provider"],
+            "primary_provider": metadata.get("primary_provider"),
+            "active_provider": metadata.get("active_provider"),
             "model_identifier": metadata["model_identifier"],
             "prompt_version": self.config.prompt_version_new_market,
             "reasoning_policy_version": self.config.reasoning_policy_version,
@@ -1019,9 +1064,21 @@ class AIReasoningService:
             "failed_requests": self.failed_requests,
             "failure_state": self.last_failure_state,
             "fallback_state": "no_ai_proposal" if self.last_failure_state else None,
+            "fallback_status": (
+                "ACTIVE"
+                if metadata.get("active_provider") == "groq"
+                else "STANDBY"
+            ),
             "shadow_only": True,
             "awaiting_guardrail_validation": True,
-            "provider_backoff_until": self._provider_backoff_until.isoformat() if self._provider_backoff_until else None,
+            "providers": provider_states,
+            "provider_readiness": (
+                "failed"
+                if ready_provider_count == 0
+                else "healthy"
+                if ready_provider_count == 2
+                else "degraded"
+            ),
             "deduplicated_market_states": len(self._processed_state_hashes),
             "final_decision": self.final_decision.health() if self.final_decision else None,
         }

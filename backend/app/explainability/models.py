@@ -2,7 +2,7 @@
 
 `ExplainabilityContext` is the ONLY thing the LLM ever sees — it is assembled entirely from
 already-persisted TEN state (see context.py). `Explanation` is the ONLY shape the LLM is allowed
-to return (enforced via OpenRouter's `response_format: json_object` plus Pydantic validation on
+to return (enforced via provider `response_format: json_object` plus Pydantic validation on
 the way back in) — free-form prose replies are never trusted or rendered as-is.
 """
 

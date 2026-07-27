@@ -26,7 +26,7 @@ TEN treats YAML as the runtime composition source.
 | `volume_profile.yaml` | Profile settings |
 | `economic.yaml` | Event risk windows |
 | `economic_calendar.yaml` | Economic Calendar providers, normalization, risk context, retention, and API bounds |
-| `ai.yaml` | OpenRouter model and prompt version |
+| `ai.yaml` | Provider-neutral AI model and prompt policy |
 | `ai_scoring.yaml` | Deterministic intelligence aggregation policy |
 | `signal_decision.yaml` | Fail-closed analytical decision policy, rules, validity, and replay controls |
 | `signal.yaml` | Scenario construction settings |

@@ -25,19 +25,18 @@ from backend.app.ai_reasoning.models import (
     ProposalAction,
     SetupReadiness,
 )
-from backend.app.ai_reasoning.provider import AIProviderResponse, ExistingOpenRouterReasoningProvider
+from backend.app.ai_reasoning.provider import AIProviderResponse, CerebrasProvider, GroqProvider
 from backend.app.ai_reasoning.repository import InMemoryAIReasoningRepository
 from backend.app.ai_reasoning.request_builder import AIReasoningRequestBuilder
 from backend.app.ai_reasoning.service import (
     AIReasoningService,
-    reasoning_idempotency_key,
-    ten_minute_bucket,
+    reasoning_cycle_idempotency_key,
 )
 from backend.app.ai_reasoning.setup_families import SetupFamilyRegistry
 from backend.app.ai_reasoning.validation import StructuredAIOutputValidator, structural_opportunity_key
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.core.config import YamlConfigRepository
-from backend.app.core.exceptions import OpenRouterFailureDetails, OpenRouterRequestError
+from backend.app.core.exceptions import AIProviderFailureDetails, AIProviderRequestError
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
 from backend.app.market_state import InMemoryUnifiedMarketStateRepository, UnifiedMarketStateService
@@ -108,7 +107,7 @@ class ValidProvider:
         self.calls = 0
 
     def metadata(self):
-        return {"provider": "openrouter", "model_identifier": "configured-model", "external_ai_apis": ("openrouter",)}
+        return {"provider": "cerebras", "model_identifier": "configured-model", "external_ai_apis": ("cerebras",)}
 
     async def reason(self, request, *, prompt_version):
         self.calls += 1
@@ -147,7 +146,7 @@ class ValidProvider:
             uncertainty=0.32,
             reasoning_summary="Trend structure remains constructive.",
             monitoring_conditions=("protected structure", "regime transition"),
-            model_provider="openrouter",
+            model_provider="cerebras",
             model_identifier=request.model_identifier,
             prompt_version=prompt_version,
             reasoning_policy_version=request.reasoning_policy_version,
@@ -191,7 +190,7 @@ class ValidProvider:
         )
         return AIProviderResponse(
             raw_output={"forecast": forecast.model_dump(mode="json"), "proposal": proposal.model_dump(mode="json")},
-            provider="openrouter",
+            provider="cerebras",
             model_identifier=request.model_identifier,
             latency_ms=5,
             token_usage=None,
@@ -207,11 +206,12 @@ class UnavailableProvider(ValidProvider):
 class TypedUnavailableProvider(ValidProvider):
     async def reason(self, request, *, prompt_version):
         self.calls += 1
-        raise OpenRouterRequestError(
-            OpenRouterFailureDetails(
-                reason_code="openrouter_authentication_failed",
+        raise AIProviderRequestError(
+            AIProviderFailureDetails(
+                provider="cerebras",
+                reason_code="authentication_failed",
                 phase="http_request",
-                endpoint="https://openrouter.ai/api/v1/chat/completions",
+                endpoint="https://api.cerebras.ai/v1/chat/completions",
                 model=request.model_identifier,
                 request_id=str(request.request_id),
                 cycle_id=str(request.cycle_id),
@@ -230,11 +230,12 @@ class TemporaryUnavailableProvider(ValidProvider):
     async def reason(self, request, *, prompt_version):
         self.calls += 1
         if self.calls == 1:
-            raise OpenRouterRequestError(
-                OpenRouterFailureDetails(
+            raise AIProviderRequestError(
+                AIProviderFailureDetails(
+                    provider="cerebras",
                     reason_code="provider_unavailable",
                     phase="http_request",
-                    endpoint="https://openrouter.ai/api/v1/chat/completions",
+                    endpoint="https://api.cerebras.ai/v1/chat/completions",
                     model=request.model_identifier,
                     request_id=str(request.request_id),
                     cycle_id=str(request.cycle_id),
@@ -256,11 +257,12 @@ class PermanentHttpFailureProvider(ValidProvider):
 
     async def reason(self, request, *, prompt_version):
         self.calls += 1
-        raise OpenRouterRequestError(
-            OpenRouterFailureDetails(
+        raise AIProviderRequestError(
+            AIProviderFailureDetails(
+                provider="cerebras",
                 reason_code=self.reason_code,
                 phase="http_request",
-                endpoint="https://openrouter.ai/api/v1/chat/completions",
+                endpoint="https://api.cerebras.ai/v1/chat/completions",
                 model=request.model_identifier,
                 request_id=str(request.request_id),
                 cycle_id=str(request.cycle_id),
@@ -281,7 +283,7 @@ class InvalidProvider(ValidProvider):
         self.calls += 1
         return AIProviderResponse(
             raw_output={"forecast": {"buy_probability": 2}, "proposal": {"recommended_action": "BUY"}},
-            provider="openrouter",
+            provider="cerebras",
             model_identifier=request.model_identifier,
             latency_ms=2,
             token_usage=None,
@@ -330,7 +332,7 @@ class SimplifiedWaitProvider(ValidProvider):
                     "execution_levels": None,
                 },
             },
-            provider="openrouter",
+            provider="cerebras",
             model_identifier=request.model_identifier,
             latency_ms=3,
             token_usage=None,
@@ -368,7 +370,7 @@ class UnknownCompactSetupFamilyProvider(ValidProvider):
                     "take_profit_levels": [3311, 3320],
                 },
             },
-            provider="openrouter",
+            provider="cerebras",
             model_identifier=request.model_identifier,
             latency_ms=3,
             token_usage=None,
@@ -448,9 +450,10 @@ async def test_monitoring_flag_alone_cannot_create_new_opportunity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_existing_openrouter_is_the_only_provider_boundary() -> None:
-    assert ExistingOpenRouterReasoningProvider.provider_name == "openrouter"
-    assert ValidProvider().metadata()["external_ai_apis"] == ("openrouter",)
+async def test_configured_provider_boundaries_are_cerebras_and_groq() -> None:
+    assert CerebrasProvider.provider_name == "cerebras"
+    assert GroqProvider.provider_name == "groq"
+    assert ValidProvider().metadata()["external_ai_apis"] == ("cerebras",)
 
 
 @pytest.mark.asyncio
@@ -575,14 +578,14 @@ async def test_shadow_reasoning_runs_without_proposal_or_monitoring_flags_and_pe
 
     assert result is not None and result.proposal is None
     assert result.forecast.status == AIResultStatus.UNAVAILABLE
-    assert result.forecast.failure_state == "openrouter_authentication_failed"
+    assert result.forecast.failure_state == "authentication_failed"
     assert result.forecast.failure_phase == "http_request"
     assert result.forecast.provider_http_status == 401
     assert result.forecast.provider_error_code == "401"
     assert result.forecast.provider_error_message == "User not found."
     assert provider.calls == 1
     failure = next(iter(repository.failures.values()))
-    assert failure.failure_state == "openrouter_authentication_failed"
+    assert failure.failure_state == "authentication_failed"
     assert failure.provider_failure is not None
     assert failure.provider_failure["http_status"] == 401
     assert not repository.proposals and not repository.signals
@@ -607,6 +610,7 @@ async def test_first_structured_validation_error_is_logged_with_field_and_fragme
 ) -> None:
     state, quant = await state_and_quant()
     repository = InMemoryAIReasoningRepository()
+    logging.getLogger("backend.app.ai_reasoning.service").disabled = False
 
     with caplog.at_level(logging.ERROR, logger="backend.app.ai_reasoning.service"):
         await build_service(repository, InvalidProvider(), maximum_retries=0).process(state, quant)
@@ -772,25 +776,26 @@ async def test_duplicate_opportunity_updates_preserve_managed_signal_identity() 
     assert next(iter(repository.signals.values())).structural_opportunity_key == first.proposal.structural_opportunity_key
 
 
-def test_reasoning_idempotency_key_uses_instrument_bucket_and_state_version() -> None:
+def test_reasoning_idempotency_key_uses_exact_ums_cycle_boundary_and_contract() -> None:
     first = datetime(2026, 7, 24, 12, 1, tzinfo=UTC)
-    last = datetime(2026, 7, 24, 12, 9, 59, tzinfo=UTC)
-    next_window = datetime(2026, 7, 24, 12, 10, tzinfo=UTC)
+    next_cycle = datetime(2026, 7, 24, 12, 2, tzinfo=UTC)
 
-    assert ten_minute_bucket(first) == ten_minute_bucket(last)
-    assert reasoning_idempotency_key("xau/usd", ten_minute_bucket(first), "1.0") == (
-        reasoning_idempotency_key("XAUUSD", ten_minute_bucket(last), "1.0")
+    assert reasoning_cycle_idempotency_key("xau/usd", first, "1.0", "contract-1") == (
+        reasoning_cycle_idempotency_key("XAUUSD", first, "1.0", "contract-1")
     )
-    assert reasoning_idempotency_key("XAU/USD", ten_minute_bucket(first), "1.0") != (
-        reasoning_idempotency_key("XAU/USD", ten_minute_bucket(next_window), "1.0")
+    assert reasoning_cycle_idempotency_key("XAU/USD", first, "1.0", "contract-1") != (
+        reasoning_cycle_idempotency_key("XAU/USD", next_cycle, "1.0", "contract-1")
     )
-    assert reasoning_idempotency_key("XAU/USD", ten_minute_bucket(first), "1.0") != (
-        reasoning_idempotency_key("XAU/USD", ten_minute_bucket(first), "2.0")
+    assert reasoning_cycle_idempotency_key("XAU/USD", first, "1.0", "contract-1") != (
+        reasoning_cycle_idempotency_key("XAU/USD", first, "2.0", "contract-1")
+    )
+    assert reasoning_cycle_idempotency_key("XAU/USD", first, "1.0", "contract-1") != (
+        reasoning_cycle_idempotency_key("XAU/USD", first, "1.0", "contract-2")
     )
 
 
 @pytest.mark.asyncio
-async def test_repeated_pipeline_invocations_in_window_make_one_provider_call(
+async def test_repeated_pipeline_invocations_for_same_cycle_make_one_provider_call(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     state, quant = await state_and_quant()
@@ -806,7 +811,7 @@ async def test_repeated_pipeline_invocations_in_window_make_one_provider_call(
     assert first.forecast.forecast_id == second.forecast.forecast_id
     assert first_provider.calls == 1
     assert second_provider.calls == 0
-    assert len(repository.reasoning_windows) == 1
+    assert len(repository.reasoning_cycles) == 1
     assert len(repository.forecasts) == 1
     provider_calls = [
         record
@@ -817,11 +822,49 @@ async def test_repeated_pipeline_invocations_in_window_make_one_provider_call(
     assert provider_calls[0].trigger == "integration_worker"
     assert provider_calls[0].instrument == "XAUUSD"
     assert provider_calls[0].idempotency_key
-    assert provider_calls[0].ten_minute_bucket == ten_minute_bucket(NOW).isoformat()
+    assert provider_calls[0].ums_boundary == state.market_data_boundary.isoformat()
     assert any(
         record.message == "ai_reasoning.result.reused"
         for record in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_successive_one_minute_ums_boundaries_each_receive_fresh_reasoning() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    provider = ValidProvider()
+    service = build_service(repository, provider)
+
+    first = await service.process(state, quant)
+    next_state_id = uuid4()
+    next_state = state.model_copy(
+        update={
+            "state_id": next_state_id,
+            "state_hash": "b" * 64,
+            "cycle_id": uuid4(),
+            "market_data_boundary": state.market_data_boundary + timedelta(minutes=1),
+            "knowledge_cutoff": state.knowledge_cutoff + timedelta(minutes=1),
+            "evidence": tuple(
+                item.model_copy(update={"market_state_id": next_state_id})
+                for item in state.evidence
+            ),
+        }
+    )
+    next_quant = quant.model_copy(
+        update={
+            "result_id": uuid4(),
+            "market_state_id": next_state_id,
+            "cycle_id": next_state.cycle_id,
+            "point_in_time": next_state.market_data_boundary,
+            "generated_at": quant.generated_at + timedelta(minutes=1),
+        }
+    )
+    second = await service.process(next_state, next_quant)
+
+    assert first is not None and second is not None
+    assert provider.calls == 2
+    assert len(repository.reasoning_cycles) == 2
 
 
 @pytest.mark.asyncio
@@ -841,7 +884,7 @@ async def test_concurrent_workers_share_one_durable_window_claim() -> None:
 
     assert first_provider.calls + second_provider.calls == 1
     assert reused is not None
-    assert len(repository.reasoning_windows) == 1
+    assert len(repository.reasoning_cycles) == 1
     assert len(repository.forecasts) == 1
 
 
@@ -872,7 +915,7 @@ async def test_permanent_provider_failure_is_never_retried(
 
 
 @pytest.mark.asyncio
-async def test_temporary_5xx_gets_only_one_controlled_retry() -> None:
+async def test_orchestrator_does_not_duplicate_router_owned_retry() -> None:
     state, quant = await state_and_quant()
     repository = InMemoryAIReasoningRepository()
     provider = TemporaryUnavailableProvider()
@@ -880,8 +923,8 @@ async def test_temporary_5xx_gets_only_one_controlled_retry() -> None:
     result = await build_service(repository, provider).process(state, quant)
 
     assert result is not None
-    assert result.forecast.status == AIResultStatus.AVAILABLE
-    assert provider.calls == 2
+    assert result.forecast.status == AIResultStatus.UNAVAILABLE
+    assert provider.calls == 1
     assert len(repository.failures) == 1
 
 

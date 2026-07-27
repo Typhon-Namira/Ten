@@ -142,7 +142,7 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
   return <section className="ai-card ai-card--wide">
     <SectionHeader eyebrow="Operations" title="AI usage and system health" action={<Activity size={19} />} />
     <div className="health-grid">
-      <Metric label="OpenRouter calls today" value={usage?.request_count ?? 'Unavailable'} detail={`Allowance ${health?.guardrails.daily_request_allowance ?? 'Unavailable'}`} />
+      <Metric label="AI provider calls today" value={usage?.request_count ?? 'Unavailable'} detail={`Allowance ${health?.guardrails.daily_request_allowance ?? 'Unavailable'}`} />
       <Metric label="Recorded tokens" value={usage?.total_tokens?.toLocaleString() ?? 'Unavailable'} detail={`Allowance ${health?.guardrails.daily_token_allowance?.toLocaleString() ?? 'Unavailable'}`} />
       <Metric label="Failures" value={usage?.failed_requests ?? health?.failed_requests ?? 'Unavailable'} />
       <Metric label="Latest retry count" value={health?.latest_retry_count ?? 'Unavailable'} />
@@ -152,7 +152,7 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
       <Metric label="Data freshness" value={stale ? 'Stale' : 'Fresh'} />
     </div>
     <div className="card-foot">
-      <span>Provider {health?.provider ?? 'Unavailable'} · {health?.model_identifier ?? 'Model unavailable'}</span>
+      <span>Primary {health?.primary_provider ?? 'cerebras'} · active {health?.active_provider ?? 'Unavailable'} · fallback {health?.fallback_status ?? 'STANDBY'} · {health?.model_identifier ?? 'Model unavailable'}</span>
       <StatusBadge tone={health?.guardrails.status === 'healthy' && !stale ? 'positive' : 'warning'}>{humanize(health?.guardrails.status ?? 'unavailable')}</StatusBadge>
     </div>
   </section>

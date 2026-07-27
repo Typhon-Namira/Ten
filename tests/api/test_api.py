@@ -370,7 +370,7 @@ def test_dashboard_compact_request_history_returns_complete_200_contract() -> No
     body = response.json()
     assert {"stages", "reasoning"} <= set(body)
     assert body["stages"]["ai_reasoning"]["status"] == "running"
-    assert body["stages"]["ai_reasoning"]["reason"] == "openrouter_request_in_progress"
+    assert body["stages"]["ai_reasoning"]["reason"] == "ai_provider_request_in_progress"
     assert body["reasoning"]["runtime"]["operating_profile"] == "shadow"
 
 
@@ -388,8 +388,8 @@ def test_dashboard_reports_terminal_ai_failure_not_pending_end_to_end() -> None:
     )
     forecast = SimpleNamespace(
         forecast_id=forecast_id, market_state_id=state_id, status="unavailable", generated_at=boundary,
-        failure_state="openrouter_authentication_failed", missing_evidence=(), provider_http_status=401, validation_passed=False,
-        model_dump=lambda **_: {"forecast_id": str(forecast_id), "market_state_id": str(state_id), "status": "unavailable", "failure_state": "openrouter_authentication_failed"},
+        failure_state="authentication_failed", model_provider="cerebras", missing_evidence=(), provider_http_status=401, validation_passed=False,
+        model_dump=lambda **_: {"forecast_id": str(forecast_id), "market_state_id": str(state_id), "status": "unavailable", "failure_state": "authentication_failed"},
     )
     with TestClient(create_app()) as client:
         client.app.state.unified_market_state_repository.latest_state = AsyncMock(return_value=state)
@@ -402,12 +402,15 @@ def test_dashboard_reports_terminal_ai_failure_not_pending_end_to_end() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["stages"]["ai_reasoning"]["status"] == "failed"
-    assert body["stages"]["ai_reasoning"]["reason"] == "openrouter_returned_http_401"
-    assert body["stages"]["ai_reasoning"]["error_code"] == "openrouter_authentication_failed"
+    assert body["stages"]["ai_reasoning"]["reason"] == "cerebras_returned_http_401"
+    assert body["stages"]["ai_reasoning"]["error_code"] == "authentication_failed"
     assert body["stages"]["ai_reasoning"]["retryable"] is True
-    # final_action must be "blocked", not stuck in "awaiting_ai_proposal" -- the upstream failure
-    # already resolved, so there is nothing left to await.
-    assert body["stages"]["final_action"]["status"] == "blocked"
+    # A terminal provider failure must fail closed to an explicit WAIT, not remain stuck
+    # awaiting a proposal that cannot arrive.
+    assert body["stages"]["final_action"]["status"] == "wait"
+    assert body["stages"]["final_action"]["reason"] == "ai_provider_unavailable"
+    assert body["stages"]["final_action"]["direction"] == "WAIT"
+    assert body["stages"]["final_action"]["publication_eligible"] is False
     assert "awaiting" not in body["stages"]["final_action"]["reason"]
     assert body["status"] == "failed"
 

@@ -10,7 +10,7 @@ This proposal is the authoritative target design. It replaces revision 1 where t
 2. Market polling never runs analysis, AI, decisions, publication, or analytical persistence.
 3. The complete analytical cycle starts only at UTC `HH:00`, `HH:05`, …, `HH:55`.
 4. `(symbol, analysis_boundary)` identifies one authoritative cycle. Duplicate scheduler or queue delivery cannot execute it twice.
-5. A live cycle makes at most one physical OpenRouter HTTP request. There is no automatic live retry of that request.
+5. A live cycle makes one logical AI request through the Cerebras-primary/Groq-fallback router; each provider may receive at most one transient retry.
 6. Dashboard endpoints are pure reads and cause zero database or runtime-state writes.
 7. Heavy inputs and intermediate analytical objects remain in memory.
 8. PostgreSQL stores canonical M1 candles, bounded cycle control/results, one current-state row, and meaningful lifecycle records only.
@@ -34,7 +34,7 @@ flowchart LR
     Scheduler --> Queue["AnalysisCycleRequested"]
     Queue --> Engine["Bounded Analysis Engine<br/>one cycle then exit"]
     Candles --> Engine
-    Engine --> OpenRouter["OpenRouter<br/>≤1 HTTP request/cycle"]
+    Engine --> AIRouter["AI Provider Router<br/>Cerebras then Groq"]
     Engine --> Current[("One current-state row")]
     Engine --> History[("Meaningful lifecycle history")]
     Engine --> Runtime
@@ -103,7 +103,7 @@ sequenceDiagram
     participant S as Scheduler
     participant Q as Cycle Stream
     participant E as Analysis Engine
-    participant AI as OpenRouter
+    participant AI as AI Provider Router
     participant D as Dashboard Service
 
     loop Once per minute
@@ -391,7 +391,7 @@ It waits for an absolute boundary, never a startup-relative interval. On a bound
 
 The live scheduler may recover the current boundary only within 90 seconds. Older boundaries become `skipped/scheduler_misfire`; there is no live backlog replay.
 
-There is **no automatic live OpenRouter retry**. `ai_retry_count` is persisted and is `0` in V2 revision 2. A transport failure becomes the exact terminal AI failure for that cycle, and the cycle still completes with deterministic WAIT. Any future retry policy requires a new design review because one physical request is the current hard limit.
+The provider router allows at most one bounded retry for transient network or 5xx failures per provider. Authentication, quota, rate-limit, request-validation, decoding, and domain failures are not retried. A terminal provider failure still completes the cycle with deterministic WAIT.
 
 ## 8. Dashboard contract
 

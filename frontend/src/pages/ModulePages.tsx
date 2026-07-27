@@ -18,7 +18,7 @@ export const MarketRegimePage = () => (
   <EngineDetailPage eyebrow="REGIME WORKSPACE" title="Market Regime Engine" description="Trend, compression, volatility, strength, and regime transition history." icon={<Waves size={25} />} basePath="/market-regime" statePath="/state" />
 )
 export const AIAnalysisPage = () => (
-  <EngineDetailPage eyebrow="AI WORKSPACE" title="AI Scoring Engine" description="OpenRouter assessments consume feature snapshots only; confidence remains deterministic, never model-generated." icon={<BrainCircuit size={25} />} basePath="/ai-scoring" statePath="/latest" />
+  <EngineDetailPage eyebrow="AI WORKSPACE" title="AI Scoring Engine" description="Provider assessments consume feature snapshots only; confidence remains deterministic, never model-generated." icon={<BrainCircuit size={25} />} basePath="/ai-scoring" statePath="/latest" />
 )
 export const LogsPage = () => <PlaceholderPage eyebrow="OBSERVABILITY" title="Logs" description="Engine, event, and pipeline lifecycle visibility." icon={<FileClock size={25} />} capabilities={['Correlation IDs', 'Event history', 'Engine failures']} />
 export const ConfigurationPage = () => <PlaceholderPage eyebrow="PLATFORM CONTROL" title="Configuration" description="Read-only view of versioned YAML settings and feature flags." icon={<Settings2 size={25} />} capabilities={['Pipeline order', 'Engine versions', 'Feature flags']} />

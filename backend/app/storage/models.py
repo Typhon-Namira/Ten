@@ -1090,22 +1090,23 @@ class AIReasoningRequestRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
-class AIReasoningWindowLockRecord(Base):
-    """Durable distributed claim for one instrument/version/ten-minute provider window."""
+class AIReasoningCycleLockRecord(Base):
+    """Durable distributed claim for one synchronized analytical cycle."""
 
-    __tablename__ = "ai_reasoning_window_locks"
+    __tablename__ = "ai_reasoning_cycle_locks"
     __table_args__ = (
         Index(
-            "ix_ai_reasoning_window_instrument_bucket",
+            "ix_ai_reasoning_cycle_instrument_boundary",
             "instrument",
-            "ten_minute_bucket",
+            "ums_boundary",
         ),
     )
 
     idempotency_key: Mapped[str] = mapped_column(String(64), primary_key=True)
     instrument: Mapped[str] = mapped_column(String(32), index=True)
-    ten_minute_bucket: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    market_state_version: Mapped[str] = mapped_column(String(32))
+    ums_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    cycle_version: Mapped[str] = mapped_column(String(32))
+    provider_contract_version: Mapped[str] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(24))
     request_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),

@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
 import json
-from typing import Any
+from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backend.app.market_state import UnifiedMarketState
 from backend.app.quant_forecasting.models import QuantForecastResult
@@ -86,6 +86,30 @@ class StructuredAIOutputError(ValueError):
         self.first_issue = first_issue
 
 
+class CompactProposalOutput(BaseModel):
+    """Exact provider-wire proposal contract used before domain normalization."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    setup_family: str
+    entry_low: float = Field(gt=0)
+    entry_high: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    take_profit_levels: tuple[float, ...] = Field(min_length=1, max_length=3)
+
+
+class CompactAIReasoningOutput(BaseModel):
+    """Exact provider-wire contract; TEN's domain schema remains unchanged downstream."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["LONG", "SHORT", "WAIT"]
+    confidence: float = Field(ge=0, le=1)
+    rationale: str = Field(max_length=500)
+    risk_flags: tuple[str, ...] = Field(max_length=5)
+    proposal: CompactProposalOutput | None
+
+
 class StructuredAIOutputValidator:
     def __init__(self, registry: SetupFamilyRegistry) -> None:
         self.registry = registry
@@ -98,6 +122,18 @@ class StructuredAIOutputValidator:
         state: UnifiedMarketState,
         quant: QuantForecastResult,
     ) -> ValidatedAIOutput:
+        if "forecast" not in raw:
+            try:
+                raw = CompactAIReasoningOutput.model_validate(raw).model_dump(mode="python")
+            except ValidationError as exc:
+                issues = tuple(
+                    self._pydantic_issue("provider_response", item, raw)
+                    for item in exc.errors()
+                )
+                raise StructuredAIOutputError(
+                    tuple(item.encoded() for item in issues),
+                    first_issue=issues[0] if issues else None,
+                ) from exc
         raw, repaired_fields, normalization_issues = self._normalize(raw, request=request, state=state, quant=quant)
         errors: list[str] = list(normalization_issues)
         if not isinstance(raw.get("forecast"), dict):
@@ -264,7 +300,7 @@ class StructuredAIOutputValidator:
                     "market_state_id": str(request.market_state_id),
                     "quantitative_forecast_id": str(request.quantitative_forecast_id),
                     "cycle_id": str(request.cycle_id),
-                    "model_provider": "openrouter",
+                    "model_provider": "pending_provider_selection",
                     "model_identifier": request.model_identifier,
                     "prompt_version": request.prompt_version,
                     "reasoning_policy_version": request.reasoning_policy_version,

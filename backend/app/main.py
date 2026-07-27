@@ -1,5 +1,6 @@
 """TEN FastAPI application factory."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -57,7 +58,7 @@ from backend.app.services import InMemorySignalRepository, PipelineManager, buil
 from backend.app.integration import FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationRepository, IntegrationWorker, SqlAlchemyIntegrationRepository
 from backend.app.integration.activity_log import PipelineActivityLog
 from backend.app.integration.stage_tracker import PipelineStageTracker
-from backend.app.ai.openrouter_client.client import HttpOpenRouterClient
+from backend.app.ai.provider_client import AIProviderClient, HttpAIProviderClient
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.explainability import ExplainabilityService
 from backend.app.core.feature_flags import FeatureFlag
@@ -69,8 +70,10 @@ from backend.app.quant_forecasting.repository import InMemoryQuantForecastReposi
 from backend.app.quant_forecasting.service import QuantForecastService
 from backend.app.ai_reasoning import (
     AIReasoningConfig,
+    AIProviderRouter,
     AIReasoningService,
-    ExistingOpenRouterReasoningProvider,
+    CerebrasProvider,
+    GroqProvider,
     InMemoryAIReasoningRepository,
     SetupFamilyRegistry,
     SqlAlchemyAIReasoningRepository,
@@ -111,6 +114,37 @@ SPA_ROUTES = frozenset(
         "/configuration",
     }
 )
+
+
+async def _verify_ai_provider_model(
+    client: AIProviderClient,
+    model: str,
+) -> bool | None:
+    if not client.configured:
+        logging.getLogger(__name__).warning(
+            "ai_provider.model_check",
+            extra={
+                "provider": client.provider,
+                "model": model,
+                "status": "unconfigured",
+            },
+        )
+        return None
+    try:
+        models = await asyncio.wait_for(client.available_models(), timeout=5)
+    except TimeoutError:
+        models = ()
+    logging.getLogger(__name__).log(
+        logging.INFO if model in models else logging.WARNING,
+        "ai_provider.model_check",
+        extra={
+            "provider": client.provider,
+            "model": model,
+            "status": "available" if model in models else "unverified",
+            "advertised_model_count": len(models),
+        },
+    )
+    return model in models if models else None
 
 
 class SpaNavigationMiddleware(BaseHTTPMiddleware):
@@ -315,18 +349,39 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         await app.state.signal_decision_service.start()
         ai_reasoning_config = configs.load_model("ai_reasoning", AIReasoningConfig)
-        app.state.llm_client = HttpOpenRouterClient(
-            settings.openrouter_api_key,
-            settings.openrouter_base_url,
+        app.state.cerebras_client = HttpAIProviderClient(
+            "cerebras",
+            settings.cerebras_api_key,
+            settings.cerebras_base_url,
             timeout_seconds=max(
                 1.0,
                 ai_reasoning_config.request_timeout_seconds - 5.0,
             ),
         )
+        app.state.groq_client = HttpAIProviderClient(
+            "groq",
+            settings.groq_api_key,
+            settings.groq_base_url,
+            timeout_seconds=max(
+                1.0,
+                ai_reasoning_config.request_timeout_seconds - 5.0,
+            ),
+        )
+        cerebras_model_available, groq_model_available = await asyncio.gather(
+            _verify_ai_provider_model(
+                app.state.cerebras_client,
+                settings.cerebras_model,
+            ),
+            _verify_ai_provider_model(
+                app.state.groq_client,
+                settings.groq_model,
+            ),
+        )
+        app.state.llm_client = app.state.cerebras_client
         app.state.explainability_service = ExplainabilityService(
             app.state.llm_client,
             PromptLoader(Path(__file__).resolve().parent / "explainability" / "prompts"),
-            model=settings.openrouter_model,
+            model=settings.cerebras_model,
         )
         integration_config = IntegrationConfig(
             enabled=settings.integration_enabled,
@@ -391,10 +446,16 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             publication_enabled=ai_publication_enabled,
             adjustments_enabled=ai_adjustments_enabled,
         )
-        ai_provider = ExistingOpenRouterReasoningProvider(
-            app.state.llm_client,
-            PromptLoader(Path(__file__).resolve().parent / "ai_reasoning" / "prompts"),
-            model=settings.openrouter_model,
+        setup_family_ids = tuple(
+            item.setup_family_id for item in setup_family_registry.all()
+        )
+        reasoning_prompts = PromptLoader(
+            Path(__file__).resolve().parent / "ai_reasoning" / "prompts"
+        )
+        cerebras_provider = CerebrasProvider(
+            app.state.cerebras_client,
+            reasoning_prompts,
+            model=settings.cerebras_model,
             temperature=ai_reasoning_config.temperature,
             max_tokens=ai_reasoning_config.max_tokens,
             target_input_tokens=ai_reasoning_config.target_input_tokens,
@@ -404,17 +465,41 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             maximum_request_cost_usd=ai_reasoning_config.maximum_request_cost_usd,
             input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
             output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
-            setup_family_ids=tuple(
-                item.setup_family_id for item in setup_family_registry.all()
-            ),
+            setup_family_ids=setup_family_ids,
         )
+        groq_provider = GroqProvider(
+            app.state.groq_client,
+            reasoning_prompts,
+            model=settings.groq_model,
+            temperature=ai_reasoning_config.temperature,
+            max_tokens=ai_reasoning_config.max_tokens,
+            target_input_tokens=ai_reasoning_config.target_input_tokens,
+            warning_input_tokens=ai_reasoning_config.warning_input_tokens,
+            hard_input_tokens=ai_reasoning_config.hard_input_tokens,
+            absolute_max_output_tokens=ai_reasoning_config.absolute_max_output_tokens,
+            maximum_request_cost_usd=ai_reasoning_config.maximum_request_cost_usd,
+            input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
+            output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
+            setup_family_ids=setup_family_ids,
+        )
+        ai_provider = AIProviderRouter(
+            cerebras_provider,
+            groq_provider,
+            maximum_retries=ai_reasoning_config.maximum_retries,
+            circuit_seconds=ai_reasoning_config.provider_backoff_initial_seconds,
+            auth_circuit_seconds=ai_reasoning_config.provider_backoff_max_seconds,
+        )
+        if cerebras_model_available is False:
+            ai_provider.mark_model_unavailable("cerebras")
+        if groq_model_available is False:
+            ai_provider.mark_model_unavailable("groq")
         app.state.ai_reasoning_repository = ai_repository
         app.state.ai_reasoning_service = AIReasoningService(
             ai_repository,
             ai_provider,
             AIReasoningRequestBuilder(
                 ai_reasoning_config,
-                model_identifier=settings.openrouter_model,
+                model_identifier=settings.cerebras_model,
             ),
             StructuredAIOutputValidator(setup_family_registry),
             setup_family_registry,

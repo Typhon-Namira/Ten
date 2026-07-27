@@ -6,10 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
-from backend.app.ai.openrouter_client.client import (
-    OpenRouterClient,
+from backend.app.ai.provider_client import (
+    AIProviderClient,
+    AIProviderCompletion,
+    HttpAIProviderClient,
     build_request_body,
     measure_request_body,
 )
@@ -18,23 +21,31 @@ from backend.app.ai_reasoning.config import AIReasoningConfig
 from backend.app.ai_reasoning.llm_context import LLMAnalysisContext, build_llm_analysis_context
 from backend.app.ai_reasoning.memory import MarketMemory
 from backend.app.ai_reasoning.models import MarketMemoryEntry, MarketMemorySummary
-from backend.app.ai_reasoning.provider import ExistingOpenRouterReasoningProvider
+from backend.app.ai_reasoning.provider import CerebrasProvider, GroqProvider
 from backend.app.ai_reasoning.request_persistence import (
     decode_persisted_request,
     persisted_request_payload,
 )
 from backend.app.ai_reasoning.request_builder import AIReasoningRequestBuilder
 from backend.app.ai_reasoning.setup_families import SetupFamilyRegistry
-from backend.app.ai_reasoning.validation import StructuredAIOutputValidator
+from backend.app.ai_reasoning.validation import (
+    StructuredAIOutputError,
+    StructuredAIOutputValidator,
+)
 from backend.app.core.config import YamlConfigRepository
-from backend.app.core.exceptions import OpenRouterRequestError
+from backend.app.core.exceptions import AIProviderRequestError
 from tests.ai_reasoning.test_ai_reasoning_lifecycle import NOW, state_and_quant
 
 
-class CapturingClient(OpenRouterClient):
+class CapturingClient(AIProviderClient):
+    provider = "cerebras"
+    base_url = "https://api.cerebras.ai/v1"
+    configured = True
+
     def __init__(self, response: dict[str, Any] | None = None) -> None:
         self.calls = 0
         self.payloads: list[dict[str, Any]] = []
+        self.requests: list[dict[str, Any]] = []
         self.response = response or {
             "decision": "WAIT",
             "confidence": 0.8,
@@ -43,10 +54,26 @@ class CapturingClient(OpenRouterClient):
             "proposal": None,
         }
 
-    async def complete_json(self, **kwargs: Any) -> dict[str, Any]:
+    async def available_models(self) -> tuple[str, ...]:
+        return ("gpt-oss-120b",)
+
+    async def complete_json(self, **kwargs: Any) -> AIProviderCompletion:
         self.calls += 1
         self.payloads.append(kwargs["payload"])
-        return self.response
+        self.requests.append(kwargs)
+        return AIProviderCompletion(
+            content=self.response,
+            provider="cerebras",
+            model=kwargs["model"],
+            status_code=200,
+            latency_ms=1,
+            provider_request_id="test-request",
+            token_usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            rate_limit_limit=None,
+            rate_limit_remaining=None,
+            rate_limit_reset=None,
+            retry_after=None,
+        )
 
 
 async def _request(memory: MarketMemorySummary | None = None):
@@ -54,7 +81,7 @@ async def _request(memory: MarketMemorySummary | None = None):
     config = YamlConfigRepository().load_model("ai_reasoning", AIReasoningConfig)
     request = AIReasoningRequestBuilder(
         config,
-        model_identifier="meta-llama/llama-3.3-70b-instruct",
+        model_identifier="gpt-oss-120b",
         clock=lambda: NOW,
     ).build(
         state,
@@ -71,9 +98,9 @@ def _provider(
     client: CapturingClient,
     config: AIReasoningConfig,
     **overrides: Any,
-) -> ExistingOpenRouterReasoningProvider:
+) -> CerebrasProvider:
     values = {
-        "model": "meta-llama/llama-3.3-70b-instruct",
+        "model": "gpt-oss-120b",
         "temperature": config.temperature,
         "max_tokens": config.max_tokens,
         "target_input_tokens": config.target_input_tokens,
@@ -89,10 +116,34 @@ def _provider(
         ),
     }
     values.update(overrides)
-    return ExistingOpenRouterReasoningProvider(
+    return CerebrasProvider(
         client,
         PromptLoader(Path("backend/app/ai_reasoning/prompts")),
         **values,
+    )
+
+
+def _groq_provider(
+    client: AIProviderClient,
+    config: AIReasoningConfig,
+) -> GroqProvider:
+    return GroqProvider(
+        client,
+        PromptLoader(Path("backend/app/ai_reasoning/prompts")),
+        model="llama-3.1-8b-instant",
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+        target_input_tokens=config.target_input_tokens,
+        warning_input_tokens=config.warning_input_tokens,
+        hard_input_tokens=config.hard_input_tokens,
+        absolute_max_output_tokens=config.absolute_max_output_tokens,
+        maximum_request_cost_usd=config.maximum_request_cost_usd,
+        input_cost_per_million_usd=config.input_cost_per_million_usd,
+        output_cost_per_million_usd=config.output_cost_per_million_usd,
+        setup_family_ids=tuple(
+            item.setup_family_id
+            for item in SetupFamilyRegistry.from_yaml(YamlConfigRepository()).all()
+        ),
     )
 
 
@@ -250,13 +301,13 @@ async def test_oversized_context_is_rejected_before_provider_and_not_typed_as_cr
     client = CapturingClient()
     provider = _provider(client, config, hard_input_tokens=100)
 
-    with pytest.raises(OpenRouterRequestError) as captured:
+    with pytest.raises(AIProviderRequestError) as captured:
         await provider.reason(request, prompt_version=request.prompt_version)
 
     assert client.calls == 0
     assert captured.value.details.reason_code == "request_too_large"
     assert captured.value.details.phase == "request_validation"
-    assert captured.value.details.reason_code not in {"payment_blocked", "openrouter_insufficient_credits"}
+    assert captured.value.details.reason_code != "quota_exhausted"
 
 
 @pytest.mark.asyncio
@@ -286,6 +337,137 @@ async def test_compact_wait_response_and_output_limit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_groq_llama_uses_json_object_mode_with_application_validation() -> None:
+    state, quant, config, request = await _request()
+    client = CapturingClient()
+
+    response = await _groq_provider(client, config).reason(
+        request,
+        prompt_version=request.prompt_version,
+    )
+    validated = StructuredAIOutputValidator(
+        SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+    ).validate(response.raw_output, request=request, state=state, quant=quant)
+
+    assert client.calls == 1
+    assert client.requests[0]["response_schema"] is None
+    assert response.model_identifier == "llama-3.1-8b-instant"
+    assert validated.forecast.status.value == "non_actionable"
+
+
+@pytest.mark.asyncio
+async def test_groq_malformed_json_gets_exactly_one_correction_attempt() -> None:
+    _, _, config, request = await _request()
+    bodies: list[dict[str, Any]] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(http_request.content))
+        content = (
+            "not-json"
+            if len(bodies) == 1
+            else json.dumps(
+                {
+                    "decision": "WAIT",
+                    "confidence": 0.8,
+                    "rationale": "No actionable setup.",
+                    "risk_flags": [],
+                    "proposal": None,
+                }
+            )
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    response = await _groq_provider(client, config).reason(
+        request,
+        prompt_version=request.prompt_version,
+    )
+
+    assert response.raw_output["decision"] == "WAIT"
+    assert len(bodies) == 2
+    assert all(body["response_format"] == {"type": "json_object"} for body in bodies)
+
+
+@pytest.mark.asyncio
+async def test_groq_second_malformed_json_fails_closed_without_more_attempts() -> None:
+    _, _, config, request = await _request()
+    calls = 0
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "still-not-json"}}]},
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(AIProviderRequestError) as captured:
+        await _groq_provider(client, config).reason(
+            request,
+            prompt_version=request.prompt_version,
+        )
+
+    assert calls == 2
+    assert captured.value.details.reason_code == "response_decoding_failed"
+
+
+@pytest.mark.asyncio
+async def test_compact_response_missing_required_field_is_rejected() -> None:
+    state, quant, _, request = await _request()
+    raw = {
+        "decision": "WAIT",
+        "rationale": "No setup.",
+        "risk_flags": [],
+        "proposal": None,
+    }
+
+    with pytest.raises(StructuredAIOutputError) as captured:
+        StructuredAIOutputValidator(
+            SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+        ).validate(raw, request=request, state=state, quant=quant)
+
+    assert captured.value.first_issue is not None
+    assert captured.value.first_issue.field_path == "provider_response.confidence"
+
+
+@pytest.mark.asyncio
+async def test_compact_response_additional_property_is_rejected() -> None:
+    state, quant, _, request = await _request()
+    raw = {
+        "decision": "WAIT",
+        "confidence": 0.8,
+        "rationale": "No setup.",
+        "risk_flags": [],
+        "proposal": None,
+        "unexpected": "must-not-be-accepted",
+    }
+
+    with pytest.raises(StructuredAIOutputError) as captured:
+        StructuredAIOutputValidator(
+            SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+        ).validate(raw, request=request, state=state, quant=quant)
+
+    assert captured.value.first_issue is not None
+    assert captured.value.first_issue.field_path == "provider_response.unexpected"
+
+
+@pytest.mark.asyncio
 async def test_response_contract_exposes_only_canonical_setup_family_ids() -> None:
     _, _, config, _ = await _request()
     registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
@@ -295,9 +477,7 @@ async def test_response_contract_exposes_only_canonical_setup_family_ids() -> No
     assert contract["allowed_setup_families"] == [
         item.setup_family_id for item in registry.all()
     ]
-    assert contract["proposal_when_actionable"]["setup_family"] == (
-        "exactly one allowed_setup_families value"
-    )
+    assert "copy setup_family exactly from allowed_setup_families" in contract["rules"]
     assert len(contract["allowed_setup_families"]) == 9
 
 
