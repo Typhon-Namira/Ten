@@ -248,6 +248,48 @@ async def test_short_rate_limit_expires_and_cerebras_returns_to_primary() -> Non
 
 
 @pytest.mark.asyncio
+async def test_groq_429_never_promotes_groq_ahead_of_recovered_cerebras() -> None:
+    current = [NOW]
+    primary = StubProvider(
+        "cerebras",
+        [
+            failure(
+                "cerebras",
+                "rate_limited",
+                status=429,
+                rate_limit_reset="1",
+            ),
+            response("cerebras"),
+        ],
+    )
+    fallback = StubProvider(
+        "groq",
+        [
+            failure(
+                "groq",
+                "rate_limited",
+                status=429,
+                rate_limit_reset="1",
+            )
+        ],
+    )
+    router = AIProviderRouter(
+        primary,  # type: ignore[arg-type]
+        fallback,  # type: ignore[arg-type]
+        clock=lambda: current[0],
+    )
+
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+    current[0] = NOW + timedelta(seconds=2)
+    recovered = await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert recovered.provider == "cerebras"
+    assert primary.calls == 2
+    assert fallback.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_both_providers_fail_once_and_terminal_failure_records_fallback() -> None:
     primary = StubProvider(
         "cerebras",

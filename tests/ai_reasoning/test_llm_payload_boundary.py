@@ -398,6 +398,47 @@ async def test_groq_malformed_json_gets_exactly_one_correction_attempt() -> None
 
 
 @pytest.mark.asyncio
+async def test_groq_missing_rationale_gets_one_explicit_schema_correction() -> None:
+    state, quant, config, request = await _request()
+    bodies: list[dict[str, Any]] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(http_request.content))
+        output: dict[str, Any] = {
+            "decision": "WAIT",
+            "confidence": 0.8,
+            "risk_flags": [],
+            "proposal": None,
+        }
+        if len(bodies) == 2:
+            output["rationale"] = "No actionable setup."
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(output)}}]},
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    response = await _groq_provider(client, config).reason(
+        request,
+        prompt_version=request.prompt_version,
+    )
+    validated = StructuredAIOutputValidator(
+        SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+    ).validate(response.raw_output, request=request, state=state, quant=quant)
+
+    assert len(bodies) == 2
+    assert "provider_response.rationale" in bodies[1]["messages"][0]["content"]
+    assert response.raw_output["rationale"] == "No actionable setup."
+    assert validated.degraded_validation is False
+
+
+@pytest.mark.asyncio
 async def test_groq_second_malformed_json_fails_closed_without_more_attempts() -> None:
     _, _, config, request = await _request()
     calls = 0
