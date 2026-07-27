@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 import logging
 from typing import Any
@@ -13,14 +14,16 @@ from pydantic import ValidationError
 from .analysis import AIAnalysisOutput
 
 logger = logging.getLogger(__name__)
-_MAX_NORMALIZED_JSON_LOG_CHARACTERS = 8_000
+_MAX_ERROR_FRAGMENT_CHARACTERS = 1_000
 
 
 def _normalized_json_for_log(value: dict[str, Any]) -> tuple[str, bool]:
+    """Encode only a bounded offending-field fragment for diagnostics."""
+
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
     return (
-        encoded[:_MAX_NORMALIZED_JSON_LOG_CHARACTERS],
-        len(encoded) > _MAX_NORMALIZED_JSON_LOG_CHARACTERS,
+        encoded[:_MAX_ERROR_FRAGMENT_CHARACTERS],
+        len(encoded) > _MAX_ERROR_FRAGMENT_CHARACTERS,
     )
 
 
@@ -94,15 +97,20 @@ class StructuredAIOutputValidator:
                 tuple(item.encoded() for item in issues),
                 first_issue=issues[0] if issues else None,
             ) from exc
-        normalized_json, truncated = _normalized_json_for_log(
-            validated.model_dump(mode="python")
+        normalized_json = json.dumps(
+            validated.model_dump(mode="python"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
         )
         logger.info(
             "ai_provider.response.normalized",
             extra={
                 "normalization_status": "analysis_schema_valid",
-                "normalized_provider_json": normalized_json,
-                "normalized_provider_json_truncated": truncated,
+                "normalized_response_sha256": sha256(
+                    normalized_json.encode()
+                ).hexdigest(),
+                "normalized_response_character_count": len(normalized_json),
             },
         )
         return validated

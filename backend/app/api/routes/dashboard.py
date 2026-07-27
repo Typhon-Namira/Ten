@@ -476,12 +476,35 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             if isinstance(item.generation_parameters.get(name, 0), (int, float))
         )
 
+    recent_provider_attempts = sorted(
+        (
+            attempt
+            for item in usage_rows
+            for attempt in item.generation_parameters.get("provider_attempts", ())
+            if isinstance(attempt, dict)
+        ),
+        key=lambda item: str(item.get("recorded_at") or ""),
+        reverse=True,
+    )[:20]
     usage = {
         "request_count": sum(item.request_count for item in usage_rows),
         "provider_http_calls": sum(item.request_count for item in usage_rows),
         "groq_calls": usage_parameter("groq_calls"),
         "retries": usage_parameter("retry_attempts"),
         "schema_corrections": usage_parameter("schema_corrections"),
+        "initial_analysis_requests": usage_parameter("analysis_requests"),
+        "initial_parse_failures": usage_parameter("initial_parse_failures"),
+        "initial_schema_validation_failures": usage_parameter(
+            "initial_schema_validation_failures"
+        ),
+        "schema_corrections_succeeded": usage_parameter(
+            "schema_corrections_succeeded"
+        ),
+        "schema_corrections_failed": usage_parameter(
+            "schema_corrections_failed"
+        ),
+        "http_429_responses": usage_parameter("http_429_responses"),
+        "recent_provider_attempts": recent_provider_attempts,
         "provider_failures": usage_parameter("provider_failure"),
         "validation_failures": usage_parameter("validation_failure"),
         "total_tokens": (
@@ -520,6 +543,15 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             )
             provider_state["quota_failures"] = usage_parameter(
                 f"{account_id}_quota_failures"
+            )
+            provider_state["analysis_requests"] = usage_parameter(
+                f"{account_id}_analysis_requests"
+            )
+            provider_state["schema_correction_requests"] = usage_parameter(
+                f"{account_id}_schema_correction_requests"
+            )
+            provider_state["http_429_responses"] = usage_parameter(
+                f"{account_id}_http_429_responses"
             )
             provider_state["token_usage"] = {
                 "input_tokens": usage_parameter(f"{account_id}_input_tokens"),

@@ -6,6 +6,10 @@ import httpx
 import pytest
 
 from backend.app.ai.provider_client import HttpAIProviderClient
+from backend.app.ai.provider_client.client import (
+    ProviderJSONDecodeError,
+    extract_single_json_object,
+)
 from backend.app.core.exceptions import AIProviderRequestError
 
 
@@ -16,6 +20,35 @@ def client_for(handler, provider: str = "groq_1") -> HttpAIProviderClient:
         f"https://api.{provider}.test/v1",
         transport=httpx.MockTransport(handler),
     )
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_note"),
+    (
+        ('{"status":"ok"}', None),
+        ('  {"status":"ok"}  ', None),
+        ('```json\n{"status":"ok"}\n```', "markdown_fence_present"),
+        (
+            'Result follows: {"status":"ok"} end.',
+            "surrounding_prose_removed",
+        ),
+    ),
+)
+def test_single_json_object_extraction_accepts_harmless_formatting(
+    content: str,
+    expected_note: str | None,
+) -> None:
+    parsed, note = extract_single_json_object(content)
+
+    assert parsed == {"status": "ok"}
+    assert note == expected_note
+
+
+def test_multiple_json_objects_are_rejected_as_ambiguous() -> None:
+    with pytest.raises(ProviderJSONDecodeError) as captured:
+        extract_single_json_object('{"first":1} {"second":2}')
+
+    assert captured.value.reason_code == "multiple_json_objects"
 
 
 @pytest.mark.asyncio
@@ -143,7 +176,14 @@ async def test_http_200_invalid_json_is_typed_response_decoding_failure(
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": "not-json"}}]},
+            json={
+                "choices": [{"message": {"content": "not-json"}}],
+                "usage": {
+                    "prompt_tokens": 31,
+                    "completion_tokens": 7,
+                    "total_tokens": 38,
+                },
+            },
             request=request,
         )
 
@@ -159,6 +199,9 @@ async def test_http_200_invalid_json_is_typed_response_decoding_failure(
     assert captured.value.details.reason_code == "response_decoding_failed"
     assert captured.value.details.phase == "response_decoding"
     assert captured.value.details.provider == provider
+    assert captured.value.details.provider_input_tokens == 31
+    assert captured.value.details.provider_output_tokens == 7
+    assert captured.value.details.provider_total_tokens == 38
 
 
 @pytest.mark.asyncio
@@ -197,6 +240,34 @@ async def test_success_returns_typed_completion_without_logging_payload(
 
 
 @pytest.mark.asyncio
+async def test_missing_usage_remains_null_and_finish_reason_is_exposed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": '{"status":"ok"}'},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+            request=request,
+        )
+
+    result = await client_for(handler).complete_json(
+        system_prompt="system",
+        payload={"input": "test"},
+        model="llama-3.1-8b-instant",
+        temperature=0,
+        max_tokens=10,
+    )
+
+    assert result.token_usage is None
+    assert result.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
 async def test_groq_tracks_request_and_token_rate_limit_headers() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -232,7 +303,7 @@ async def test_groq_tracks_request_and_token_rate_limit_headers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_groq_token_limit_exhaustion_is_typed_provider_failure() -> None:
+async def test_groq_temporary_token_rate_limit_is_not_daily_quota() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             429,
@@ -260,7 +331,8 @@ async def test_groq_token_limit_exhaustion_is_typed_provider_failure() -> None:
         )
 
     details = captured.value.details
-    assert details.reason_code == "token_quota_exhausted"
+    assert details.reason_code == "rate_limited"
+    assert details.limit_classification == "RATE_LIMITED_TEMPORARY"
     assert details.rate_limit_request_remaining == "14000"
     assert details.rate_limit_token_remaining == "0"
     assert details.rate_limit_token_reset == "8s"

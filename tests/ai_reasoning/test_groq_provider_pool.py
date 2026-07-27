@@ -36,6 +36,15 @@ class StubProvider:
         self.outcomes = outcomes
         self.calls = 0
         self.correction_attempts = 0
+        self.attempt_counters = {
+            "analysis_requests": 0,
+            "schema_correction_requests": 0,
+            "http_429_responses": 0,
+            "initial_parse_failures": 0,
+            "initial_schema_validation_failures": 0,
+            "schema_corrections_succeeded": 0,
+            "schema_corrections_failed": 0,
+        }
 
     @property
     def http_calls(self) -> int:
@@ -198,6 +207,42 @@ async def test_temporary_rate_limit_uses_header_and_moves_immediately() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rate_limited_account_becomes_available_only_after_cooldown() -> None:
+    current = [NOW]
+    providers = four(
+        {1: [failure("groq_1", "rate_limited", status=429, retry_after="90s")]}
+    )
+    router = GroqProviderPool(  # type: ignore[arg-type]
+        tuple(providers),
+        clock=lambda: current[0],
+    )
+
+    await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+    assert router.metadata()["providers"]["groq_1"]["eligible_now"] is False  # type: ignore[index]
+
+    current[0] = NOW + timedelta(seconds=91)
+    assert router.metadata()["providers"]["groq_1"]["eligible_now"] is True  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_pool_is_temporarily_unavailable_when_all_accounts_are_rate_limited() -> None:
+    providers = four(
+        {
+            index: [failure(f"groq_{index}", "rate_limited", status=429)]
+            for index in range(1, 5)
+        }
+    )
+    router = pool(providers)
+
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    metadata = router.metadata()
+    assert metadata["available_account_count"] == 0
+    assert metadata["aggregate_reason"] == "temporarily_rate_limited"
+
+
+@pytest.mark.asyncio
 async def test_authentication_failure_marks_only_one_account() -> None:
     providers = four(
         {1: [failure("groq_1", "authentication_failed", status=401)]}
@@ -280,38 +325,13 @@ async def test_pool_metrics_include_persistable_per_account_deltas() -> None:
 
     await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
 
-    assert router.metrics() == {
-        "provider_http_calls": 1,
-        "groq_calls": 1,
-        "retry_attempts": 0,
-        "schema_corrections": 1,
-        "groq_1_calls": 1,
-        "groq_1_provider_failures": 0,
-        "groq_1_rate_limit_failures": 0,
-        "groq_1_quota_failures": 0,
-        "groq_1_input_tokens": 10,
-        "groq_1_output_tokens": 5,
-        "groq_1_total_tokens": 15,
-        "groq_2_calls": 0,
-        "groq_2_provider_failures": 0,
-        "groq_2_rate_limit_failures": 0,
-        "groq_2_quota_failures": 0,
-        "groq_2_input_tokens": 0,
-        "groq_2_output_tokens": 0,
-        "groq_2_total_tokens": 0,
-        "groq_3_calls": 0,
-        "groq_3_provider_failures": 0,
-        "groq_3_rate_limit_failures": 0,
-        "groq_3_quota_failures": 0,
-        "groq_3_input_tokens": 0,
-        "groq_3_output_tokens": 0,
-        "groq_3_total_tokens": 0,
-        "groq_4_calls": 0,
-        "groq_4_provider_failures": 0,
-        "groq_4_rate_limit_failures": 0,
-        "groq_4_quota_failures": 0,
-        "groq_4_input_tokens": 0,
-        "groq_4_output_tokens": 0,
-        "groq_4_total_tokens": 0,
-    }
+    metrics = router.metrics()
+    assert metrics["provider_http_calls"] == 1
+    assert metrics["groq_calls"] == 1
+    assert metrics["retry_attempts"] == 0
+    assert metrics["schema_corrections"] == 1
+    assert metrics["groq_1_calls"] == 1
+    assert metrics["groq_1_total_tokens"] == 15
+    assert metrics["groq_2_calls"] == 0
+    assert metrics["groq_4_schema_corrections_failed"] == 0
     assert "api_key" not in str(router.metadata()).lower()

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from hashlib import sha256
 import json
 import logging
 import random
@@ -32,16 +33,7 @@ from .models import AIReasoningRequest
 logger = logging.getLogger(__name__)
 AI_REASONING_RESPONSE_SCHEMA_TYPE = "ten_ai_reasoning_response"
 AI_REASONING_RESPONSE_SCHEMA_VERSION = "1.0"
-_MAX_PROVIDER_JSON_LOG_CHARACTERS = 8_000
-
-
-def _bounded_provider_json(value: str) -> tuple[str, bool]:
-    """Bound compact provider output diagnostics without logging prompts or credentials."""
-
-    return (
-        value[:_MAX_PROVIDER_JSON_LOG_CHARACTERS],
-        len(value) > _MAX_PROVIDER_JSON_LOG_CHARACTERS,
-    )
+_MAX_CORRECTION_FRAGMENT_CHARACTERS = 6_000
 
 
 class ProviderStatus(StrEnum):
@@ -82,6 +74,8 @@ class ProviderRuntimeState:
             "status": self.status.value,
             "account_id": self.account_id,
             "enabled": self.enabled,
+            "configured": self.enabled,
+            "eligible_now": self.status == ProviderStatus.AVAILABLE,
             "availability": self.status == ProviderStatus.AVAILABLE,
             "model": self.model,
             "last_success_at": self.last_success_at.isoformat() if self.last_success_at else None,
@@ -100,6 +94,15 @@ class ProviderRuntimeState:
             "circuit_state": (
                 "OPEN" if self.circuit_open_until is not None else "CLOSED"
             ),
+            "rate_limit_state": (
+                "ACTIVE" if self.status == ProviderStatus.RATE_LIMITED else "CLEAR"
+            ),
+            "quota_state": (
+                "EXHAUSTED"
+                if self.status == ProviderStatus.QUOTA_EXHAUSTED
+                else "AVAILABLE"
+            ),
+            "last_request_status": self.last_http_status,
             "calls_today": self.calls_today,
             "successful_analyses": self.successful_analyses,
             "provider_failures": self.provider_failures,
@@ -178,6 +181,61 @@ def reasoning_response_schema() -> dict[str, Any]:
     return cast(dict[str, Any], compact(AIAnalysisOutput.model_json_schema()))
 
 
+def _schema_issue(exc: ValidationError) -> tuple[str, str, str, str]:
+    errors = exc.errors()
+    if not errors:
+        return "schema_validation_failed", "provider_response", "schema validation", "{}"
+    first = errors[0]
+    location = ".".join(str(item) for item in first.get("loc", ()))
+    path = ".".join(item for item in ("provider_response", location) if item)
+    error_type = str(first.get("type") or "schema_validation")
+    if error_type == "missing":
+        code = "missing_required_field"
+    elif error_type == "extra_forbidden":
+        code = "unexpected_field"
+    elif "enum" in error_type or "literal" in error_type:
+        code = "invalid_enum"
+    elif any(marker in error_type for marker in ("greater", "less", "multiple")):
+        code = "numeric_range_error"
+    elif "datetime" in error_type:
+        code = "invalid_timestamp"
+    elif error_type.startswith(("string_", "int_", "float_", "bool_", "tuple_", "list_")):
+        code = "wrong_type"
+    elif error_type in {"model_type", "model_attributes_type"}:
+        code = "invalid_signal_shape"
+    else:
+        code = "business_rule_violation"
+    fragment = json.dumps(
+        {"path": path, "value": first.get("input")},
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    )[:1000]
+    return code, path, str(first.get("msg") or error_type), fragment
+
+
+def _normalized_contract_output(
+    raw: dict[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Remove only known response-contract metadata, never analytical values."""
+
+    metadata = ("schema_type", "schema_version", "json_schema")
+    removed = tuple(key for key in metadata if key in raw)
+    if not removed:
+        return raw, ()
+    return {key: value for key, value in raw.items() if key not in metadata}, removed
+
+
+def _combined_usage(*values: dict[str, int] | None) -> dict[str, int] | None:
+    keys = ("input_tokens", "output_tokens", "total_tokens")
+    combined = {
+        key: sum(value.get(key, 0) for value in values if value and key in value)
+        for key in keys
+        if any(value and key in value for value in values)
+    }
+    return combined or None
+
+
 class _OpenAICompatibleReasoningProvider:
     provider_name: str
     supports_strict_json_schema = True
@@ -228,23 +286,29 @@ class _OpenAICompatibleReasoningProvider:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         correction_instruction: str | None = None,
+        previous_response_fragment: str | None = None,
     ) -> AIProviderResponse:
         started = perf_counter()
-        context = build_llm_analysis_context(request)
-        payload = {
-            "analysis_context": context.model_dump(mode="json"),
-            "response_contract": self._response_contract(),
-        }
-        system_prompt = self.prompts.load(prompt_version)
+        schema = reasoning_response_schema()
         if correction_instruction:
             system_prompt = (
-                f"{system_prompt}\n\n"
-                "CORRECTION REQUIRED FOR THE PREVIOUS RESPONSE:\n"
-                f"{correction_instruction}\n"
-                "Return one complete JSON object containing every required field. "
-                "Do not omit fields and do not add properties outside the response contract."
+                "Return exactly one compact JSON object and nothing else. "
+                "Correct the supplied response according to validation_error. "
+                "Do not invent market facts or emit trading actions."
             )
-        schema = reasoning_response_schema()
+            payload = {
+                "required_top_level_fields": schema["required"],
+                "additional_properties_allowed": False,
+                "validation_error": correction_instruction,
+                "previous_response": previous_response_fragment,
+            }
+        else:
+            context = build_llm_analysis_context(request)
+            payload = {
+                "analysis_context": context.model_dump(mode="json"),
+                "response_contract": self._response_contract(),
+            }
+            system_prompt = self.prompts.load(prompt_version)
         wire_schema = schema if self.supports_strict_json_schema else None
         request_body = build_request_body(
             system_prompt=system_prompt,
@@ -307,14 +371,12 @@ class _OpenAICompatibleReasoningProvider:
         # This increment is intentionally adjacent to the transport call. Preflight
         # rejections, scheduler ticks, cache reads, and dashboard reads never reach it.
         self.http_calls += 1
-        attempt_type = (
-            "correction"
+        request_kind = (
+            "schema_correction"
             if correction_instruction
-            else "fallback"
-            if fallback_used
-            else "retry"
+            else "transport_retry"
             if attempt > 1
-            else "primary"
+            else "analysis"
         )
         completion = await self.client.complete_json(
             system_prompt=system_prompt,
@@ -337,9 +399,16 @@ class _OpenAICompatibleReasoningProvider:
             attempt=attempt,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
-            attempt_type=attempt_type,
+            attempt_type=request_kind,
         )
-        return self._response(completion, started, fallback_used, fallback_reason)
+        return self._response(
+            completion,
+            started,
+            fallback_used,
+            fallback_reason,
+            request_kind,
+            attempt,
+        )
 
     def metadata(self) -> dict[str, object]:
         return {
@@ -356,27 +425,27 @@ class _OpenAICompatibleReasoningProvider:
         started: float,
         fallback_used: bool,
         fallback_reason: str | None,
+        request_kind: str,
+        request_sequence: int,
     ) -> AIProviderResponse:
         decoded_json = json.dumps(
             completion.content,
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        raw_json, raw_truncated = _bounded_provider_json(
-            completion.raw_json_text or decoded_json
-        )
-        decoded_json, decoded_truncated = _bounded_provider_json(decoded_json)
+        raw_json = completion.raw_json_text or decoded_json
         logger.info(
-            "ai_provider.response.raw",
+            "ai_provider.response.diagnostic",
             extra={
                 "provider": self.provider_name,
                 "model": self.model,
                 "provider_request_id": completion.provider_request_id,
                 "status_code": completion.status_code,
-                "raw_provider_json": raw_json,
-                "raw_provider_json_truncated": raw_truncated,
-                "decoded_provider_json": decoded_json,
-                "decoded_provider_json_truncated": decoded_truncated,
+                "raw_response_sha256": sha256(raw_json.encode()).hexdigest(),
+                "raw_response_character_count": len(raw_json),
+                "decoded_response_sha256": sha256(decoded_json.encode()).hexdigest(),
+                "decoded_response_character_count": len(decoded_json),
+                "extraction_note": completion.extraction_note,
             },
         )
         return AIProviderResponse(
@@ -400,6 +469,13 @@ class _OpenAICompatibleReasoningProvider:
                 "rate_limit_token_remaining": completion.rate_limit_token_remaining,
                 "rate_limit_token_reset": completion.rate_limit_token_reset,
                 "retry_after": completion.retry_after,
+                "finish_reason": completion.finish_reason,
+                "response_size_bytes": completion.response_size_bytes,
+                "response_character_count": completion.response_character_count,
+                "prompt_character_count": completion.prompt_character_count,
+                "extraction_note": completion.extraction_note,
+                "request_kind": request_kind,
+                "request_sequence": request_sequence,
             },
         )
 
@@ -460,6 +536,161 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             output_cost_per_million_usd=output_cost_per_million_usd,
             setup_family_ids=setup_family_ids,
         )
+        self.request_attempts: list[dict[str, Any]] = []
+        self.attempt_counters = {
+            "analysis_requests": 0,
+            "schema_correction_requests": 0,
+            "http_429_responses": 0,
+            "initial_parse_failures": 0,
+            "initial_schema_validation_failures": 0,
+            "schema_corrections_succeeded": 0,
+            "schema_corrections_failed": 0,
+        }
+
+    def _record_attempt(
+        self,
+        request: AIReasoningRequest,
+        *,
+        request_kind: str,
+        request_sequence: int,
+        response: AIProviderResponse | None = None,
+        error: AIProviderFailureDetails | None = None,
+        schema_valid: bool | None = None,
+        schema_error_code: str | None = None,
+        schema_error_path: str | None = None,
+        correction_triggered: bool = False,
+    ) -> None:
+        metadata = (response.operational_metadata or {}) if response else {}
+        usage = response.token_usage if response else None
+        attempt_seed = (
+            f"{request.request_id}:{self.provider_name}:"
+            f"{request_sequence}:{request_kind}"
+        )
+        item: dict[str, Any] = {
+            "analysis_job_id": str(request.request_id),
+            "eligible_cycle_id": str(request.cycle_id),
+            "provider_attempt_id": sha256(attempt_seed.encode()).hexdigest()[:24],
+            "account_id": self.provider_name,
+            "request_kind": request_kind,
+            "request_sequence": request_sequence,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "input_tokens": (
+                usage.get("input_tokens")
+                if usage
+                else error.provider_input_tokens if error else None
+            ),
+            "output_tokens": (
+                usage.get("output_tokens")
+                if usage
+                else error.provider_output_tokens if error else None
+            ),
+            "total_tokens": (
+                usage.get("total_tokens")
+                if usage
+                else error.provider_total_tokens if error else None
+            ),
+            "finish_reason": (
+                metadata.get("finish_reason") if response else error.finish_reason
+                if error
+                else None
+            ),
+            "http_status": (
+                metadata.get("status_code") if response else error.http_status
+                if error
+                else None
+            ),
+            "provider_error_code": (
+                error.error_code if error else None
+            ),
+            "provider_request_id": (
+                metadata.get("provider_request_id")
+                if response
+                else error.provider_request_id if error else None
+            ),
+            "latency_ms": (
+                response.latency_ms if response else error.elapsed_ms if error else None
+            ),
+            "response_size_bytes": (
+                metadata.get("response_size_bytes")
+                if response
+                else error.response_size_bytes if error else None
+            ),
+            "response_character_count": (
+                metadata.get("response_character_count")
+                if response
+                else error.response_character_count if error else None
+            ),
+            "prompt_character_count": (
+                metadata.get("prompt_character_count") if response else None
+            ),
+            "schema_valid": schema_valid,
+            "schema_error_code": schema_error_code or (
+                error.schema_error_code if error else None
+            ),
+            "schema_error_path": schema_error_path or (
+                error.schema_error_path if error else None
+            ),
+            "schema_correction_triggered": correction_triggered,
+            "limit_classification": (
+                error.limit_classification if error else None
+            ),
+        }
+        self.request_attempts.append(item)
+        del self.request_attempts[:-100]
+        counter = (
+            "schema_correction_requests"
+            if request_kind == "schema_correction"
+            else "analysis_requests"
+            if request_kind == "analysis"
+            else None
+        )
+        if counter:
+            self.attempt_counters[counter] += 1
+        if item["http_status"] == 429:
+            self.attempt_counters["http_429_responses"] += 1
+        if request_kind == "analysis" and schema_valid is False:
+            if schema_error_code in {
+                "empty_response",
+                "truncated_response",
+                "finish_reason_length",
+                "json_not_found",
+                "json_parse_error",
+                "multiple_json_objects",
+                "response_envelope_invalid",
+            }:
+                self.attempt_counters["initial_parse_failures"] += 1
+            else:
+                self.attempt_counters[
+                    "initial_schema_validation_failures"
+                ] += 1
+        if request_kind == "schema_correction":
+            self.attempt_counters[
+                "schema_corrections_succeeded"
+                if schema_valid
+                else "schema_corrections_failed"
+            ] += 1
+        event = (
+            "groq.request.rate_limited"
+            if item["http_status"] == 429
+            else "groq.request.completed"
+        )
+        # Railway's default log collector retains the formatted message but
+        # drops Python LogRecord ``extra`` fields. Append only this explicitly
+        # allow-listed diagnostic object so production logs remain useful
+        # without exposing prompts, responses, or credentials.
+        logger.info(
+            "%s %s",
+            event,
+            json.dumps(item, default=str, separators=(",", ":")),
+            extra=item,
+        )
+
+    def attempts_for(self, request_id: object) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            dict(item)
+            for item in self.request_attempts
+            if item["analysis_job_id"] == str(request_id)
+        )
 
     async def reason(
         self,
@@ -470,7 +701,11 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         correction_instruction: str | None = None,
+        previous_response_fragment: str | None = None,
     ) -> AIProviderResponse:
+        request_kind = "schema_correction" if correction_instruction else "analysis"
+        initial_response: AIProviderResponse | None = None
+        previous_fragment: str | None = None
         try:
             response = await super().reason(
                 request,
@@ -481,47 +716,132 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 correction_instruction=correction_instruction,
             )
         except AIProviderRequestError as exc:
-            if exc.details.reason_code != "response_decoding_failed":
+            self._record_attempt(
+                request,
+                request_kind=request_kind,
+                request_sequence=attempt,
+                error=exc.details,
+                schema_valid=False,
+                schema_error_code=exc.details.schema_error_code,
+            )
+            if exc.details.reason_code not in {"response_decoding_failed"}:
                 raise
             correction_instruction = (
                 "The previous response was not valid JSON. Return valid JSON matching "
                 "the complete response contract."
             )
-            correction_reason = exc.details.reason_code
+            correction_reason = exc.details.schema_error_code or exc.details.reason_code
         else:
+            normalized, removed = _normalized_contract_output(response.raw_output)
+            if removed:
+                response = replace(response, raw_output=normalized)
             try:
                 AIAnalysisOutput.model_validate(response.raw_output)
+                self._record_attempt(
+                    request,
+                    request_kind=request_kind,
+                    request_sequence=attempt,
+                    response=response,
+                    schema_valid=True,
+                )
                 return response
             except ValidationError as exc:
-                errors = exc.errors()
-                if errors:
-                    first = errors[0]
-                    field_path = ".".join(
-                        (
-                            "provider_response",
-                            *(str(item) for item in first["loc"]),
+                code, field_path, expected, fragment = _schema_issue(exc)
+                finish_reason = (
+                    response.operational_metadata.get("finish_reason")
+                    if response.operational_metadata
+                    else None
+                )
+                if finish_reason == "length":
+                    code = "finish_reason_length"
+                    self._record_attempt(
+                        request,
+                        request_kind=request_kind,
+                        request_sequence=attempt,
+                        response=response,
+                        schema_valid=False,
+                        schema_error_code=code,
+                        schema_error_path=field_path,
+                    )
+                    raise AIProviderRequestError(
+                        AIProviderFailureDetails(
+                            provider=self.provider_name,
+                            reason_code="truncated_response",
+                            phase="structured_output_validation",
+                            endpoint=f"{self.client.base_url}/chat/completions",
+                            model=self.model,
+                            request_id=str(request.request_id),
+                            cycle_id=str(request.cycle_id),
+                            http_status=200,
+                            finish_reason="length",
+                            schema_error_code=code,
+                            schema_error_path=field_path,
+                            exception_class="ProviderOutputTruncated",
                         )
+                    ) from exc
+                correction_instruction = (
+                    f"{code} at {field_path}: {expected}. "
+                    f"Invalid fragment: {fragment}"
+                )
+                correction_reason = code
+                previous_fragment = json.dumps(
+                    response.raw_output,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )[:_MAX_CORRECTION_FRAGMENT_CHARACTERS]
+                initial_response = response
+                metadata = response.operational_metadata or {}
+                correction_capacity_exhausted = any(
+                    str(metadata.get(name, "")).strip() == "0"
+                    for name in (
+                        "rate_limit_request_remaining",
+                        "rate_limit_token_remaining",
                     )
-                    expected = str(first["msg"] or first["type"])
-                    error_type = str(first["type"])
-                else:
-                    field_path = "provider_response"
-                    expected = "schema validation"
-                    error_type = "schema_validation"
-                if error_type == "extra_forbidden":
-                    correction_instruction = (
-                        f"The previous JSON contained an unexpected property at {field_path}: "
-                        f"{expected}. Remove that property. Return only properties declared in "
-                        "response_contract.json_schema. Do not emit contract metadata such as "
-                        "schema_type, schema_version, or json_schema."
-                    )
-                else:
-                    correction_instruction = (
-                        f"The previous JSON failed schema validation at {field_path}: {expected}. "
-                        "Return that exact missing field and every required property in json_schema. "
-                        "Return analysis only and do not add signal, proposal, execution, or publication fields."
-                    )
-                correction_reason = "structured_output_invalid"
+                )
+                self._record_attempt(
+                    request,
+                    request_kind=request_kind,
+                    request_sequence=attempt,
+                    response=response,
+                    schema_valid=False,
+                    schema_error_code=code,
+                    schema_error_path=field_path,
+                    correction_triggered=not correction_capacity_exhausted,
+                )
+                if correction_capacity_exhausted:
+                    raise AIProviderRequestError(
+                        AIProviderFailureDetails(
+                            provider=self.provider_name,
+                            reason_code="rate_limited",
+                            phase="schema_correction_capacity",
+                            endpoint=f"{self.client.base_url}/chat/completions",
+                            model=self.model,
+                            request_id=str(request.request_id),
+                            cycle_id=str(request.cycle_id),
+                            http_status=429,
+                            error_code="correction_capacity_exhausted",
+                            limit_classification="RATE_LIMITED_TEMPORARY",
+                            schema_error_code=code,
+                            schema_error_path=field_path,
+                            rate_limit_request_remaining=cast(
+                                str | None,
+                                metadata.get("rate_limit_request_remaining"),
+                            ),
+                            rate_limit_token_remaining=cast(
+                                str | None,
+                                metadata.get("rate_limit_token_remaining"),
+                            ),
+                            rate_limit_request_reset=cast(
+                                str | None,
+                                metadata.get("rate_limit_request_reset"),
+                            ),
+                            rate_limit_token_reset=cast(
+                                str | None,
+                                metadata.get("rate_limit_token_reset"),
+                            ),
+                            exception_class="SchemaCorrectionCapacityUnavailable",
+                        )
+                    ) from exc
 
         logger.warning(
             "ai_provider.correction.started",
@@ -535,19 +855,66 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
                 "sanitized_error_code": correction_reason,
+                "analysis_job_id": str(request.request_id),
+                "eligible_cycle_id": str(request.cycle_id),
+                "account_id": self.provider_name,
+                "request_kind": "schema_correction",
+                "request_sequence": attempt + 1,
             },
         )
         # One and only one bounded correction request. A second malformed or
         # schema-invalid response is returned to the application validator, which
         # persists the typed failure and keeps publication fail-closed.
         self.correction_attempts += 1
-        return await super().reason(
-            request,
-            prompt_version=prompt_version,
-            attempt=attempt + 1,
-            fallback_used=fallback_used,
-            fallback_reason=fallback_reason,
-            correction_instruction=correction_instruction,
+        try:
+            corrected = await super().reason(
+                request,
+                prompt_version=prompt_version,
+                attempt=attempt + 1,
+                fallback_used=fallback_used,
+                fallback_reason=fallback_reason,
+                correction_instruction=correction_instruction,
+                previous_response_fragment=previous_fragment,
+            )
+        except AIProviderRequestError as exc:
+            self._record_attempt(
+                request,
+                request_kind="schema_correction",
+                request_sequence=attempt + 1,
+                error=exc.details,
+                schema_valid=False,
+                schema_error_code=correction_reason,
+            )
+            raise
+        corrected_raw, _ = _normalized_contract_output(corrected.raw_output)
+        corrected = replace(corrected, raw_output=corrected_raw)
+        try:
+            AIAnalysisOutput.model_validate(corrected.raw_output)
+        except ValidationError as exc:
+            code, path, _, _ = _schema_issue(exc)
+            self._record_attempt(
+                request,
+                request_kind="schema_correction",
+                request_sequence=attempt + 1,
+                response=corrected,
+                schema_valid=False,
+                schema_error_code=code,
+                schema_error_path=path,
+            )
+        else:
+            self._record_attempt(
+                request,
+                request_kind="schema_correction",
+                request_sequence=attempt + 1,
+                response=corrected,
+                schema_valid=True,
+            )
+        return replace(
+            corrected,
+            token_usage=_combined_usage(
+                initial_response.token_usage if initial_response else None,
+                corrected.token_usage,
+            ),
         )
 
 
@@ -693,6 +1060,40 @@ class GroqProviderPool:
                 )
                 if not self._failover_allowed(exc.details):
                     raise
+        pool_metadata = self.metadata()
+        unavailable_diagnostic = {
+            "analysis_job_id": str(request.request_id),
+            "eligible_cycle_id": str(request.cycle_id),
+            "instrument": request.instrument,
+            "configured_account_count": pool_metadata["configured_account_count"],
+            "available_account_count": pool_metadata["available_account_count"],
+            "temporary_rate_limited_account_count": pool_metadata[
+                "temporary_rate_limited_account_count"
+            ],
+            "quota_exhausted_account_count": pool_metadata[
+                "quota_exhausted_account_count"
+            ],
+            "configuration_error_account_count": pool_metadata[
+                "configuration_error_account_count"
+            ],
+            "aggregate_reason": pool_metadata["aggregate_reason"],
+            "last_failure_code": (
+                last_error.details.reason_code if last_error else None
+            ),
+            "next_retry_at": min(
+                (
+                    state.circuit_open_until.isoformat()
+                    for state in self.states.values()
+                    if state.circuit_open_until is not None
+                ),
+                default=None,
+            ),
+        }
+        logger.warning(
+            "groq_pool.unavailable %s",
+            json.dumps(unavailable_diagnostic, separators=(",", ":")),
+            extra=unavailable_diagnostic,
+        )
         if last_error is not None:
             raise last_error
         raise AIProviderRequestError(
@@ -796,6 +1197,7 @@ class GroqProviderPool:
         state.last_success_at = self.clock()
         state.circuit_open_until = None
         state.last_failure_code = None
+        state.last_provider_error_code = None
         status_code = (
             response.operational_metadata.get("status_code")
             if response.operational_metadata
@@ -908,6 +1310,7 @@ class GroqProviderPool:
         raw = (
             details.rate_limit_token_reset
             if details.reason_code == "token_quota_exhausted"
+            or details.rate_limit_token_remaining == "0"
             else details.rate_limit_request_reset
         ) or details.rate_limit_reset or details.retry_after
         if raw:
@@ -955,6 +1358,7 @@ class GroqProviderPool:
             "quota_exhausted",
             "token_quota_exhausted",
             "rate_limited",
+            "truncated_response",
             "provider_unavailable",
             "request_timeout",
         }
@@ -968,6 +1372,28 @@ class GroqProviderPool:
         configured_accounts = sum(
             state.enabled for state in self.states.values()
         )
+        temporary_accounts = sum(
+            state.status == ProviderStatus.RATE_LIMITED
+            for state in self.states.values()
+        )
+        quota_accounts = sum(
+            state.status == ProviderStatus.QUOTA_EXHAUSTED
+            for state in self.states.values()
+        )
+        configuration_accounts = sum(
+            state.status == ProviderStatus.CONFIGURATION_ERROR
+            for state in self.states.values()
+        )
+        if available_accounts:
+            aggregate_reason = "available"
+        elif temporary_accounts:
+            aggregate_reason = "temporarily_rate_limited"
+        elif quota_accounts and quota_accounts == configured_accounts:
+            aggregate_reason = "quota_exhausted"
+        elif configuration_accounts == configured_accounts:
+            aggregate_reason = "configuration_error"
+        else:
+            aggregate_reason = "unavailable"
         return {
             "provider": "groq_pool",
             "primary_provider": "Groq pool",
@@ -982,6 +1408,10 @@ class GroqProviderPool:
             "external_ai_apis": ("groq",),
             "configured_account_count": configured_accounts,
             "available_account_count": available_accounts,
+            "temporary_rate_limited_account_count": temporary_accounts,
+            "quota_exhausted_account_count": quota_accounts,
+            "configuration_error_account_count": configuration_accounts,
+            "aggregate_reason": aggregate_reason,
             "pool_strategy": "ordered_failover",
             "providers": {
                 name: state.snapshot() for name, state in self.states.items()
@@ -1031,6 +1461,18 @@ class GroqProviderPool:
                 sum(provider.correction_attempts for provider in self.providers)
             ),
         }
+        for key in (
+            "analysis_requests",
+            "schema_correction_requests",
+            "http_429_responses",
+            "initial_parse_failures",
+            "initial_schema_validation_failures",
+            "schema_corrections_succeeded",
+            "schema_corrections_failed",
+        ):
+            metrics[key] = sum(
+                provider.attempt_counters[key] for provider in self.providers
+            )
         for provider in self.providers:
             account_id = provider.provider_name
             telemetry = self._telemetry[account_id]
@@ -1049,7 +1491,27 @@ class GroqProviderPool:
                     f"{account_id}_total_tokens": telemetry["total_tokens"],
                 }
             )
+            metrics.update(
+                {
+                    f"{account_id}_{key}": value
+                    for key, value in provider.attempt_counters.items()
+                }
+            )
         return metrics
+
+    def attempts_for(self, request_id: object) -> tuple[dict[str, Any], ...]:
+        attempts: list[dict[str, Any]] = []
+        for provider in self.providers:
+            attempts.extend(provider.attempts_for(request_id))
+        return tuple(
+            sorted(
+                attempts,
+                key=lambda item: (
+                    str(item.get("recorded_at") or ""),
+                    str(item.get("provider_attempt_id") or ""),
+                ),
+            )
+        )
 
     def mark_model_unavailable(self, provider: str) -> None:
         selected = self.providers_by_id[provider]

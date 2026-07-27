@@ -761,6 +761,37 @@ export interface AIReasoningDashboard {
     groq_calls: number
     retries: number
     schema_corrections: number
+    initial_analysis_requests: number
+    initial_parse_failures: number
+    initial_schema_validation_failures: number
+    schema_corrections_succeeded: number
+    schema_corrections_failed: number
+    http_429_responses: number
+    recent_provider_attempts: Array<{
+      analysis_job_id: string
+      eligible_cycle_id: string
+      provider_attempt_id: string
+      account_id: string
+      request_kind: 'analysis' | 'schema_correction' | 'transport_retry' | 'model_probe'
+      request_sequence: number
+      recorded_at: string
+      input_tokens: number | null
+      output_tokens: number | null
+      total_tokens: number | null
+      finish_reason: string | null
+      http_status: number | null
+      provider_error_code: string | null
+      provider_request_id: string | null
+      latency_ms: number | null
+      response_size_bytes: number | null
+      response_character_count: number | null
+      prompt_character_count: number | null
+      schema_valid: boolean | null
+      schema_error_code: string | null
+      schema_error_path: string | null
+      schema_correction_triggered: boolean
+      limit_classification: string | null
+    }>
     provider_failures: number
     validation_failures: number
     total_tokens: number | null
@@ -809,8 +840,8 @@ export interface AIReasoningDashboard {
     configured_account_count: number
     available_account_count: number
     pool_strategy: 'ordered_failover'
-    provider_readiness: 'healthy' | 'degraded' | 'unhealthy' | 'idle' | 'configuration_error'
-    operations_status: 'healthy' | 'degraded' | 'unhealthy' | 'idle' | 'configuration_error'
+    provider_readiness: 'healthy' | 'degraded' | 'unhealthy' | 'idle' | 'configuration_error' | 'temporarily_rate_limited' | 'quota_exhausted'
+    operations_status: 'healthy' | 'degraded' | 'unhealthy' | 'idle' | 'configuration_error' | 'temporarily_rate_limited' | 'quota_exhausted'
     model_identifier: string
     prompt_version: string
     latest_latency_ms: number | null
@@ -825,6 +856,8 @@ export interface AIReasoningDashboard {
       status: 'AVAILABLE' | 'RATE_LIMITED' | 'QUOTA_EXHAUSTED' | 'CONFIGURATION_ERROR' | 'CIRCUIT_OPEN' | 'DISABLED' | 'UNKNOWN'
       account_id: string
       enabled: boolean
+      configured: boolean
+      eligible_now: boolean
       availability: boolean
       model: string
       last_success_at: string | null
@@ -835,11 +868,17 @@ export interface AIReasoningDashboard {
       last_provider_error_code: string | null
       cooldown_until: string | null
       circuit_state: 'OPEN' | 'CLOSED'
+      rate_limit_state: 'ACTIVE' | 'CLEAR'
+      quota_state: 'EXHAUSTED' | 'AVAILABLE'
+      last_request_status: number | null
       calls_today: number
       successful_analyses: number
       provider_failures: number
       rate_limit_failures: number
       quota_failures: number
+      analysis_requests: number
+      schema_correction_requests: number
+      http_429_responses: number
       token_usage: {
         input_tokens: number
         output_tokens: number
@@ -855,6 +894,13 @@ export interface AIReasoningDashboard {
       groq_calls: number
       retries: number
       schema_corrections: number
+      initial_analysis_requests: number
+      initial_parse_failures: number
+      initial_schema_validation_failures: number
+      schema_corrections_attempted: number
+      schema_corrections_succeeded: number
+      schema_corrections_failed: number
+      http_429_responses: number
       skipped_before_provider_call: number
       deduplicated_before_provider_call: number
       provider_failures: number

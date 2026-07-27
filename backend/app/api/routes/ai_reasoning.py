@@ -122,6 +122,16 @@ async def latest(
             if isinstance(item.generation_parameters.get(name, 0), (int, float))
         )
 
+    recent_provider_attempts = sorted(
+        (
+            attempt
+            for item in usage
+            for attempt in item.generation_parameters.get("provider_attempts", ())
+            if isinstance(attempt, dict)
+        ),
+        key=lambda item: str(item.get("recorded_at") or ""),
+        reverse=True,
+    )[:20]
     performance = await final_repository.latest_performance_report()
     readiness = await final_repository.latest_readiness_report()
     health = service.health()
@@ -145,6 +155,15 @@ async def latest(
             provider_state["quota_failures"] = usage_parameter(
                 f"{account_id}_quota_failures"
             )
+            provider_state["analysis_requests"] = usage_parameter(
+                f"{account_id}_analysis_requests"
+            )
+            provider_state["schema_correction_requests"] = usage_parameter(
+                f"{account_id}_schema_correction_requests"
+            )
+            provider_state["http_429_responses"] = usage_parameter(
+                f"{account_id}_http_429_responses"
+            )
             provider_state["token_usage"] = {
                 "input_tokens": usage_parameter(f"{account_id}_input_tokens"),
                 "output_tokens": usage_parameter(f"{account_id}_output_tokens"),
@@ -164,6 +183,19 @@ async def latest(
             "groq_calls": usage_parameter("groq_calls"),
             "retries": usage_parameter("retry_attempts"),
             "schema_corrections": usage_parameter("schema_corrections"),
+            "initial_analysis_requests": usage_parameter("analysis_requests"),
+            "initial_parse_failures": usage_parameter("initial_parse_failures"),
+            "initial_schema_validation_failures": usage_parameter(
+                "initial_schema_validation_failures"
+            ),
+            "schema_corrections_succeeded": usage_parameter(
+                "schema_corrections_succeeded"
+            ),
+            "schema_corrections_failed": usage_parameter(
+                "schema_corrections_failed"
+            ),
+            "http_429_responses": usage_parameter("http_429_responses"),
+            "recent_provider_attempts": recent_provider_attempts,
             "provider_failures": usage_parameter("provider_failure"),
             "validation_failures": usage_parameter("validation_failure"),
             "total_tokens": (
