@@ -1,4 +1,4 @@
-import type { ActiveSelection, AIReasoningDashboard, AIScoreSnapshot, ChartOverlays, ChatTurn, DashboardAggregate, DashboardSystemStatus, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { ActiveSelection, AIReasoningDashboard, AIMarketAnalysis, AIScoreSnapshot, ChartOverlays, ChatTurn, DashboardAggregate, DashboardSystemStatus, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 import { ApiError } from '../lib/apiError'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
@@ -122,6 +122,7 @@ export const tenApi = {
   latestQuantCalibration: () => requestOptional<QuantCalibrationReport>('/api/v1/quant-forecasts/calibration/latest'),
   quantForecastOutcomes: (resultId: string) => request<QuantForecastOutcome[]>(`/api/v1/quant-forecasts/${encodeURIComponent(resultId)}/outcomes`),
   latestAIReasoning: (instrument: string) => request<AIReasoningDashboard>(`/api/v1/ai-reasoning/latest?instrument=${encodeURIComponent(instrument)}`),
+  aiAnalysisHistory: (instrument: string, timeframe: string, cursor = 0, limit = 100) => request<AIMarketAnalysis[]>(`/api/v1/ai-reasoning/analyses?instrument=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}&cursor=${cursor}&limit=${limit}`),
   dashboardLatest: async (instrument: string) => {
     const value = await request<unknown>(`/api/v1/dashboard/latest?instrument=${encodeURIComponent(instrument)}`, LARGE_PAYLOAD_TIMEOUT_MS)
     if (!isDashboardAggregate(value)) {

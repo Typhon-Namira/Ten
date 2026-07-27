@@ -99,6 +99,18 @@ export interface SignalDecisionSnapshot {
   blockers: DecisionReason[]
   warnings: DecisionReason[]
   mode: 'live' | 'replay'
+  final_action: 'BUY' | 'SELL' | 'WAIT'
+  setup_family: string | null
+  readiness: 'ready' | 'conditional' | 'waiting' | 'rejected'
+  entry_low: number | null
+  entry_high: number | null
+  invalidation: string | null
+  stop_loss: number | null
+  take_profit_targets: number[]
+  risk_reward: number | null
+  decision_reason: string
+  opposite_direction_rejection: string
+  publication_eligible: boolean
 }
 
 export interface OperationalSignal {
@@ -678,7 +690,60 @@ export interface ManagedSignal {
   updated_at: string
 }
 
+export interface AIAnalysisEvidence {
+  claim: string
+  kind: 'observed_fact' | 'calculated_feature' | 'ai_interpretation' | 'uncertainty'
+  source_type: string
+  source_reference: string
+  timeframe: string | null
+  observed_value: string | number | boolean | null
+}
+
+export interface AIMarketAnalysis {
+  schema_version: '2.0'
+  analysis_id: string
+  request_id: string
+  cycle_id: string
+  symbol: string
+  timeframe: string
+  market_snapshot_id: string
+  quantitative_forecast_id: string
+  analysis_timestamp: string
+  knowledge_cutoff: string
+  status: 'available' | 'invalid' | 'failed'
+  output: {
+    market_regime: { classification: 'bullish' | 'bearish' | 'ranging' | 'transitional' | 'uncertain'; strength: number; confidence: number; evidence: AIAnalysisEvidence[] }
+    higher_timeframe_context: { bias: 'bullish' | 'bearish' | 'neutral' | 'mixed' | 'uncertain'; description: string; evidence: AIAnalysisEvidence[] }
+    market_structure: { short_term: string; medium_term: string; higher_timeframe: string; recent_change: string; evidence: AIAnalysisEvidence[] }
+    liquidity_analysis: { summary: string; events: string[]; unresolved_liquidity: string[]; evidence: AIAnalysisEvidence[] }
+    supply_demand_analysis: { summary: string; nearest_supply: number | null; nearest_demand: number | null; evidence: AIAnalysisEvidence[] }
+    momentum_analysis: { direction: 'bullish' | 'bearish' | 'neutral' | 'mixed' | 'uncertain'; strength: number; trend: string; evidence: AIAnalysisEvidence[] }
+    volatility_analysis: { state: string; trend: string; evidence: AIAnalysisEvidence[] }
+    bullish_evidence: AIAnalysisEvidence[]
+    bearish_evidence: AIAnalysisEvidence[]
+    contradictions: AIAnalysisEvidence[]
+    key_risks: AIAnalysisEvidence[]
+    alternative_scenarios: Array<{ name: string; description: string; probability: number; confirmation_evidence: string[] }>
+    analysis_confidence: number
+    executive_summary: string
+  } | null
+  provider_metadata: {
+    provider: string
+    model: string
+    prompt_version: string
+    provider_adapter_version: string
+    fallback_used: boolean
+    fallback_reason: string | null
+    latency_ms: number | null
+    token_usage: Record<string, number> | null
+  }
+  validation_passed: boolean
+  validation_errors: string[]
+  created_at: string
+}
+
 export interface AIReasoningDashboard {
+  analysis: AIMarketAnalysis | null
   forecast: AIMarketForecast | null
   proposal: AISignalProposal | null
   managed_signals: ManagedSignal[]

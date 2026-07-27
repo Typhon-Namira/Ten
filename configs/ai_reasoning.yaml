@@ -2,8 +2,8 @@ version: "1.0"
 request_schema_version: "1.0"
 reasoning_policy_version: "ai_reasoning_policy_v1"
 setup_family_registry_version: "setup_families_v1"
-prompt_version_new_market: "new_market_analysis_v1"
-prompt_version_existing_signal: "existing_signal_monitoring_v1"
+prompt_version_new_market: "deep_market_analysis_v2"
+prompt_version_existing_signal: "existing_position_market_analysis_v2"
 maximum_memory_entries: 20
 maximum_retries: 1
 temperature: 0.1
@@ -20,3 +20,11 @@ absolute_max_output_tokens: 2000
 maximum_request_cost_usd: 0.05
 input_cost_per_million_usd: 1.04
 output_cost_per_million_usd: 2.25
+temporal_lookback_minutes: [5, 15, 30, 60, 240]
+temporal_tolerance_minutes:
+  5m: 2
+  15m: 5
+  30m: 10
+  1h: 20
+  4h: 60
+temporal_rolling_window: 60

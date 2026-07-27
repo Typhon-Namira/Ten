@@ -20,6 +20,7 @@ from .models import (
     DependencyHealth,
     DependencyState,
     EconomicRiskReference,
+    FinalSignalAction,
     MarketRegimeReference,
     RuleCategory,
     RuleEvaluation,
@@ -27,6 +28,9 @@ from .models import (
     RuleSeverity,
     SignalDecision,
     SignalDecisionInput,
+    SignalEvidence,
+    SignalReadiness,
+    SignalSourceLineage,
 )
 from .policies import DecisionPolicyRegistry
 from .repository import InMemorySignalDecisionRepository, SignalDecisionRepository, SqlAlchemySignalDecisionRepository
@@ -48,6 +52,7 @@ __all__ = [
     "DependencyHealth",
     "DependencyState",
     "EconomicRiskReference",
+    "FinalSignalAction",
     "FixedClock",
     "InMemorySignalDecisionRepository",
     "MarketRegimeReference",
@@ -63,6 +68,9 @@ __all__ = [
     "SignalDecisionError",
     "SignalDecisionInput",
     "SignalDecisionInputError",
+    "SignalEvidence",
+    "SignalReadiness",
+    "SignalSourceLineage",
     "SignalDecisionMetrics",
     "SignalDecisionPersistenceError",
     "SignalDecisionRepository",

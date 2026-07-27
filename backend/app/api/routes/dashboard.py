@@ -19,7 +19,6 @@ from sqlalchemy import text
 
 from backend.app.api.dashboard_status import (
     StageResult,
-    derive_ai_proposal_stage,
     derive_ai_reasoning_stage,
     derive_final_action_stage,
     derive_guardrails_stage,
@@ -312,17 +311,13 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         await request.app.state.quant_forecast_repository.result_for_state(state.state_id)
         if state is not None else None
     )
-    forecast = (
-        await request.app.state.ai_reasoning_repository.forecast_for_state(state.state_id)
+    analysis = (
+        await request.app.state.ai_reasoning_repository.analysis_for_state(state.state_id)
         if state is not None else None
     )
-    proposal = (
-        await request.app.state.ai_reasoning_repository.proposal_for_state(state.state_id)
-        if state is not None else None
-    )
-    action = (
-        await request.app.state.final_decision_repository.action_for_state(state.state_id)
-        if state is not None else None
+    signal_decision = await request.app.state.signal_decision_service.repository.get_latest_decision(
+        symbol,
+        request.app.state.settings.market_data_timeframes[0],
     )
     stages["quant_forecast"] = _system_stage(
         "quant_forecast", "Quant Forecast",
@@ -332,29 +327,27 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
     )
     reasoning_enabled = flags.is_enabled(FeatureFlag.AI_CENTRIC_SHADOW_MODE)
     stages["ai_reasoning"] = _system_stage(
-        "ai_reasoning", "AI Reasoning",
-        "disabled" if not reasoning_enabled else "blocked" if quant is None else "running" if forecast is None else "failed" if getattr(forecast, "failure_state", None) else "degraded" if getattr(forecast, "validation_degraded", False) else "healthy",
-        "ai_centric_shadow_mode_disabled" if not reasoning_enabled else "awaiting_quant_forecast" if quant is None else "reasoning_in_progress" if forecast is None else getattr(forecast, "failure_state", None) or "ai_reasoning_persisted",
-        timestamp=getattr(forecast, "generated_at", None), record_id=getattr(forecast, "forecast_id", None),
+        "ai_reasoning", "AI Market Analysis",
+        "disabled" if not reasoning_enabled else "blocked" if quant is None else "running" if analysis is None else "failed" if not analysis.validation_passed else "healthy",
+        "ai_centric_shadow_mode_disabled" if not reasoning_enabled else "awaiting_quant_forecast" if quant is None else "analysis_in_progress" if analysis is None else "ai_market_analysis_persisted",
+        timestamp=getattr(analysis, "analysis_timestamp", None), record_id=getattr(analysis, "analysis_id", None),
     )
-    proposals_enabled = flags.is_enabled(FeatureFlag.AI_SIGNAL_PROPOSALS)
     stages["proposal"] = _system_stage(
-        "proposal", "Proposal",
-        "disabled" if not proposals_enabled else "blocked" if forecast is None else "running" if proposal is None else "healthy",
-        "ai_signal_proposals_disabled" if not proposals_enabled else "awaiting_ai_reasoning" if forecast is None else "proposal_in_progress" if proposal is None else "proposal_persisted",
-        timestamp=getattr(proposal, "created_at", None), record_id=getattr(proposal, "proposal_id", None),
+        "proposal", "AI Proposal (retired)",
+        "disabled",
+        "signal_engine_is_only_decision_authority",
     )
     stages["guardrails"] = _system_stage(
-        "guardrails", "Guardrails",
-        "blocked" if proposal is None else "running" if action is None else "healthy",
-        "awaiting_proposal" if proposal is None else "guardrails_in_progress" if action is None else "deterministic_guardrails_completed",
-        timestamp=getattr(action, "created_at", None), record_id=getattr(action, "final_action_id", None),
+        "guardrails", "Deterministic Risk Rules",
+        "blocked" if signal_decision is None else "healthy",
+        "awaiting_signal_engine" if signal_decision is None else "deterministic_risk_rules_completed",
+        timestamp=getattr(signal_decision, "decided_at", None), record_id=getattr(signal_decision, "decision_id", None),
     )
     stages["final_decision"] = _system_stage(
         "final_decision", "Final Decision",
-        "blocked" if action is None else "healthy",
-        "awaiting_guardrails" if action is None else "final_decision_persisted",
-        timestamp=getattr(action, "created_at", None), record_id=getattr(action, "final_action_id", None),
+        "blocked" if signal_decision is None else "healthy",
+        "awaiting_signal_engine" if signal_decision is None else "signal_engine_decision_persisted",
+        timestamp=getattr(signal_decision, "decided_at", None), record_id=getattr(signal_decision, "decision_id", None),
     )
     storage = await _storage_diagnostics(request)
     stage_list = [stages[item[0]] for item in _PIPELINE_STAGES]
@@ -371,7 +364,7 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         "generated_at": now,
         "cycle_id": str(state.cycle_id) if state is not None else None,
         "stages": stage_list,
-        "current_decision": action.model_dump(mode="json") if action is not None else None,
+        "current_decision": signal_decision.model_dump(mode="json") if signal_decision is not None else None,
         "storage": storage,
         "failure_history": persisted_failures or [
             {
@@ -521,6 +514,7 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             "performance": _stage(status="not_evaluated", reason="insufficient_validated_sample"),
             "readiness": _stage(status="not_evaluated", reason="insufficient_validated_sample"),
             "reasoning": {
+                "analysis": None,
                 "forecast": None,
                 "proposal": None,
                 "managed_signals": [],
@@ -555,6 +549,7 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         return response
 
     quant = await request.app.state.quant_forecast_repository.result_for_state(state.state_id)
+    analysis = await request.app.state.ai_reasoning_repository.analysis_for_state(state.state_id)
     forecast = await request.app.state.ai_reasoning_repository.forecast_for_state(state.state_id)
     ai_request = await request.app.state.ai_reasoning_repository.request_for_state(
         state.state_id
@@ -588,17 +583,17 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         if quant is not None
         else ("pending", "quant_forecast_not_yet_persisted_for_cycle")
     )
+    reasoning_artifact = analysis if analysis is not None else forecast
     ai_reasoning_result = derive_ai_reasoning_stage(
-        forecast=forecast,
+        forecast=reasoning_artifact,
         request=ai_request,
         ai_health=ai_health,
         now=now,
         cycle_available_at=state.knowledge_cutoff,
     )
-    ai_proposal_result = derive_ai_proposal_stage(
-        forecast=forecast,
-        proposal=proposal,
-        proposals_enabled=proposals_enabled,
+    ai_proposal_result = StageResult(
+        "not_required",
+        "signal_engine_is_only_decision_authority",
     )
     guardrails_result = derive_guardrails_stage(
         forecast=forecast,
@@ -661,9 +656,15 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         ),
         "ai_reasoning": _stage_from_result(
             ai_reasoning_result,
-            data=forecast,
-            record_id=getattr(forecast, "forecast_id", None),
-            timestamp=getattr(forecast, "generated_at", None),
+            data=reasoning_artifact,
+            record_id=(
+                getattr(reasoning_artifact, "analysis_id", None)
+                or getattr(reasoning_artifact, "forecast_id", None)
+            ),
+            timestamp=(
+                getattr(reasoning_artifact, "analysis_timestamp", None)
+                or getattr(reasoning_artifact, "generated_at", None)
+            ),
         ),
         "ai_proposal": _stage_from_result(
             ai_proposal_result,
@@ -757,6 +758,7 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             timestamp=getattr(readiness, "generated_at", None),
         ),
         "reasoning": {
+            "analysis": analysis.model_dump(mode="json") if analysis else None,
             "forecast": forecast.model_dump(mode="json") if forecast else None,
             "proposal": proposal.model_dump(mode="json") if proposal else None,
             "managed_signals": [signal.model_dump(mode="json")] if signal else [],
