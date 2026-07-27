@@ -497,7 +497,7 @@ export interface ExplainabilityScore {
 }
 
 /** Shared shape for every `/api/v1/explain/*` response — `explanation` is `null` only when
- * OpenRouter failed or returned something invalid; `error` then explains why. Never a fabricated
+ * The AI provider failed or returned something invalid; `error` then explains why. Never a fabricated
  * explanation standing in for a real one. */
 export interface ExplainResponse {
   instrument: string
@@ -718,6 +718,10 @@ export interface AIReasoningDashboard {
     adjustments_enabled: boolean
     provider_available: boolean | null
     provider: string
+    primary_provider: string
+    active_provider: string
+    fallback_status: 'ACTIVE' | 'STANDBY'
+    provider_readiness: 'healthy' | 'degraded' | 'failed'
     model_identifier: string
     prompt_version: string
     latest_latency_ms: number | null
@@ -728,7 +732,14 @@ export interface AIReasoningDashboard {
     fallback_state: string | null
     shadow_only: boolean
     awaiting_guardrail_validation: boolean
-    provider_backoff_until: string | null
+    providers: Record<string, {
+      status: 'HEALTHY' | 'STANDBY' | 'RATE_LIMITED' | 'QUOTA_EXHAUSTED' | 'AUTH_FAILED' | 'UNAVAILABLE' | 'CIRCUIT_OPEN' | 'UNCONFIGURED'
+      model: string
+      last_success_at: string | null
+      last_failure_at: string | null
+      circuit_open_until: string | null
+      last_failure_code: string | null
+    }>
     deduplicated_market_states: number
     guardrails: {
       status: string

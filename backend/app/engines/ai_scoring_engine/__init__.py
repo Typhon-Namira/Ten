@@ -1,6 +1,6 @@
 from .clock import Clock, FixedClock, SystemClock
 from .config import AIScoringConfig, ComponentConfig
-from .engine import AIScoringEngine, DeterministicAIScoringEngine, OpenRouterScoringEngine
+from .engine import AIScoringEngine, DeterministicAIScoringEngine, ProviderScoringEngine
 from .models import (
     AIScoreSnapshot,
     DirectionalLabel,
@@ -36,7 +36,7 @@ __all__ = [
     "FixedClock",
     "FreshnessState",
     "InMemoryAIScoringRepository",
-    "OpenRouterScoringEngine",
+    "ProviderScoringEngine",
     "ScoreComponent",
     "ScoreExplanation",
     "ScoreMode",

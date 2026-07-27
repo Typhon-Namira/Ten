@@ -1,5 +1,5 @@
 /** Distinguishes *why* a request didn't produce data — collapsing these into one generic "failed"
- * string is exactly what made a real backend failure (Issue 1: OpenRouter auth) indistinguishable
+ * string is exactly what made a real backend provider failure indistinguishable
  * from a frontend contract mismatch or a request that simply never completed. */
 export type ApiErrorKind = 'timeout' | 'network' | 'http' | 'parse'
 

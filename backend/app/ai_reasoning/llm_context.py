@@ -1,7 +1,7 @@
 """Strict, bounded DTOs for the external LLM boundary.
 
 Internal analytical and persistence models are intentionally accepted only by the
-deterministic builder below.  The OpenRouter adapter serializes ``LLMAnalysisContext``
+deterministic builder below. The provider adapter serializes ``LLMAnalysisContext``
 and never serializes those internal objects directly.
 """
 

@@ -94,10 +94,10 @@ def _request(request_id, market_state_id, quant_id, cycle_id, now):
 def _failed_forecast(forecast_id, request_id, market_state_id, quant_id, cycle_id, now):
     return AIMarketForecast(
         forecast_id=forecast_id, request_id=request_id, market_state_id=market_state_id, quantitative_forecast_id=quant_id, cycle_id=cycle_id,
-        status=AIResultStatus.UNAVAILABLE, model_provider="openrouter", model_identifier="configured-model",
+        status=AIResultStatus.UNAVAILABLE, model_provider="cerebras", model_identifier="configured-model",
         prompt_version="new_market_analysis_v1", reasoning_policy_version="ai_reasoning_policy_v1", setup_family_registry_version="1.0.0",
         quantitative_model_version="1.0.0", feature_schema_version="1.0", market_state_schema_version="1.0",
-        validation_passed=False, retry_count=1, failure_state="openrouter_authentication_failed", failure_phase="http_request",
+        validation_passed=False, retry_count=1, failure_state="authentication_failed", failure_phase="http_request",
         provider_http_status=401, provider_error_code="401", provider_error_message="User not found.",
         fallback_state="no_ai_proposal", reasoning_summary="AI result unavailable; no proposal was created.",
         generated_at=now,
@@ -159,7 +159,7 @@ async def _save_parent_rows(
 
 
 @pytest.mark.asyncio
-async def test_database_reasoning_window_claim_is_distributed_and_idempotent(_schema) -> None:
+async def test_database_reasoning_cycle_claim_is_distributed_and_idempotent(_schema) -> None:
     session_factory = async_sessionmaker(_schema, expire_on_commit=False)
     first_repository = SqlAlchemyAIReasoningRepository(session_factory)
     second_repository = SqlAlchemyAIReasoningRepository(session_factory)
@@ -167,18 +167,20 @@ async def test_database_reasoning_window_claim_is_distributed_and_idempotent(_sc
     key = "a" * 64
 
     first, second = await asyncio.gather(
-        first_repository.claim_reasoning_window(
+        first_repository.claim_reasoning_cycle(
             key,
             "XAUUSD",
             now,
             "1.0",
+            "contract-1",
             now,
         ),
-        second_repository.claim_reasoning_window(
+        second_repository.claim_reasoning_cycle(
             key,
             "XAUUSD",
             now,
             "1.0",
+            "contract-1",
             now,
         ),
     )
@@ -208,7 +210,7 @@ async def test_terminal_forecast_persists_and_reads_back_through_real_postgresql
     persisted = await repository.save_forecast(_failed_forecast(forecast_id, request_id, market_state_id, quant_id, cycle_id, now))
 
     assert persisted.status == AIResultStatus.UNAVAILABLE
-    assert persisted.failure_state == "openrouter_authentication_failed"
+    assert persisted.failure_state == "authentication_failed"
 
     reread = await repository.forecast_for_state(market_state_id)
     assert reread is not None

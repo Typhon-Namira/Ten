@@ -294,7 +294,7 @@ async def test_recorded_llm_replay_is_reproducible_and_never_requires_live_llm()
                 RecordedLLMResponse(
                     request_hash=request_hash,
                     prompt_version="v1",
-                    model_identifier="configured-openrouter-model",
+                    model_identifier="configured-provider-model",
                     temperature=0.1,
                     generation_parameters={"max_tokens": 3200},
                     structured_response=response,
@@ -382,13 +382,15 @@ def test_performance_and_readiness_reports_use_measured_samples_without_profitab
     assert "profitability_not_guaranteed" in readiness.warnings
 
 
-def test_only_existing_openrouter_ai_provider_is_present() -> None:
+def test_only_configured_cerebras_and_groq_ai_providers_are_present() -> None:
     source = "\n".join(
         item.read_text(encoding="utf-8")
         for item in Path("backend/app/final_decision").glob("*.py")
     )
     provider_source = Path("backend/app/ai_reasoning/provider.py").read_text(encoding="utf-8")
-    assert "ExistingOpenRouterReasoningProvider" in provider_source
+    assert "class CerebrasProvider" in provider_source
+    assert "class GroqProvider" in provider_source
+    assert "class AIProviderRouter" in provider_source
     assert "anthropic" not in source.lower()
     assert "openai" not in source.lower()
 

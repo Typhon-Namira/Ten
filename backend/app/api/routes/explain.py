@@ -1,7 +1,7 @@
 """AI Explainability API — natural-language explanations grounded entirely in TEN's own,
 already-persisted engine outputs. See `backend.app.explainability` for the grounding/prose
 separation this router relies on: every route below assembles a context with plain Python, then
-asks the LLM only to write prose about it. A failing OpenRouter call degrades to
+asks the LLM only to write prose about it. A failing provider call degrades to
 `explanation: null` + a reported `error`, never a 500 and never a fabricated explanation.
 """
 

@@ -1,6 +1,6 @@
 """Turns a grounded `ExplainabilityContext` into natural-language explanation — the only place in
 this module that talks to an LLM, and the only place a request can fail (a bad/unreachable
-OpenRouter call degrades to a clear error, never a fabricated answer standing in for a real one).
+provider call degrades to a clear error, never a fabricated answer standing in for a real one).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from backend.app.ai.openrouter_client.client import OpenRouterClient
+from backend.app.ai.provider_client import AIProviderClient
 from backend.app.ai.prompts.loader import PromptLoader
 
 from .models import ChatTurn, Explanation, ExplainabilityContext
@@ -24,7 +24,7 @@ PROMPT_VERSION = "explain_v1"
 
 
 class ExplainabilityService:
-    def __init__(self, client: OpenRouterClient, prompts: PromptLoader, *, model: str, temperature: float = 0.2, max_tokens: int = 1200) -> None:
+    def __init__(self, client: AIProviderClient, prompts: PromptLoader, *, model: str, temperature: float = 0.2, max_tokens: int = 1200) -> None:
         self.client = client
         self.prompts = prompts
         self.model = model
@@ -39,17 +39,12 @@ class ExplainabilityService:
         trigger: str,
     ) -> dict[str, Any]:
         generated_at = context.generated_at.astimezone(UTC)
-        bucket = generated_at.replace(
-            minute=(generated_at.minute // 10) * 10,
-            second=0,
-            microsecond=0,
-        )
         idempotency_key = sha256(
             json.dumps(
                 {
                     "trigger": trigger,
                     "instrument": context.instrument,
-                    "time_bucket": bucket.isoformat(),
+                    "generated_at": generated_at.isoformat(),
                     "payload": payload,
                 },
                 sort_keys=True,
@@ -61,16 +56,19 @@ class ExplainabilityService:
             "trigger": trigger,
             "instrument": context.instrument,
             "idempotency_key": idempotency_key,
-            "ten_minute_bucket": bucket.isoformat(),
+            "generated_at": generated_at.isoformat(),
         }
         logger.info("explainability.provider_call.started", extra=call_context)
         try:
-            raw = await self.client.complete_json(
+            completion = await self.client.complete_json(
                 system_prompt=self.prompts.load(PROMPT_VERSION),
                 payload=payload,
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                request_id=idempotency_key,
+                instrument=context.instrument,
+                ums_boundary=generated_at.isoformat(),
             )
         except Exception as exc:
             logger.info(
@@ -86,7 +84,7 @@ class ExplainabilityService:
             "explainability.provider_call.completed",
             extra={**call_context, "result": "success"},
         )
-        return raw
+        return completion.content
 
     async def explain(self, context: ExplainabilityContext) -> Explanation:
         """The one call every `/explain/*` endpoint routes through. Never raises for a bad model
@@ -107,7 +105,7 @@ class ExplainabilityService:
 
     async def chat(self, context: ExplainabilityContext, history: tuple[ChatTurn, ...]) -> Explanation:
         """Conversation history travels *inside* the grounded JSON payload (as one more field the
-        model reads), rather than as separate chat-API message turns — `OpenRouterClient` only
+        model reads), rather than as separate chat-API message turns — the provider client only
         exposes one system+user exchange per call, and folding history into the same grounded
         blob keeps the "one JSON in, one JSON out" contract identical to every other explanation."""
         payload = context.model_dump(mode="json")

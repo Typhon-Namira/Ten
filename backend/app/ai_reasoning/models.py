@@ -234,6 +234,9 @@ class AIMarketForecast(ImmutableAIModel):
     provider_error_message: str | None = None
     provider_metadata_error_type: str | None = None
     provider_metadata_provider_code: str | None = None
+    provider_fallback_used: bool = False
+    provider_fallback_reason: str | None = None
+    provider_operational_metadata: dict[str, Any] | None = None
     fallback_state: str | None = None
     shadow_only: bool = True
     awaiting_guardrail_validation: bool = True

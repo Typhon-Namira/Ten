@@ -9,7 +9,7 @@ import logging
 import math
 
 from .clock import Clock, SystemClock
-from backend.app.ai.openrouter_client.client import OpenRouterClient
+from backend.app.ai.provider_client import AIProviderClient
 from backend.app.ai.prompts.loader import PromptLoader
 from .config import AIScoringConfig
 from .models import (
@@ -269,33 +269,34 @@ class AIScoringEngine(ABC):
     async def score(self, context: ScoringContext) -> SignalScore: ...
 
 
-class OpenRouterScoringEngine(AIScoringEngine):
+class ProviderScoringEngine(AIScoringEngine):
     """Legacy opt-in adapter; Production 1.0 registration does not construct it."""
 
-    def __init__(self, client: OpenRouterClient, prompts: PromptLoader) -> None:
+    def __init__(self, client: AIProviderClient, prompts: PromptLoader) -> None:
         self.client = client
         self.prompts = prompts
 
     async def score(self, context: ScoringContext) -> SignalScore:
-        model = "meta-llama/llama-3.3-70b-instruct"
+        model = "gpt-oss-120b"
         prompt_version = "signal_analysis_v1"
         now = datetime.now().astimezone()
         bucket = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
         idempotency_key = sha256(context.model_dump_json().encode()).hexdigest()
         call_context = {
-            "trigger": "legacy_openrouter_scoring_adapter",
+            "trigger": "legacy_provider_scoring_adapter",
             "instrument": "unknown",
             "idempotency_key": idempotency_key,
-            "ten_minute_bucket": bucket.isoformat(),
+            "request_boundary": bucket.isoformat(),
         }
         logger.info("legacy_ai_scoring.provider_call.started", extra=call_context)
         try:
-            response = await self.client.complete_json(
+            completion = await self.client.complete_json(
                 system_prompt=self.prompts.load(prompt_version),
                 payload=context.model_dump(mode="json"),
                 model=model,
                 temperature=0.1,
                 max_tokens=900,
+                request_id=idempotency_key,
             )
         except Exception as exc:
             logger.info(
@@ -311,6 +312,7 @@ class OpenRouterScoringEngine(AIScoringEngine):
             "legacy_ai_scoring.provider_call.completed",
             extra={**call_context, "result": "success"},
         )
+        response = completion.content
         response.setdefault("model", model)
         response.setdefault("prompt_version", prompt_version)
         return SignalScore.model_validate(response)

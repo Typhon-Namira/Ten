@@ -72,9 +72,11 @@ export function AIReasoningPanel({ data }: { data: AIReasoningDashboard | null }
       <section>
         <h3>System Health and Usage</h3>
         <dl>
-          <div><dt>Provider</dt><dd>{data?.health.provider ?? 'OpenRouter'}</dd></div>
+          <div><dt>Primary / active</dt><dd>{data?.health.primary_provider ?? 'cerebras'} / {data?.health.active_provider ?? 'Not selected'}</dd></div>
+          <div><dt>Fallback</dt><dd>groq · {data?.health.fallback_status ?? 'STANDBY'}</dd></div>
           <div><dt>Model</dt><dd>{data?.health.model_identifier ?? '—'}</dd></div>
           <div><dt>Availability</dt><dd>{data?.health.provider_available == null ? 'not called' : data.health.provider_available ? 'available' : 'unavailable'}</dd></div>
+          <div><dt>Provider states</dt><dd>{Object.entries(data?.health.providers ?? {}).map(([name, item]) => `${name}: ${item.status}`).join(' · ') || 'not called'}</dd></div>
           <div><dt>Latency</dt><dd>{data?.health.latest_latency_ms == null ? '—' : `${data.health.latest_latency_ms.toFixed(0)} ms`}</dd></div>
           <div><dt>LLM requests / tokens today</dt><dd>{data?.llm_usage.request_count ?? 0} / {data?.llm_usage.total_tokens ?? 'unavailable'}</dd></div>
           <div><dt>Guardrails / publications</dt><dd>{data?.health.guardrails.status ?? '—'} / {data?.health.guardrails.publications_succeeded ?? 0}</dd></div>

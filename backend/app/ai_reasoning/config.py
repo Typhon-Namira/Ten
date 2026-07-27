@@ -15,8 +15,8 @@ class AIReasoningConfig(BaseModel):
     prompt_version_new_market: str
     prompt_version_existing_signal: str
     maximum_memory_entries: int = Field(ge=1, le=100)
-    # A live five-minute cycle may make at most one physical provider request.
-    maximum_retries: int = Field(ge=0, le=0)
+    # Each provider may receive one bounded retry for transport/5xx failures.
+    maximum_retries: int = Field(ge=0, le=1)
     temperature: float = Field(ge=0, le=1)
     max_tokens: int = Field(ge=256, le=10000)
     request_timeout_seconds: float = Field(gt=0)

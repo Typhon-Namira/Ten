@@ -39,7 +39,17 @@ def test_initial_migration_renders_every_model_as_postgresql_ddl(monkeypatch: py
     ddl = output.getvalue()
     assert SCHEMA_HEAD_REVISION in ddl
     for table_name in Base.metadata.tables:
-        assert f"CREATE TABLE {table_name}" in ddl
+        assert (
+            f"CREATE TABLE {table_name}" in ddl
+            or (
+                table_name == "ai_reasoning_cycle_locks"
+                and (
+                    "ALTER TABLE ai_reasoning_"
+                    "window_locks RENAME TO ai_reasoning_cycle_locks"
+                )
+                in ddl
+            )
+        )
     assert "FOREIGN KEY" in ddl
     assert "CREATE UNIQUE INDEX" in ddl
     assert "JSONB" in ddl

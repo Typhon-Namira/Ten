@@ -18,7 +18,7 @@ Revision 1 contained these material violations or ambiguities:
 
 1. The Market Data Service was not restricted to M1 and the diagrams implied it could persist generic timeframes.
 2. Liquidity and Institutional Flow were absent from the analytical sequence.
-3. AI retry language allowed ambiguity between one logical request and multiple physical OpenRouter calls.
+3. AI retry language allowed ambiguity between one logical request and multiple physical provider calls.
 4. AI failure could leave the cycle outcome dependent on an unspecified “if policy permits” branch.
 5. Separate `ai_forecasts` and `final_decisions` rows encouraged append-only duplicate WAIT history.
 6. Routine completed-cycle rows and meaningful lifecycle history were not clearly separated.
@@ -230,7 +230,7 @@ Rejected tables:
 | Analytical engines | Bars/candles, approved contracts | Compact Market/SMC/Liquidity/Volume/Flow results | 30 s total | Stage failed/degraded; dependents blocked per map | No stage rerun in live cycle | Memory only |
 | Quant | Compact evidence | Direction/confidence/reason | 5 s | `failed/quant_validation_failed`; downstream blocked | No retry | Memory only |
 | Reserve AI | Cycle row | `ai_attempted=true`, start/model | 2 s | AI `failed/ai_reservation_failed`; cycle WAIT | DB retry bounded; no HTTP before success | UPDATE cycle |
-| OpenRouter | Compact Quant + summaries | One response or typed failure | 20 s | Exact 401/402/429/timeout/etc. | Zero automatic physical retry; `retry_count=0` | None during HTTP |
+| AI provider router | Compact Quant + summaries | One response or typed failure | 20 s | Exact provider/status/reason | One transient retry per provider; ordered fallback | None during HTTP |
 | AI normalize | Provider response | Compact AI decision/confidence/reason | 2 s | `degraded` if recoverable; `failed/malformed_ai_response` otherwise | Deterministic local normalization once | Memory only |
 | Proposal | Compact AI + Quant | Proposal or `no_proposal/not_required` | 2 s | `failed/proposal_validation_failed`, final WAIT | No retry | Memory only |
 | Guardrails | Actionable proposal or none | Approved/rejected/not_required | 2 s | Named rejection or guardrail failure; final WAIT | No retry | Memory only |
@@ -252,10 +252,10 @@ The cycle-wide analytical deadline is 75 seconds after worker claim and must fin
 | Analysis worker unavailable | Analysis `stale/worker_heartbeat_expired`, queued cycle | No new action | Queued cycle | Queue redelivery within 90-s live window; otherwise terminal misfire | “Analysis worker unavailable; cycle not started” | Eventually |
 | Duplicate scheduler execution | Duplicate `skipped/duplicate_cycle` | Existing cycle authoritative | No duplicate row | None | Normally hidden; operations count shows suppression | Yes for duplicate |
 | Quant failure | Quant `failed/quant_failure`; AI/proposal blocked | WAIT | Compact terminal cycle; optional terminal-failure event | No live recompute | “Quant failed: exact reason” | Yes |
-| OpenRouter 401 | AI `failed/openrouter_unauthorized` | WAIT | AI attempt metadata + compact cycle/current result | No automatic retry | “AI authentication rejected (HTTP 401)” | Yes |
-| OpenRouter 402 | AI `failed/openrouter_insufficient_credits` | WAIT | Same | No automatic retry | “AI credits unavailable (HTTP 402)” | Yes |
-| OpenRouter 429 | AI `failed/openrouter_rate_limited` | WAIT | Same, including provider retry-after | No same-cycle retry | “AI rate limited; provider retry after …” | Yes |
-| OpenRouter timeout | AI `failed/openrouter_timeout` | WAIT | Same, elapsed time | No same-cycle retry | “AI request timed out after N ms” | Yes |
+| Provider 401/403 | AI `failed/authentication_failed` | WAIT | AI attempt metadata + compact cycle/current result | No retry; fallback allowed | “AI authentication rejected” | Yes |
+| Provider 402/quota | AI `failed/quota_exhausted` | WAIT | Same | No retry; fallback allowed | “AI quota unavailable” | Yes |
+| Provider 429 | AI `failed/rate_limited` | WAIT | Same, including provider retry-after | No retry; fallback allowed | “AI rate limited; retry after …” | Yes |
+| Provider timeout | AI `failed/provider_unavailable` | WAIT | Same, elapsed time | One bounded retry, then fallback | “AI provider timed out after N ms” | Yes |
 | Malformed AI response | AI `failed/structured_output_invalid` or `degraded/repaired_fields` | WAIT if unrecoverable; otherwise continue | First validation path/reason in compact failure; no raw body | Local deterministic repair once; no new HTTP | Exact invalid field/reason | Yes |
 | AI WAIT, no proposal | AI `healthy/completed`; proposal `no_proposal`; guardrails `not_required` | WAIT | Cycle/current only; no event if unchanged | None | “WAIT — no actionable proposal” | Yes, completed |
 | Guardrail rejection | Guardrail `healthy/rejected_<name>` | WAIT | Current/cycle + meaningful named rejection event | None | “Proposal rejected by <guardrail>: <reason>” | Yes |
@@ -278,7 +278,7 @@ AI/provider failure never leaves Proposal, Guardrails, Publication, Monitoring, 
 | `trade_events` | Immutable named trade transitions | PK `id`; event idempotency key required | `trade_id → trades RESTRICT` | `(trade_id,occurred_at)` | 288 B | 250 | ≥7 years | Current trade row cannot preserve lifecycle audit |
 | `performance_daily` | Bounded daily aggregate | PK `(trading_date,symbol)` | None | PK | 400 B | 1 | 7 years; approved partition cleanup | Prevents repeated full trade scans for dashboard/reporting |
 
-Rejected explicitly: any table containing full candle arrays, SMC/Liquidity/Volume/Flow objects, Quant vectors, prompts, OpenRouter bodies, evidence trees, snapshots, graphs, or repeated normalized analytical payloads.
+Rejected explicitly: any table containing full candle arrays, SMC/Liquidity/Volume/Flow objects, Quant vectors, prompts, provider request bodies, evidence trees, snapshots, graphs, or repeated normalized analytical payloads.
 
 ## H. Dashboard contract review
 

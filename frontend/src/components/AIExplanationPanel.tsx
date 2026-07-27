@@ -12,7 +12,7 @@ function ScoreMeter({ score }: { score: ExplainResponse['explainability_score'] 
 
 /** Renders one grounded `/api/v1/explain/*` response. Every field here traces back to TEN's own
  * engine outputs — `evidence` cites exactly which snapshot backed the answer, and `error` (rather
- * than a fabricated explanation) is what renders if OpenRouter failed or returned garbage. */
+ * than a fabricated explanation) is what renders if the provider failed or returned garbage. */
 export function AIExplanationPanel({ data, loading, error, onExplain, actionLabel = 'Explain this' }: {
   data: ExplainResponse | null
   loading: boolean

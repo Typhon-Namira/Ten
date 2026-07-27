@@ -4,6 +4,7 @@ from functools import lru_cache
 import json
 import os
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -29,9 +30,12 @@ class Settings(BaseSettings):
     db_pool_pre_ping: bool = True
     db_statement_timeout_ms: int = Field(default=30_000, ge=1000, le=300_000)
     db_idle_transaction_timeout_ms: int = Field(default=30_000, ge=1000, le=300_000)
-    openrouter_api_key: str | None = None
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct"
+    cerebras_api_key: str | None = None
+    cerebras_base_url: str = "https://api.cerebras.ai/v1"
+    cerebras_model: str = "gpt-oss-120b"
+    groq_api_key: str | None = None
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "llama-3.1-8b-instant"
     request_timeout_seconds: float = 30.0
     integration_enabled: bool = True
     live_pipeline_enabled: bool = True
@@ -132,6 +136,23 @@ class Settings(BaseSettings):
             "d1": "D1",
         }
         return tuple(aliases.get(str(item).strip().lower(), str(item).strip()) for item in items)
+
+    @field_validator("cerebras_base_url", "groq_base_url")
+    @classmethod
+    def validate_ai_provider_url(cls, value: str, info: ValidationInfo) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or not parsed.netloc:
+            variable = f"TEN_{(info.field_name or 'AI_PROVIDER_BASE_URL').upper()}"
+            raise ValueError(f"{variable} must be an absolute HTTPS URL")
+        return value.rstrip("/")
+
+    @field_validator("cerebras_model", "groq_model")
+    @classmethod
+    def validate_ai_provider_model(cls, value: str, info: ValidationInfo) -> str:
+        if not value.strip() or any(character.isspace() for character in value):
+            variable = f"TEN_{(info.field_name or 'AI_PROVIDER_MODEL').upper()}"
+            raise ValueError(f"{variable} must be a non-empty provider model ID")
+        return value.strip()
 
     @model_validator(mode="after")
     def production_security(self) -> "Settings":

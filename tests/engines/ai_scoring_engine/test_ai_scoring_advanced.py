@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from backend.app.ai.openrouter_client.client import OpenRouterClient
+from backend.app.ai.provider_client import AIProviderClient, AIProviderCompletion
 from backend.app.ai.prompts import PromptLoader
 from backend.app.engines.ai_scoring_engine import (
     AIScoringConfig,
@@ -15,7 +15,7 @@ from backend.app.engines.ai_scoring_engine import (
     DeterministicAIScoringEngine,
     FixedClock,
     InMemoryAIScoringRepository,
-    OpenRouterScoringEngine,
+    ProviderScoringEngine,
     ScoreRequest,
     ScoringContext,
     SourceHealth,
@@ -29,9 +29,28 @@ from backend.app.features.models import FeatureSnapshot
 from tests.engines.ai_scoring_engine.test_ai_scoring import NOW, aligned_input, evidence, scoring_input
 
 
-class FakeClient(OpenRouterClient):
-    async def complete_json(self, **_: Any) -> dict[str, Any]:
-        return {"direction": "neutral", "quality_score": 50, "reasoning": ["legacy compatibility"]}
+class FakeClient(AIProviderClient):
+    provider = "cerebras"
+    base_url = "https://api.cerebras.ai/v1"
+    configured = True
+
+    async def available_models(self) -> tuple[str, ...]:
+        return ("gpt-oss-120b",)
+
+    async def complete_json(self, **_: Any) -> AIProviderCompletion:
+        return AIProviderCompletion(
+            content={"direction": "neutral", "quality_score": 50, "reasoning": ["legacy compatibility"]},
+            provider="cerebras",
+            model="gpt-oss-120b",
+            status_code=200,
+            latency_ms=1,
+            provider_request_id=None,
+            token_usage=None,
+            rate_limit_limit=None,
+            rate_limit_remaining=None,
+            rate_limit_reset=None,
+            retry_after=None,
+        )
 
 
 def test_legacy_adapter_and_abstract_contract_are_covered() -> None:
@@ -41,9 +60,9 @@ def test_legacy_adapter_and_abstract_contract_are_covered() -> None:
 
 
 @pytest.mark.asyncio
-async def test_legacy_openrouter_adapter_defaults_provider_fields() -> None:
-    result = await OpenRouterScoringEngine(FakeClient(), PromptLoader()).score(ScoringContext())
-    assert result.model == "meta-llama/llama-3.3-70b-instruct"
+async def test_legacy_provider_adapter_defaults_provider_fields() -> None:
+    result = await ProviderScoringEngine(FakeClient(), PromptLoader()).score(ScoringContext())
+    assert result.model == "gpt-oss-120b"
     assert result.prompt_version == "signal_analysis_v1"
 
 
@@ -191,7 +210,7 @@ async def test_registration_build_execute_and_register() -> None:
     context = SimpleNamespace(feature_store=store, correlation_id=snapshot.correlation_id, feature_snapshot=None)
     result = await registration._execute(engine, context)
     assert result.namespace == "ai_score"
-    legacy_result = await registration._execute(OpenRouterScoringEngine(FakeClient(), PromptLoader()), context)
+    legacy_result = await registration._execute(ProviderScoringEngine(FakeClient(), PromptLoader()), context)
     assert legacy_result.namespace == "ai"
     factory = SimpleNamespace(register=Mock())
     registration.register(factory)

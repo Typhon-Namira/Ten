@@ -1,4 +1,4 @@
-# TEN OpenRouter Request Payload Audit
+# TEN AI Provider Request Payload Audit
 
 Measured: 2026-07-24
 
@@ -14,7 +14,7 @@ No API key, Authorization header, prompt content, provider payload, or private m
 The production failure was caused by request size, not a generally unusable API key.
 
 - The real TEN request was **211,104 bytes**.
-- OpenRouter counted **48,161 prompt tokens**.
+- The former production provider counted **48,161 prompt tokens**.
 - The authoritative HTTP 402 message was:
 
   ```text
@@ -23,7 +23,7 @@ The production failure was caused by request size, not a generally unusable API 
 
 - A 140-byte request from the same Railway runtime and current key fingerprint returned HTTP 200 and exactly `OK`, using 15 prompt tokens and 2 completion tokens.
 
-The prior error mapping converted every HTTP 402 to `openrouter_insufficient_credits`. That hid the authoritative prompt-token allowance failure. Revision 2 classifies this response as `key_limit_exhausted`.
+The prior error mapping converted every HTTP 402 to a generic credit failure. That hid the authoritative prompt-token allowance failure. Revision 2 classified this response as `key_limit_exhausted`.
 
 ## Exact request-construction path
 
@@ -40,7 +40,7 @@ AIReasoningRequestBuilder.build
   backend/app/ai_reasoning/request_builder.py
   → converted every UMS EvidenceItem into AIReasoningRequest
 
-ExistingOpenRouterReasoningProvider.reason
+AIProviderRouter.reason
   backend/app/ai_reasoning/provider.py
   → loaded prompt
   → serialized request.model_dump()
@@ -49,8 +49,8 @@ ExistingOpenRouterReasoningProvider.reason
 PromptLoader.load
   backend/app/ai/prompts/loader.py
 
-HttpOpenRouterClient.complete_json
-  backend/app/ai/openrouter_client/client.py
+HttpAIProviderClient.complete_json
+  backend/app/ai/provider_client/client.py
   → two messages
   → response_format={"type":"json_object"}
   → POST /chat/completions
@@ -84,11 +84,11 @@ The request did not read dashboard state or previous prompt text. It was statele
 | Liquidity object references/groups | 10 |
 | Volume Profile entries/groups | 6 |
 | Compact Quant scalar features | 14 |
-| Actual OpenRouter prompt tokens | 48,161 |
+| Actual former-provider prompt tokens | 48,161 |
 | Conservative local wire estimate | 70,369 tokens |
 | Configured maximum output | 3,200 tokens |
 | Model | `meta-llama/llama-3.3-70b-instruct` |
-| Routing | OpenRouter default provider routing |
+| Routing | Former aggregator default routing |
 | Published model context | 131K tokens |
 
 The section estimator uses `ceil(serialized wire bytes / 3)`. It is intentionally conservative because exact Llama tokenization is not installed. The provider-reported 48,161 tokens is authoritative for the total.
@@ -134,7 +134,7 @@ The old `_bounded_value()` bounded list cardinality but recursively preserved ev
 | Request bytes | 140 | 211,104 |
 | Provider input tokens | 15 | 48,161 |
 | Maximum output tokens | 5 | 3,200 |
-| Routing | OpenRouter default | OpenRouter default |
+| Routing | Former aggregator default | Provider-neutral boundary |
 | HTTP status | 200 | 402 |
 | Error code | — | `402` |
 | Result/message | Exact `OK` | Prompt-token limit `48,161 > 23,881` |
@@ -223,13 +223,13 @@ The production request cannot be transformed in place without deploying unreview
 | Maximum output | 3,200 | 1,000 | 68.75% |
 | Conservative maximum cost | $0.057287 | $0.003957 | 93.09% |
 
-The maximum-cost estimate uses the configured conservative OpenRouter price ceilings of $1.04/M input tokens and $2.25/M output tokens. Actual routed cost can be lower. The failed production request was rejected before completion, so this is a maximum-request estimate rather than a billed-cost claim.
+The maximum-cost estimate uses the conservative historical price ceilings of $1.04/M input tokens and $2.25/M output tokens. Actual provider cost can be lower. The failed production request was rejected before completion, so this is a maximum-request estimate rather than a billed-cost claim.
 
 ## Validation
 
 Tests prove:
 
-1. OpenRouter receives only `LLMAnalysisContext`.
+1. Every configured provider receives only `LLMAnalysisContext`.
 2. Candle arrays and raw engine fields are absent.
 3. Every collection has a Pydantic maximum.
 4. No message/history collection exists.
@@ -252,8 +252,8 @@ Tests prove:
 - `backend/app/ai_reasoning/service.py`
 - `backend/app/ai_reasoning/repository.py`
 - `backend/app/ai_reasoning/validation.py`
-- `backend/app/ai/openrouter_client/client.py`
+- `backend/app/ai/provider_client/client.py`
 - `backend/app/ai_reasoning/prompts/new_market_analysis_v1.txt`
 - `backend/app/ai_reasoning/prompts/existing_signal_monitoring_v1.txt`
 - `configs/ai_reasoning.yaml`
-- focused AI reasoning and OpenRouter tests
+- focused AI reasoning and provider-router tests

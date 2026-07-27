@@ -16,7 +16,7 @@ outcomes, calibration, failure rates, latency, request usage, and sample size.
 Closed market candle
   -> UnifiedMarketState (M1/M5/M15, point-in-time)
   -> deterministic quantitative forecast
-  -> configured existing OpenRouter LLM
+  -> Cerebras-primary/Groq-fallback provider router
   -> immutable AI forecast and immutable AI proposal
   -> versioned deterministic HardGateRegistry
   -> persisted FinalSystemAction and every GateEvaluation
@@ -67,8 +67,8 @@ missing Order Block/FVG evidence for unrelated setup families are not general ha
 
 ## LLM failure and cost controls
 
-- Only the existing `ExistingOpenRouterReasoningProvider` is used.
-- One call is allowed per immutable market-state hash.
+- Cerebras is primary and Groq is the ordered fallback.
+- One logical reasoning result is allowed per immutable UMS cycle boundary and provider contract.
 - Calls occur on eligible closed analysis cycles, never per tick.
 - Context and market memory are bounded.
 - Calls use a strict timeout, concurrency limit, bounded retries, and exponential provider backoff.

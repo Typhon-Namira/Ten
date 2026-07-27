@@ -30,6 +30,7 @@ def forecast(**overrides):
         failure_state=None,
         missing_evidence=(),
         provider_http_status=None,
+        model_provider="cerebras",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -72,15 +73,15 @@ def test_terminal_provider_failure_reports_failed_not_pending():
     """Item 11 / primary production bug: a forecast row exists with a terminal failure status —
     the stage must report "failed", never fall back to "pending"."""
     result = derive_ai_reasoning_stage(
-        forecast=forecast(status="unavailable", failure_state="openrouter_authentication_failed", provider_http_status=401),
+        forecast=forecast(status="unavailable", failure_state="authentication_failed", provider_http_status=401),
         request=None,
         ai_health=healthy_ai_health(),
         now=NOW,
         cycle_available_at=NOW - timedelta(minutes=5),
     )
     assert result.status == "failed"
-    assert result.reason == "openrouter_returned_http_401"
-    assert result.error_code == "openrouter_authentication_failed"
+    assert result.reason == "cerebras_returned_http_401"
+    assert result.error_code == "authentication_failed"
     assert result.retryable is True
     assert result.extra["provider_http_status"] == 401
 
@@ -118,7 +119,7 @@ def test_disabled_service_reports_disabled_with_flag_names():
     assert set(result.extra["disabled_flags"]) == {"shadow_enabled", "proposals_enabled", "monitoring_enabled"}
 
 
-def test_active_provider_backoff_reports_blocked_with_retry_time_not_pending():
+def test_all_provider_circuits_open_reports_blocked_with_retry_time_not_pending():
     """Item 3 / the exact root cause: every cycle that lands inside an active backoff window is
     skipped by AIReasoningService.process() before it ever persists a row. Without this branch,
     that skip was indistinguishable from "hasn't started yet"."""
@@ -126,13 +127,19 @@ def test_active_provider_backoff_reports_blocked_with_retry_time_not_pending():
     result = derive_ai_reasoning_stage(
         forecast=None,
         request=None,
-        ai_health=healthy_ai_health(provider_backoff_until=backoff_until.isoformat(), failure_state="openrouter_authentication_failed"),
+        ai_health=healthy_ai_health(
+            providers={
+                "cerebras": {"status": "AUTH_FAILED", "circuit_open_until": backoff_until.isoformat()},
+                "groq": {"status": "AUTH_FAILED", "circuit_open_until": backoff_until.isoformat()},
+            },
+            failure_state="authentication_failed",
+        ),
         now=NOW,
         cycle_available_at=NOW - timedelta(seconds=10),
     )
     assert result.status == "blocked"
     assert result.reason == "provider_backoff_active"
-    assert result.error_code == "openrouter_authentication_failed"
+    assert result.error_code == "authentication_failed"
     assert result.retryable is True
     assert 44 <= result.extra["retry_in_seconds"] <= 45
 
@@ -146,7 +153,7 @@ def test_persisted_request_without_forecast_reports_running_with_elapsed_time():
         cycle_available_at=NOW - timedelta(seconds=7),
     )
     assert result.status == "running"
-    assert result.reason == "openrouter_request_in_progress"
+    assert result.reason == "ai_provider_request_in_progress"
     assert result.extra["elapsed_seconds"] == 7
     assert result.extra["job_state"] == "running"
 
@@ -243,17 +250,19 @@ def test_final_action_is_wait_when_proposal_recommends_wait():
     assert result.reason == "ai_proposal_recommended_wait"
 
 
-def test_final_action_never_says_awaiting_ai_proposal_after_a_terminal_ai_failure():
+def test_final_action_fails_closed_to_wait_after_a_terminal_ai_failure():
     """Item 11 at this layer: once ai_reasoning has terminally failed, final_action must not sit
     in "awaiting" anything — it is blocked by a resolved upstream failure."""
     result = derive_final_action_stage(
-        forecast=forecast(status="unavailable", failure_state="openrouter_authentication_failed"),
+        forecast=forecast(status="unavailable", failure_state="authentication_failed"),
         proposal=None,
         action=None,
     )
-    assert result.status == "blocked"
-    assert result.reason == "ai_reasoning_failed"
-    assert result.error_code == "openrouter_authentication_failed"
+    assert result.status == "wait"
+    assert result.reason == "ai_provider_unavailable"
+    assert result.error_code == "authentication_failed"
+    assert result.extra["direction"] == "WAIT"
+    assert result.extra["publication_eligible"] is False
     assert "awaiting" not in result.reason
 
 

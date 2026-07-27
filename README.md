@@ -27,7 +27,7 @@ TEN is not a trading bot. It has no broker connection, order execution, or Teleg
 - YAML-configurable pipeline, feature flags, event bus, and versioned feature store
 - External plugin entry points for AI, market data, analysis, and notifications
 - Deterministic confidence calculator; the LLM never determines confidence
-- OpenRouter-only AI client using `meta-llama/llama-3.3-70b-instruct`
+- Cerebras-primary/Groq-fallback AI provider router with strict structured output
 - Docker Compose for backend, frontend, and PostgreSQL
 - pytest, Ruff, ESLint, TypeScript, and GitHub Actions quality gates
 
@@ -127,7 +127,7 @@ Create a package under `backend/app/engines` containing configuration, typed mod
 
 ## Add an AI model
 
-TEN currently permits **OpenRouter only**. Implement the provider-neutral `OpenRouterClient` or an external `AIProviderPlugin`, validate output into `SignalScore`, and register the adapter. Add an immutable prompt file for behavior changes. Models see `FeatureSnapshot` data only—never engine objects or raw chart images—and cannot set confidence.
+TEN uses a provider-neutral AI boundary with Cerebras as primary and Groq as fallback. Add an immutable prompt and schema version for behavior changes. Models see compact typed context only—never ORM objects, raw candles, engine objects, or chart images—and cannot bypass deterministic guardrails.
 
 ## Repository map
 

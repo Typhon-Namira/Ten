@@ -3,10 +3,7 @@
 Root cause this exists to fix: `dashboard.py` used to derive the `ai_reasoning` stage purely
 from "does a persisted `AIMarketForecast` row exist for this market state" — `None` always meant
 `status: "pending", reason: "ai_reasoning_not_yet_persisted_for_cycle"`, with no way to tell a
-genuinely-fresh cycle apart from one whose attempt already failed and was silently dropped (e.g.
-every attempt made during an active provider-backoff window is skipped by
-`AIReasoningService.process()` before it ever persists a request or forecast row — see the gate at
-`ai_reasoning/service.py` around `self._provider_backoff_until`). The same collapse-to-"pending"
+genuinely-fresh cycle apart from one whose provider attempt already failed. The same collapse-to-"pending"
 problem existed one level down: `guardrails`/`final_action` showed `"awaiting_ai_proposal"`
 forever whenever the AI legitimately concluded WAIT (no proposal, or a proposal whose
 `recommended_action` is `WAIT` — `AIReasoningLifecycleService.apply_proposal` deliberately never
@@ -73,7 +70,8 @@ def _forecast_failure_detail(forecast: Any) -> tuple[str, dict[str, Any]]:
     provider_http_status = getattr(forecast, "provider_http_status", None)
     if provider_http_status is not None:
         extra["provider_http_status"] = provider_http_status
-        return f"openrouter_returned_http_{provider_http_status}", extra
+        provider = getattr(forecast, "model_provider", None) or "ai_provider"
+        return f"{provider}_returned_http_{provider_http_status}", extra
     return failure_state or "ai_reasoning_failed", extra
 
 
@@ -103,8 +101,20 @@ def derive_ai_reasoning_stage(
         disabled_flags = tuple(name for name in ("shadow_enabled", "proposals_enabled", "monitoring_enabled") if not ai_health.get(name))
         return StageResult("disabled", "ai_reasoning_disabled", extra={"disabled_flags": disabled_flags})
 
-    backoff_until = _parse_iso(ai_health.get("provider_backoff_until"))
-    if backoff_until is not None and now < backoff_until:
+    provider_states = ai_health.get("providers") or {}
+    configured_states = [
+        item
+        for item in provider_states.values()
+        if isinstance(item, dict) and item.get("status") != "UNCONFIGURED"
+    ]
+    circuit_deadlines = [
+        deadline
+        for item in configured_states
+        for deadline in (_parse_iso(item.get("circuit_open_until")),)
+        if deadline is not None and now < deadline
+    ]
+    if configured_states and len(circuit_deadlines) == len(configured_states):
+        backoff_until = min(circuit_deadlines)
         retry_in_seconds = max(0.0, (backoff_until - now).total_seconds())
         return StageResult(
             "blocked",
@@ -128,7 +138,7 @@ def derive_ai_reasoning_stage(
             )
         created_at = getattr(request, "created_at", now)
         elapsed_seconds = max(0.0, (now - created_at).total_seconds())
-        return StageResult("running", "openrouter_request_in_progress", extra={"elapsed_seconds": elapsed_seconds, "job_state": "running"})
+        return StageResult("running", "ai_provider_request_in_progress", extra={"elapsed_seconds": elapsed_seconds, "job_state": "running"})
 
     elapsed_seconds = max(0.0, (now - cycle_available_at).total_seconds())
     return StageResult("pending", "queued_awaiting_worker", extra={"elapsed_seconds": elapsed_seconds, "job_state": "queued"})
@@ -187,7 +197,17 @@ def derive_final_action_stage(
         return StageResult("not_available", "awaiting_ai_reasoning")
     if _value(getattr(forecast, "status", None)) in TERMINAL_FAILURE_STATUS_VALUES:
         reason, extra = _forecast_failure_detail(forecast)
-        return StageResult("blocked", "ai_reasoning_failed", error_code=getattr(forecast, "failure_state", None), extra={"upstream_reason": reason, **extra})
+        return StageResult(
+            "wait",
+            "ai_provider_unavailable",
+            error_code=getattr(forecast, "failure_state", None),
+            extra={
+                "direction": "WAIT",
+                "publication_eligible": False,
+                "upstream_reason": reason,
+                **extra,
+            },
+        )
     if no_actionable_proposal(proposal):
         reason = "ai_proposal_recommended_wait" if proposal is not None else "ai_reasoning_produced_no_proposal"
         return StageResult("wait", reason, extra={"direction": "WAIT"})

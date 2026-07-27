@@ -1,5 +1,4 @@
-"""Explainability API tests. `FakeOpenRouterClient` never makes a real network call — it's an
-in-process double implementing `OpenRouterClient`'s ABC, so these tests can assert on exactly what
+"""Explainability API tests. The fake provider never makes a real network call, so these tests can assert on exactly what
 grounded payload the model was handed and what happens when it fails or returns garbage, without
 touching a real API key."""
 
@@ -13,7 +12,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from backend.app.ai.openrouter_client.client import OpenRouterClient
+from backend.app.ai.provider_client import AIProviderClient, AIProviderCompletion
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.core.exceptions import ExternalServiceError
 from backend.app.explainability import service as explainability_service_module
@@ -32,18 +31,37 @@ VALID_EXPLANATION = {
 }
 
 
-class FakeOpenRouterClient(OpenRouterClient):
+class FakeProviderClient(AIProviderClient):
+    provider = "cerebras"
+    base_url = "https://api.cerebras.ai/v1"
+    configured = True
+
     def __init__(self, response: dict[str, Any] | None = None, error: Exception | None = None) -> None:
         self.response = response
         self.error = error
         self.calls: list[dict[str, Any]] = []
 
-    async def complete_json(self, *, system_prompt: str, payload: dict[str, Any], model: str, temperature: float, max_tokens: int) -> dict[str, Any]:
+    async def available_models(self) -> tuple[str, ...]:
+        return ("test-model",)
+
+    async def complete_json(self, *, system_prompt: str, payload: dict[str, Any], model: str, **_: Any) -> AIProviderCompletion:
         self.calls.append({"system_prompt": system_prompt, "payload": payload, "model": model})
         if self.error is not None:
             raise self.error
         assert self.response is not None
-        return self.response
+        return AIProviderCompletion(
+            content=self.response,
+            provider="cerebras",
+            model=model,
+            status_code=200,
+            latency_ms=1,
+            provider_request_id=None,
+            token_usage=None,
+            rate_limit_limit=None,
+            rate_limit_remaining=None,
+            rate_limit_reset=None,
+            retry_after=None,
+        )
 
 
 class FakeDecision:
@@ -67,12 +85,12 @@ class _StateValue:
         self.value = value
 
 
-def _install(client: TestClient, fake: FakeOpenRouterClient) -> None:
+def _install(client: TestClient, fake: FakeProviderClient) -> None:
     client.app.state.explainability_service = ExplainabilityService(fake, PromptLoader(PROMPTS_DIR), model="test-model")
 
 
 def test_explain_current_grounds_context_and_cites_evidence() -> None:
-    fake = FakeOpenRouterClient(response=VALID_EXPLANATION)
+    fake = FakeProviderClient(response=VALID_EXPLANATION)
     with TestClient(create_app()) as client:
         _install(client, fake)
         response = client.get("/api/v1/explain/current")
@@ -89,10 +107,10 @@ def test_explain_current_grounds_context_and_cites_evidence() -> None:
     assert len(sent_payload["engines"]) == 8
 
 
-def test_explain_current_degrades_gracefully_when_openrouter_fails() -> None:
-    """A failing OpenRouter call must never 500 and never fabricate an explanation — it degrades
+def test_explain_current_degrades_gracefully_when_provider_fails() -> None:
+    """A failing provider call must never 500 and never fabricate an explanation — it degrades
     to `explanation: null` with the failure reported in `error`."""
-    fake = FakeOpenRouterClient(error=ExternalServiceError("OpenRouter returned an invalid scoring response"))
+    fake = FakeProviderClient(error=ExternalServiceError("Provider returned an invalid scoring response"))
     with TestClient(create_app(), raise_server_exceptions=False) as client:
         _install(client, fake)
         response = client.get("/api/v1/explain/current")
@@ -106,7 +124,7 @@ def test_explain_current_degrades_gracefully_when_openrouter_fails() -> None:
 def test_explain_current_degrades_when_model_returns_an_invalid_shape() -> None:
     """The model returning JSON that doesn't match `Explanation` (e.g. missing `summary`) must
     also degrade instead of 500ing or being rendered as-is."""
-    fake = FakeOpenRouterClient(response={"primary_reasons": ["not a valid explanation"]})
+    fake = FakeProviderClient(response={"primary_reasons": ["not a valid explanation"]})
     with TestClient(create_app(), raise_server_exceptions=False) as client:
         _install(client, fake)
         response = client.get("/api/v1/explain/current")
@@ -117,7 +135,7 @@ def test_explain_current_degrades_when_model_returns_an_invalid_shape() -> None:
 
 
 def test_explain_decision_not_found_returns_404() -> None:
-    fake = FakeOpenRouterClient(response=VALID_EXPLANATION)
+    fake = FakeProviderClient(response=VALID_EXPLANATION)
     with TestClient(create_app()) as client:
         _install(client, fake)
         response = client.get(f"/api/v1/explain/decision/{uuid4()}")
@@ -125,7 +143,7 @@ def test_explain_decision_not_found_returns_404() -> None:
 
 
 def test_explain_rejection_rejects_an_eligible_decision_with_422() -> None:
-    fake = FakeOpenRouterClient(response=VALID_EXPLANATION)
+    fake = FakeProviderClient(response=VALID_EXPLANATION)
     decision = FakeDecision(state="eligible")
     with TestClient(create_app()) as client:
         _install(client, fake)
@@ -135,7 +153,7 @@ def test_explain_rejection_rejects_an_eligible_decision_with_422() -> None:
 
 
 def test_explain_rejection_explains_a_blocked_decision_with_a_rejection_specific_question() -> None:
-    fake = FakeOpenRouterClient(response=VALID_EXPLANATION)
+    fake = FakeProviderClient(response=VALID_EXPLANATION)
     decision = FakeDecision(state="blocked")
     with TestClient(create_app()) as client:
         _install(client, fake)
@@ -150,7 +168,7 @@ def test_explain_rejection_explains_a_blocked_decision_with_a_rejection_specific
 
 
 def test_explain_chat_folds_conversation_history_into_the_grounded_payload() -> None:
-    fake = FakeOpenRouterClient(response=VALID_EXPLANATION)
+    fake = FakeProviderClient(response=VALID_EXPLANATION)
     with TestClient(create_app()) as client:
         _install(client, fake)
         response = client.post(
