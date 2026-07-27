@@ -12,6 +12,8 @@ import random
 from time import perf_counter
 from typing import Any, Protocol
 
+from pydantic import ValidationError
+
 from backend.app.ai.provider_client import (
     AIProviderClient,
     AIProviderCompletion,
@@ -23,6 +25,7 @@ from backend.app.core.exceptions import AIProviderFailureDetails, AIProviderRequ
 
 from .llm_context import build_llm_analysis_context
 from .models import AIReasoningRequest
+from .validation import CompactAIReasoningOutput
 
 logger = logging.getLogger(__name__)
 AI_REASONING_RESPONSE_SCHEMA_TYPE = "ten_ai_reasoning_response"
@@ -176,6 +179,7 @@ class _OpenAICompatibleReasoningProvider:
         attempt: int = 1,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
+        correction_instruction: str | None = None,
     ) -> AIProviderResponse:
         started = perf_counter()
         context = build_llm_analysis_context(request)
@@ -184,6 +188,14 @@ class _OpenAICompatibleReasoningProvider:
             "response_contract": self._response_contract(),
         }
         system_prompt = self.prompts.load(prompt_version)
+        if correction_instruction:
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "CORRECTION REQUIRED FOR THE PREVIOUS RESPONSE:\n"
+                f"{correction_instruction}\n"
+                "Return one complete JSON object containing every required field. "
+                "Do not omit fields and do not add properties outside the response contract."
+            )
         schema = reasoning_response_schema()
         wire_schema = schema if self.supports_strict_json_schema else None
         request_body = build_request_body(
@@ -335,41 +347,75 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         attempt: int = 1,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
+        correction_instruction: str | None = None,
     ) -> AIProviderResponse:
         try:
-            return await super().reason(
+            response = await super().reason(
                 request,
                 prompt_version=prompt_version,
                 attempt=attempt,
                 fallback_used=fallback_used,
                 fallback_reason=fallback_reason,
+                correction_instruction=correction_instruction,
             )
         except AIProviderRequestError as exc:
             if exc.details.reason_code != "response_decoding_failed":
                 raise
-            logger.warning(
-                "ai_provider.correction.started",
-                extra={
-                    "provider": self.provider_name,
-                    "model": self.model,
-                    "instrument": request.instrument,
-                    "cycle_id": str(request.cycle_id),
-                    "ums_boundary": request.analysis_timestamp.isoformat(),
-                    "attempt": attempt + 1,
-                    "fallback_used": fallback_used,
-                    "fallback_reason": fallback_reason,
-                    "sanitized_error_code": exc.details.reason_code,
-                },
+            correction_instruction = (
+                "The previous response was not valid JSON. Return valid JSON matching "
+                "the complete response contract."
             )
-            # One and only one bounded correction request. A second malformed
-            # response propagates as a typed failure and the cycle fails closed.
-            return await super().reason(
-                request,
-                prompt_version=prompt_version,
-                attempt=attempt + 1,
-                fallback_used=fallback_used,
-                fallback_reason=fallback_reason,
-            )
+            correction_reason = exc.details.reason_code
+        else:
+            try:
+                CompactAIReasoningOutput.model_validate(response.raw_output)
+                return response
+            except ValidationError as exc:
+                errors = exc.errors()
+                if errors:
+                    first = errors[0]
+                    field_path = ".".join(
+                        (
+                            "provider_response",
+                            *(str(item) for item in first["loc"]),
+                        )
+                    )
+                    expected = str(first["msg"] or first["type"])
+                else:
+                    field_path = "provider_response"
+                    expected = "schema validation"
+                correction_instruction = (
+                    f"The previous JSON failed schema validation at {field_path}: {expected}. "
+                    "Return all required fields, including rationale, confidence, risk_flags, "
+                    "and proposal."
+                )
+                correction_reason = "structured_output_invalid"
+
+        logger.warning(
+            "ai_provider.correction.started",
+            extra={
+                "provider": self.provider_name,
+                "model": self.model,
+                "instrument": request.instrument,
+                "cycle_id": str(request.cycle_id),
+                "ums_boundary": request.analysis_timestamp.isoformat(),
+                "attempt": attempt + 1,
+                "fallback_used": fallback_used,
+                "fallback_reason": fallback_reason,
+                "sanitized_error_code": correction_reason,
+            },
+        )
+        # One and only one bounded correction request. A second malformed or
+        # schema-invalid response is returned to the application validator, which
+        # persists the typed failure and keeps publication fail-closed.
+        return await super().reason(
+            request,
+            prompt_version=prompt_version,
+            attempt=attempt + 1,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            correction_instruction=correction_instruction,
+        )
 
 
 class AIProviderRouter:
@@ -411,7 +457,37 @@ class AIProviderRouter:
     ) -> AIProviderResponse:
         now = self.clock()
         fallback_reason: str | None = None
-        if self._eligible("cerebras", now):
+        primary_eligible = self._eligible("cerebras", now)
+        logger.info(
+            "ai_provider.routing.entered",
+            extra={
+                "provider": "cerebras",
+                "model": self.primary.model,
+                "instrument": request.instrument,
+                "cycle_id": str(request.cycle_id),
+                "ums_boundary": request.analysis_timestamp.isoformat(),
+                "primary_provider": "cerebras",
+                "primary_eligible": primary_eligible,
+                "primary_status": self.states["cerebras"].status.value,
+                "primary_circuit_open_until": (
+                    self.states["cerebras"].circuit_open_until.isoformat()
+                    if self.states["cerebras"].circuit_open_until
+                    else None
+                ),
+                "fallback_status": self.states["groq"].status.value,
+            },
+        )
+        if primary_eligible:
+            logger.info(
+                "ai_provider.primary.started",
+                extra={
+                    "provider": "cerebras",
+                    "model": self.primary.model,
+                    "instrument": request.instrument,
+                    "cycle_id": str(request.cycle_id),
+                    "ums_boundary": request.analysis_timestamp.isoformat(),
+                },
+            )
             try:
                 response = await self._attempt(
                     self.primary,
@@ -423,6 +499,19 @@ class AIProviderRouter:
                 self._success("cerebras")
                 return response
             except AIProviderRequestError as exc:
+                logger.warning(
+                    "ai_provider.primary.failed",
+                    extra={
+                        "provider": "cerebras",
+                        "model": self.primary.model,
+                        "instrument": request.instrument,
+                        "cycle_id": str(request.cycle_id),
+                        "ums_boundary": request.analysis_timestamp.isoformat(),
+                        "status_code": exc.details.http_status,
+                        "sanitized_error_code": exc.details.reason_code,
+                        "fallback_allowed": self._fallback_allowed(exc.details),
+                    },
+                )
                 if not self._fallback_allowed(exc.details):
                     raise
                 self._failure("cerebras", exc.details)
@@ -431,8 +520,29 @@ class AIProviderRouter:
             fallback_reason = (
                 "cerebras_unconfigured"
                 if self.states["cerebras"].status == ProviderStatus.UNCONFIGURED
-                else self.states["cerebras"].last_failure_code
+                else (
+                    f"cerebras_{self.states['cerebras'].last_failure_code}"
+                    if self.states["cerebras"].last_failure_code
+                    else None
+                )
                 or "cerebras_circuit_open"
+            )
+            logger.warning(
+                "ai_provider.primary.skipped",
+                extra={
+                    "provider": "cerebras",
+                    "model": self.primary.model,
+                    "instrument": request.instrument,
+                    "cycle_id": str(request.cycle_id),
+                    "ums_boundary": request.analysis_timestamp.isoformat(),
+                    "skip_reason": fallback_reason,
+                    "primary_status": self.states["cerebras"].status.value,
+                    "circuit_open_until": (
+                        self.states["cerebras"].circuit_open_until.isoformat()
+                        if self.states["cerebras"].circuit_open_until
+                        else None
+                    ),
+                },
             )
 
         logger.info(
