@@ -132,6 +132,7 @@ class AIProviderCompletion:
     rate_limit_token_remaining: str | None = None
     rate_limit_token_reset: str | None = None
     retry_after: str | None = None
+    raw_json_text: str | None = None
 
 
 class AIProviderClient(Protocol):
@@ -490,6 +491,11 @@ class HttpAIProviderClient:
             rate_limit_token_remaining=token_remaining,
             rate_limit_token_reset=token_reset,
             retry_after=_safe_text(headers.get("retry-after")),
+            raw_json_text=(
+                content
+                if isinstance(content, str)
+                else json.dumps(content, ensure_ascii=False, separators=(",", ":"))
+            ),
         )
 
     def _http_failure(
