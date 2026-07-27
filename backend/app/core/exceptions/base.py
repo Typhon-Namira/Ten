@@ -59,6 +59,15 @@ class AIProviderFailureDetails:
     rate_limit_token_remaining: str | None = None
     rate_limit_token_reset: str | None = None
     provider_request_id: str | None = None
+    limit_classification: str | None = None
+    finish_reason: str | None = None
+    response_size_bytes: int | None = None
+    response_character_count: int | None = None
+    provider_input_tokens: int | None = None
+    provider_output_tokens: int | None = None
+    provider_total_tokens: int | None = None
+    schema_error_code: str | None = None
+    schema_error_path: str | None = None
     fallback_used: bool = False
     fallback_reason: str | None = None
     elapsed_ms: float | None = None

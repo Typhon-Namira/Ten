@@ -375,7 +375,14 @@ async def test_groq_missing_executive_summary_gets_one_explicit_schema_correctio
             output["executive_summary"] = "Validated analysis summary."
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": json.dumps(output)}}]},
+            json={
+                "choices": [{"message": {"content": json.dumps(output)}}],
+                "usage": {
+                    "prompt_tokens": 10 + len(bodies),
+                    "completion_tokens": 2 + len(bodies),
+                    "total_tokens": 12 + (2 * len(bodies)),
+                },
+            },
             request=http_request,
         )
 
@@ -385,16 +392,113 @@ async def test_groq_missing_executive_summary_gets_one_explicit_schema_correctio
         "https://api.groq.test/openai/v1",
         transport=httpx.MockTransport(handler),
     )
-    response = await _groq_provider(client, config).reason(
+    provider = _groq_provider(client, config)
+    response = await provider.reason(
         request,
         prompt_version=request.prompt_version,
     )
     validated = StructuredAIOutputValidator().validate_analysis(response.raw_output)
 
     assert len(bodies) == 2
-    assert "provider_response.executive_summary" in bodies[1]["messages"][0]["content"]
+    correction_payload = json.loads(bodies[1]["messages"][1]["content"])
+    assert "provider_response.executive_summary" in correction_payload["validation_error"]
+    assert "analysis_context" not in correction_payload
+    assert len(bodies[1]["messages"][1]["content"]) < len(
+        bodies[0]["messages"][1]["content"]
+    )
     assert response.raw_output["executive_summary"] == "Validated analysis summary."
+    attempts = provider.attempts_for(request.request_id)
+    assert [item["request_kind"] for item in attempts] == [
+        "analysis",
+        "schema_correction",
+    ]
+    assert [item["total_tokens"] for item in attempts] == [14, 16]
+    assert response.token_usage == {
+        "input_tokens": 23,
+        "output_tokens": 7,
+        "total_tokens": 30,
+    }
     assert validated.executive_summary == "Validated analysis summary."
+
+
+@pytest.mark.asyncio
+async def test_finish_reason_length_is_not_sent_as_schema_correction() -> None:
+    _, _, config, request = await _request()
+    calls = 0
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        output = analysis_output().model_dump(mode="python")
+        output.pop("executive_summary")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": json.dumps(output)},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq_1",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(AIProviderRequestError) as captured:
+        await _groq_provider(client, config).reason(
+            request,
+            prompt_version=request.prompt_version,
+        )
+
+    assert calls == 1
+    assert captured.value.details.reason_code == "truncated_response"
+    assert captured.value.details.schema_error_code == "finish_reason_length"
+
+
+@pytest.mark.asyncio
+async def test_known_empty_rate_limit_capacity_skips_correction() -> None:
+    _, _, config, request = await _request()
+    calls = 0
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        output = analysis_output().model_dump(mode="python")
+        output.pop("executive_summary")
+        return httpx.Response(
+            200,
+            headers={
+                "x-ratelimit-remaining-tokens": "0",
+                "x-ratelimit-reset-tokens": "8s",
+            },
+            json={"choices": [{"message": {"content": json.dumps(output)}}]},
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq_1",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(AIProviderRequestError) as captured:
+        await _groq_provider(client, config).reason(
+            request,
+            prompt_version=request.prompt_version,
+        )
+
+    assert calls == 1
+    assert captured.value.details.reason_code == "rate_limited"
+    assert (
+        captured.value.details.limit_classification
+        == "RATE_LIMITED_TEMPORARY"
+    )
 
 
 @pytest.mark.asyncio
@@ -429,13 +533,11 @@ async def test_groq_missing_regime_classification_is_visible_and_corrected(
         )
         validated = StructuredAIOutputValidator().validate_analysis(response.raw_output)
 
-    raw_logs = [
+    response_logs = [
         record
         for record in caplog.records
-        if record.message == "ai_provider.response.raw"
+        if record.message == "ai_provider.response.diagnostic"
     ]
-    first_raw = json.loads(raw_logs[0].raw_provider_json)
-    first_decoded = json.loads(raw_logs[0].decoded_provider_json)
     normalized_log = next(
         record
         for record in caplog.records
@@ -443,19 +545,21 @@ async def test_groq_missing_regime_classification_is_visible_and_corrected(
     )
 
     assert len(bodies) == 2
-    assert "classification" not in first_raw["market_regime"]
-    assert first_decoded == first_raw
-    assert "provider_response.market_regime.classification" in bodies[1]["messages"][0][
-        "content"
+    assert len(response_logs[0].raw_response_sha256) == 64
+    assert response_logs[0].raw_response_character_count > 0
+    assert not hasattr(response_logs[0], "raw_provider_json")
+    correction_payload = json.loads(bodies[1]["messages"][1]["content"])
+    assert "provider_response.market_regime.classification" in correction_payload[
+        "validation_error"
     ]
-    assert json.loads(normalized_log.normalized_provider_json)["market_regime"][
-        "classification"
-    ] == "bullish"
+    assert len(normalized_log.normalized_response_sha256) == 64
+    assert normalized_log.normalized_response_character_count > 0
+    assert not hasattr(normalized_log, "normalized_provider_json")
     assert validated.market_regime.classification.value == "bullish"
 
 
 @pytest.mark.asyncio
-async def test_groq_echoed_schema_type_is_rejected_then_removed_by_correction() -> None:
+async def test_groq_echoed_contract_metadata_is_removed_locally_without_correction() -> None:
     _, _, config, request = await _request()
     bodies: list[dict[str, Any]] = []
 
@@ -482,10 +586,7 @@ async def test_groq_echoed_schema_type_is_rejected_then_removed_by_correction() 
     )
     validated = StructuredAIOutputValidator().validate_analysis(response.raw_output)
 
-    assert len(bodies) == 2
-    correction_prompt = bodies[1]["messages"][0]["content"]
-    assert "provider_response.schema_type" in correction_prompt
-    assert "Remove that property" in correction_prompt
+    assert len(bodies) == 1
     assert "schema_type" not in response.raw_output
     assert validated.analysis_confidence > 0
 

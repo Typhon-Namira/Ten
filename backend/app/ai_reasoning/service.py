@@ -234,6 +234,7 @@ class AIReasoningService:
         provider_failure: dict[str, Any] | None = None
         provider_metrics_before = self._provider_metrics()
         provider_delta: dict[str, int] = {}
+        provider_attempts: tuple[dict[str, Any], ...] = ()
         failure_state = "llm_unavailable"
         failure_errors: tuple[str, ...] = ()
         try:
@@ -285,6 +286,21 @@ class AIReasoningService:
                 validation_passed=True,
                 created_at=self.clock(),
             )
+            provider_attempts = self._provider_attempts(request.request_id)
+            for account_id in ("groq_1", "groq_2", "groq_3", "groq_4"):
+                account_attempts = tuple(
+                    item
+                    for item in provider_attempts
+                    if item.get("account_id") == account_id
+                )
+                for key in ("input_tokens", "output_tokens", "total_tokens"):
+                    values = [
+                        int(value)
+                        for item in account_attempts
+                        if isinstance((value := item.get(key)), int)
+                    ]
+                    if values:
+                        provider_delta[f"{account_id}_{key}"] = sum(values)
             await self._record_usage(
                 request,
                 state.state_hash,
@@ -295,6 +311,7 @@ class AIReasoningService:
                 model_identifier=response.model_identifier,
                 provider=response.provider,
                 provider_metrics=provider_delta,
+                provider_attempts=provider_attempts,
             )
             logger.info(
                 "structured_validation.completed",
@@ -387,6 +404,23 @@ class AIReasoningService:
                 },
             )
 
+        provider_attempts = self._provider_attempts(request.request_id)
+        attempt_usage = self._attempt_usage(provider_attempts)
+        for account_id in ("groq_1", "groq_2", "groq_3", "groq_4"):
+            account_attempts = tuple(
+                item
+                for item in provider_attempts
+                if item.get("account_id") == account_id
+            )
+            for key in ("input_tokens", "output_tokens", "total_tokens"):
+                values = [
+                    int(value)
+                    for item in account_attempts
+                    if isinstance((value := item.get(key)), int)
+                ]
+                if values:
+                    provider_delta[f"{account_id}_{key}"] = sum(values)
+
         if provider_failure is not None:
             await self.repository.complete_analysis_cycle(
                 idempotency_key,
@@ -412,13 +446,14 @@ class AIReasoningService:
             await self._record_usage(
                 request,
                 state.state_hash,
-                None,
+                attempt_usage,
                 self.last_latency_ms,
                 False,
                 failure_state,
                 model_identifier=request.model_identifier,
                 provider=None,
                 provider_metrics=provider_delta,
+                provider_attempts=provider_attempts,
             )
             return None
 
@@ -474,6 +509,7 @@ class AIReasoningService:
                 ),
                 provider=response.provider if response is not None else None,
                 provider_metrics=provider_delta,
+                provider_attempts=provider_attempts,
             )
             return None
 
@@ -611,6 +647,7 @@ class AIReasoningService:
         model_identifier: str | None = None,
         provider: str | None = None,
         provider_metrics: dict[str, int] | None = None,
+        provider_attempts: tuple[dict[str, Any], ...] = (),
     ) -> None:
         if self.final_decision is None:
             return
@@ -629,6 +666,7 @@ class AIReasoningService:
                 "max_tokens": self.config.max_tokens,
                 "provider": provider,
                 "telemetry_policy": "five_minute_v1",
+                "provider_attempts": list(provider_attempts),
                 **(provider_metrics or {}),
                 "provider_failure": int(
                     failure_state is not None
@@ -649,6 +687,31 @@ class AIReasoningService:
             created_at=self.clock(),
         )
         await self.final_decision.repository.save_usage(usage)
+
+    def _provider_attempts(
+        self,
+        request_id: object,
+    ) -> tuple[dict[str, Any], ...]:
+        getter = getattr(self.provider, "attempts_for", None)
+        if not callable(getter):
+            return ()
+        value = getter(request_id)
+        return tuple(value) if isinstance(value, (tuple, list)) else ()
+
+    @staticmethod
+    def _attempt_usage(
+        attempts: tuple[dict[str, Any], ...],
+    ) -> dict[str, int] | None:
+        usage: dict[str, int] = {}
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            values = [
+                int(value)
+                for item in attempts
+                if isinstance((value := item.get(key)), int)
+            ]
+            if values:
+                usage[key] = sum(values)
+        return usage or None
 
     async def _record_failure(
         self,
@@ -753,6 +816,13 @@ class AIReasoningService:
             "groq_calls",
             "retry_attempts",
             "schema_corrections",
+            "analysis_requests",
+            "schema_correction_requests",
+            "http_429_responses",
+            "initial_parse_failures",
+            "initial_schema_validation_failures",
+            "schema_corrections_succeeded",
+            "schema_corrections_failed",
         ):
             self.metrics[key] += delta.get(key, 0)
         self.requests = self.metrics["provider_http_calls"]
@@ -763,6 +833,7 @@ class AIReasoningService:
         provider_states = metadata.get("providers")
         configured_count = metadata.get("configured_account_count")
         available_count = metadata.get("available_account_count")
+        aggregate_reason = metadata.get("aggregate_reason")
         configured_account_count = (
             configured_count if isinstance(configured_count, int) else 0
         )
@@ -783,6 +854,10 @@ class AIReasoningService:
                 and available_account_count == configured_account_count
                 else "degraded"
             )
+        elif aggregate_reason == "temporarily_rate_limited":
+            operations_status = "temporarily_rate_limited"
+        elif aggregate_reason == "quota_exhausted":
+            operations_status = "quota_exhausted"
         elif available_account_count == 0 and isinstance(provider_states, dict) and all(
             not isinstance(item, dict)
             or item.get("status") in {"CONFIGURATION_ERROR", "DISABLED"}
@@ -835,6 +910,21 @@ class AIReasoningService:
                 "groq_calls": self.metrics["groq_calls"],
                 "retries": self.metrics["retry_attempts"],
                 "schema_corrections": self.metrics["schema_corrections"],
+                "initial_analysis_requests": self.metrics["analysis_requests"],
+                "initial_parse_failures": self.metrics["initial_parse_failures"],
+                "initial_schema_validation_failures": self.metrics[
+                    "initial_schema_validation_failures"
+                ],
+                "schema_corrections_attempted": self.metrics[
+                    "schema_correction_requests"
+                ],
+                "schema_corrections_succeeded": self.metrics[
+                    "schema_corrections_succeeded"
+                ],
+                "schema_corrections_failed": self.metrics[
+                    "schema_corrections_failed"
+                ],
+                "http_429_responses": self.metrics["http_429_responses"],
                 "skipped_before_provider_call": self.metrics[
                     "skipped_before_provider_call"
                 ],

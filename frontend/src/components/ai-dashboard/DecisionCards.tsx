@@ -152,6 +152,10 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
       <Metric label="Available accounts" value={health?.available_account_count ?? 0} />
       <Metric label="Retries" value={usage?.retries ?? 'Unavailable'} />
       <Metric label="Schema corrections" value={usage?.schema_corrections ?? 'Unavailable'} />
+      <Metric label="Initial parse failures" value={usage?.initial_parse_failures ?? 'Unavailable'} />
+      <Metric label="Initial schema failures" value={usage?.initial_schema_validation_failures ?? 'Unavailable'} />
+      <Metric label="Corrections succeeded / failed" value={`${usage?.schema_corrections_succeeded ?? 0} / ${usage?.schema_corrections_failed ?? 0}`} />
+      <Metric label="HTTP 429 responses" value={usage?.http_429_responses ?? 'Unavailable'} />
       <Metric label="Skipped before provider" value={health?.call_control.skipped_before_provider_call ?? 'Unavailable'} />
       <Metric label="Deduplicated before provider" value={health?.call_control.deduplicated_before_provider_call ?? 'Unavailable'} />
       <Metric label="Provider failures" value={usage?.provider_failures ?? 'Unavailable'} />
@@ -168,13 +172,21 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
           key={accountId}
           label={`Groq ${index + 1}`}
           value={account?.status ?? 'DISABLED'}
-          detail={`${account?.circuit_state ?? 'CLOSED'} · HTTP ${account?.last_http_status ?? 'none'} · ${account?.last_provider_error_code ?? account?.last_failure_code ?? 'no error'} · calls ${account?.calls_today ?? 0} · analyses ${account?.successful_analyses ?? 0} · reset ${account?.cooldown_until ?? 'none'}`}
+          detail={`${account?.eligible_now ? 'eligible' : 'not eligible'} · ${account?.circuit_state ?? 'CLOSED'} · HTTP ${account?.last_http_status ?? 'none'} · ${account?.last_provider_error_code ?? account?.last_failure_code ?? 'no error'} · analysis ${account?.analysis_requests ?? 0} · corrections ${account?.schema_correction_requests ?? 0} · 429s ${account?.http_429_responses ?? 0} · tokens ${account?.token_usage.total_tokens ?? 0} · analyses ${account?.successful_analyses ?? 0} · reset ${account?.cooldown_until ?? 'none'}`}
         />
       })}
     </div>
+    {(usage?.recent_provider_attempts?.length ?? 0) > 0 && <div className="comparison-grid">
+      {usage!.recent_provider_attempts.slice(0, 8).map(attempt => <div key={attempt.provider_attempt_id}>
+        <strong>{attempt.account_id} · {humanize(attempt.request_kind)}</strong>
+        <span>HTTP {attempt.http_status ?? 'none'} · finish {attempt.finish_reason ?? 'unknown'}</span>
+        <span>Tokens {attempt.input_tokens ?? '—'} / {attempt.output_tokens ?? '—'} / {attempt.total_tokens ?? '—'}</span>
+        <span>Schema {attempt.schema_valid === true ? 'valid' : attempt.schema_error_code ?? 'not validated'} {attempt.schema_error_path ?? ''}</span>
+      </div>)}
+    </div>}
     <div className="card-foot">
       <span>Status {health?.operations_status ?? 'idle'} · primary {health?.primary_provider ?? 'Groq pool'} · active {health?.active_provider ?? 'none'} · {health?.model_identifier ?? 'Model unavailable'}</span>
-      <StatusBadge tone={health?.guardrails.status === 'healthy' && !stale ? 'positive' : 'warning'}>{humanize(health?.guardrails.status ?? 'unavailable')}</StatusBadge>
+      <StatusBadge tone={health?.operations_status === 'healthy' && !stale ? 'positive' : 'warning'}>{humanize(health?.operations_status ?? 'idle')}</StatusBadge>
     </div>
   </section>
 }
