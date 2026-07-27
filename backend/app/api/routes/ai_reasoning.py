@@ -1,9 +1,12 @@
-"""Read-only Phase 3/4 AI reasoning and managed-signal observability."""
+"""Read-only AI market-analysis and legacy lifecycle observability."""
 
+from datetime import UTC, datetime
 from typing import Annotated, Any, cast
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from backend.app.ai_reasoning.analysis import AIMarketAnalysis, AnalysisStatus
 from backend.app.ai_reasoning.repository import AIReasoningRepository
 from backend.app.ai_reasoning.service import AIReasoningService
 from backend.app.final_decision.repository import FinalDecisionRepository
@@ -66,6 +69,7 @@ async def latest(
     final_service: FinalService,
     instrument: str = "XAUUSD",
 ) -> dict[str, Any]:
+    analysis = await repository.latest_analysis(instrument)
     forecast = await repository.latest_forecast(instrument)
     proposal = await repository.latest_proposal()
     signals = await repository.active_signals(instrument)
@@ -95,6 +99,7 @@ async def latest(
     performance = await final_repository.latest_performance_report()
     readiness = await final_repository.latest_readiness_report()
     return {
+        "analysis": analysis.model_dump(mode="json") if analysis else None,
         "forecast": forecast.model_dump(mode="json") if forecast else None,
         "proposal": proposal.model_dump(mode="json") if proposal else None,
         "managed_signals": [signal.model_dump(mode="json") for signal in signals],
@@ -115,4 +120,68 @@ async def latest(
         "production_readiness": readiness.model_dump(mode="json") if readiness else None,
         "runtime": _runtime_state(request),
         "health": {**service.health(), "guardrails": final_service.health()},
+    }
+
+
+@router.get("/analyses", response_model=list[AIMarketAnalysis])
+async def analyses(
+    repository: Repository,
+    instrument: str = "XAUUSD",
+    timeframe: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    status: AnalysisStatus | None = None,
+    provider: str | None = None,
+    cursor: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> list[AIMarketAnalysis]:
+    for name, value in (("start", start), ("end", end)):
+        if value is not None and value.tzinfo is None:
+            raise HTTPException(422, f"{name} must include a timezone")
+    if start is not None:
+        start = start.astimezone(UTC)
+    if end is not None:
+        end = end.astimezone(UTC)
+    if start is not None and end is not None and start > end:
+        raise HTTPException(422, "start must precede end")
+    return list(
+        await repository.list_analyses(
+            instrument.upper(),
+            timeframe,
+            start,
+            end,
+            status,
+            provider,
+            cursor,
+            limit,
+        )
+    )
+
+
+@router.get("/analyses/{analysis_id}", response_model=AIMarketAnalysis)
+async def analysis_detail(
+    analysis_id: UUID,
+    repository: Repository,
+) -> AIMarketAnalysis:
+    value = await repository.get_analysis(analysis_id)
+    if value is None:
+        raise HTTPException(404, "AI market analysis not found")
+    return value
+
+
+@router.get("/analyses/{analysis_id}/temporal-context")
+async def temporal_context(
+    analysis_id: UUID,
+    repository: Repository,
+    service: Service,
+) -> dict[str, Any]:
+    value = await repository.get_analysis(analysis_id)
+    if value is None:
+        raise HTTPException(404, "AI market analysis not found")
+    validated = await service._validated_analysis(value)
+    if validated is None:
+        raise HTTPException(409, "AI market analysis is not valid")
+    return {
+        "temporal_context": validated.temporal_context.model_dump(mode="json"),
+        "temporal_metrics": validated.temporal_metrics.model_dump(mode="json"),
     }

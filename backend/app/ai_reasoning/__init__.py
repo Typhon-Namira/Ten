@@ -1,25 +1,21 @@
-"""Phase 3/4 AI market reasoning and persistent signal lifecycle."""
+"""Analysis-only AI interpretation package.
 
-from .config import AIReasoningConfig
-from .provider import (
-    AIProviderRouter,
-    AIReasoningProvider,
-    CerebrasProvider,
-    GroqProvider,
+Keep package initialization dependency-free so domain contracts can be used by
+the deterministic Signal Engine without importing runtime orchestration.
+"""
+
+from .analysis import (
+    AIMarketAnalysis,
+    AIAnalysisOutput,
+    AIAnalysisTemporalContext,
+    TemporalAnalysisMetrics,
+    ValidatedAIAnalysis,
 )
-from .repository import AIReasoningRepository, InMemoryAIReasoningRepository, SqlAlchemyAIReasoningRepository
-from .service import AIReasoningService
-from .setup_families import SetupFamilyRegistry
 
 __all__ = [
-    "AIReasoningConfig",
-    "AIReasoningProvider",
-    "AIReasoningRepository",
-    "AIReasoningService",
-    "AIProviderRouter",
-    "CerebrasProvider",
-    "GroqProvider",
-    "InMemoryAIReasoningRepository",
-    "SetupFamilyRegistry",
-    "SqlAlchemyAIReasoningRepository",
+    "AIMarketAnalysis",
+    "AIAnalysisOutput",
+    "AIAnalysisTemporalContext",
+    "TemporalAnalysisMetrics",
+    "ValidatedAIAnalysis",
 ]

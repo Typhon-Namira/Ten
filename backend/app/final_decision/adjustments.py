@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
-from backend.app.ai_reasoning.lifecycle import SignalLifecycleService
 from backend.app.ai_reasoning.models import Direction, ManagedSignal, ManagedSignalState, ProposalAction
+
+
+class LevelRevisionService(Protocol):
+    async def revise_level(
+        self,
+        signal: ManagedSignal,
+        *,
+        level_type: str,
+        new_value: float,
+        reason: str,
+        evidence_ids: tuple[UUID, ...],
+        approved_rule: str,
+    ) -> tuple[ManagedSignal, Any]: ...
 
 
 class MonitoringAdjustmentPolicy:
@@ -63,7 +75,7 @@ class MonitoringAdjustmentPolicy:
 
     async def revise_stop(
         self,
-        lifecycle: SignalLifecycleService,
+        lifecycle: LevelRevisionService,
         signal: ManagedSignal,
         *,
         new_stop: float,

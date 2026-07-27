@@ -30,6 +30,15 @@ class AIReasoningConfig(BaseModel):
     maximum_request_cost_usd: float = Field(default=0.05, gt=0)
     input_cost_per_million_usd: float = Field(default=1.04, ge=0)
     output_cost_per_million_usd: float = Field(default=2.25, ge=0)
+    temporal_lookback_minutes: tuple[int, ...] = (5, 15, 30, 60, 240)
+    temporal_tolerance_minutes: dict[str, int] = {
+        "5m": 2,
+        "15m": 5,
+        "30m": 10,
+        "1h": 20,
+        "4h": 60,
+    }
+    temporal_rolling_window: int = Field(default=60, ge=3, le=240)
 
     @model_validator(mode="after")
     def ordered_request_budgets(self) -> AIReasoningConfig:
@@ -37,4 +46,6 @@ class AIReasoningConfig(BaseModel):
             raise ValueError("AI input-token thresholds must be ordered")
         if self.max_tokens > self.absolute_max_output_tokens:
             raise ValueError("AI max_tokens exceeds the absolute output-token limit")
+        if self.temporal_lookback_minutes != (5, 15, 30, 60, 240):
+            raise ValueError("temporal lookback anchors must remain 5m, 15m, 30m, 1h, and 4h")
         return self

@@ -20,6 +20,10 @@ from .models import (
     RuleEvaluation,
     RuleOutcome,
     RuleSeverity,
+    FinalSignalAction,
+    SignalEvidence,
+    SignalReadiness,
+    SignalSourceLineage,
     SignalDecision,
     SignalDecisionInput,
     stable_id,
@@ -71,6 +75,63 @@ class ConservativeSignalDecisionPolicy:
         rule("source.snapshot_integrity", RuleOutcome.PASSED if source_valid else RuleOutcome.FAILED, RuleSeverity.HARD_BLOCK, "snapshot_integrity_valid" if source_valid else "snapshot_integrity_invalid", score.status.value)
         point_in_time = score.as_of <= decision_input.as_of and score.calculated_at <= decision_input.requested_at
         rule("source.point_in_time", RuleOutcome.PASSED if point_in_time else RuleOutcome.FAILED, RuleSeverity.HARD_BLOCK, "point_in_time_valid" if point_in_time else "future_snapshot", score.as_of.isoformat(), decision_input.as_of.isoformat())
+
+        analysis = decision_input.current_ai_analysis
+        analysis_valid = bool(
+            analysis is not None
+            and analysis.validation_passed
+            and analysis.output is not None
+            and analysis.analysis_timestamp <= decision_input.as_of
+        )
+        rule(
+            "source.snapshot_integrity",
+            RuleOutcome.PASSED,
+            RuleSeverity.INFORMATIONAL,
+            "ai_analysis_valid" if analysis_valid else "ai_analysis_missing_or_invalid",
+            str(analysis.analysis_id) if analysis else None,
+        )
+        ai_alignment = True
+        if analysis_valid and analysis is not None and analysis.output is not None:
+            analysis_regime = analysis.output.market_regime.classification.value
+            ai_alignment = (
+                direction == DecisionDirection.NEUTRAL
+                or analysis_regime not in {"bullish", "bearish"}
+                or analysis_regime == direction.value
+            )
+            rule(
+                "alignment.minimum",
+                RuleOutcome.PASSED if ai_alignment else RuleOutcome.WARNING,
+                RuleSeverity.INFORMATIONAL if ai_alignment else RuleSeverity.SOFT_GATE,
+                "ai_analysis_aligned" if ai_alignment else "ai_analysis_contradicts_market_score",
+                analysis_regime,
+                direction.value,
+            )
+        else:
+            rule(
+                "alignment.minimum",
+                RuleOutcome.NOT_EVALUATED,
+                RuleSeverity.INFORMATIONAL,
+                "ai_analysis_unavailable",
+            )
+        temporal = decision_input.temporal_metrics
+        if temporal is None:
+            rule(
+                "temporal.validity",
+                RuleOutcome.PASSED,
+                RuleSeverity.INFORMATIONAL,
+                "temporal_history_building",
+            )
+        else:
+            consistency = temporal.historical_consistency
+            temporal_unstable = consistency.classification.value == "unstable"
+            rule(
+                "temporal.validity",
+                RuleOutcome.WARNING if temporal_unstable else RuleOutcome.PASSED,
+                RuleSeverity.SOFT_GATE if temporal_unstable else RuleSeverity.INFORMATIONAL,
+                "temporal_analysis_unstable" if temporal_unstable else "temporal_analysis_acceptable",
+                consistency.score,
+                50,
+            )
 
         if age > window.observe_max_age_seconds or score.status == ScoreStatus.STALE:
             rule("freshness.ai_score", RuleOutcome.FAILED, RuleSeverity.HARD_BLOCK, "ai_score_stale", age, window.observe_max_age_seconds)
@@ -183,7 +244,25 @@ class ConservativeSignalDecisionPolicy:
         else:
             state = DecisionState.ELIGIBLE
 
-        eligibility = self._eligibility(strength, score.confidence_score, score.data_quality_score, score.evidence_alignment_score, score.market_risk_score, freshness_factor)
+        ai_confidence = (
+            analysis.output.analysis_confidence * 100
+            if analysis_valid and analysis is not None and analysis.output is not None
+            else 0.0
+        )
+        temporal_confidence = (
+            decision_input.temporal_metrics.historical_consistency.score
+            if decision_input.temporal_metrics is not None
+            else 50.0
+        )
+        independent_confidence = (
+            score.confidence_score * 0.55
+            + ai_confidence * 0.20
+            + temporal_confidence * 0.15
+            + score.data_quality_score * 0.10
+            - (10.0 if not ai_alignment else 0.0)
+        )
+        independent_confidence = max(0.0, min(100.0, independent_confidence))
+        eligibility = self._eligibility(strength, independent_confidence, score.data_quality_score, score.evidence_alignment_score, score.market_risk_score, freshness_factor)
         validity = self.config.validity_seconds(state.value, decision_input.timeframe)
         fingerprint = decision_input.fingerprint(self.configuration_hash)
         blockers = tuple(self._reason(item) for item in evaluations if item.outcome == RuleOutcome.FAILED)
@@ -206,6 +285,87 @@ class ConservativeSignalDecisionPolicy:
         )
         previous = decision_input.history.latest
         active = decision_input.history.active
+        actionable = (
+            state == DecisionState.ELIGIBLE
+            and direction != DecisionDirection.NEUTRAL
+            and analysis_valid
+            and decision_input.current_price is not None
+            and decision_input.expected_move is not None
+        )
+        final_action = (
+            FinalSignalAction.BUY
+            if actionable and direction == DecisionDirection.BULLISH
+            else FinalSignalAction.SELL
+            if actionable and direction == DecisionDirection.BEARISH
+            else FinalSignalAction.WAIT
+        )
+        entry_low: float | None = None
+        entry_high: float | None = None
+        stop_loss: float | None = None
+        take_profit_targets: tuple[float, ...] = ()
+        risk_reward: float | None = None
+        invalidation: str | None = None
+        if actionable:
+            assert decision_input.current_price is not None
+            assert decision_input.expected_move is not None
+            price = decision_input.current_price
+            movement = decision_input.expected_move
+            entry_low = price - movement * 0.05
+            entry_high = price + movement * 0.05
+            if final_action == FinalSignalAction.BUY:
+                stop_loss = entry_low - movement * 0.5
+                take_profit_targets = (entry_high + movement, entry_high + movement * 1.5)
+                invalidation = f"Price closes below {stop_loss:.5f}"
+            else:
+                stop_loss = entry_high + movement * 0.5
+                take_profit_targets = (entry_low - movement, entry_low - movement * 1.5)
+                invalidation = f"Price closes above {stop_loss:.5f}"
+            entry_mid = (entry_low + entry_high) / 2
+            risk_reward = abs(take_profit_targets[0] - entry_mid) / abs(entry_mid - stop_loss)
+        ai_evidence: tuple[SignalEvidence, ...] = ()
+        contradictory_ai_evidence: tuple[SignalEvidence, ...] = ()
+        if analysis_valid and analysis is not None and analysis.output is not None:
+            regime_evidence = SignalEvidence(
+                evidence_id=stable_id("signal-evidence", fingerprint, "ai-regime"),
+                category="market_regime",
+                side="supporting" if ai_alignment else "contradicting",
+                claim=(
+                    f"Validated AI analysis classifies regime as "
+                    f"{analysis.output.market_regime.classification.value}."
+                ),
+                source_type="current_ai_analysis",
+                source_reference=str(analysis.analysis_id),
+                observed_value=analysis.output.market_regime.strength,
+                timestamp=analysis.analysis_timestamp,
+                timeframe=decision_input.timeframe,
+                reliability=analysis.output.market_regime.confidence,
+            )
+            if ai_alignment:
+                ai_evidence = (regime_evidence,)
+            else:
+                contradictory_ai_evidence = (regime_evidence,)
+        temporal_evidence: tuple[SignalEvidence, ...] = ()
+        if decision_input.temporal_metrics is not None:
+            consistency = decision_input.temporal_metrics.historical_consistency
+            temporal_evidence = (
+                SignalEvidence(
+                    evidence_id=stable_id("signal-evidence", fingerprint, "temporal"),
+                    category="historical_consistency",
+                    side="supporting",
+                    claim=consistency.reason,
+                    source_type="temporal_metric",
+                    source_reference=decision_input.temporal_context.version if decision_input.temporal_context else "1.0",
+                    observed_value=consistency.score,
+                    timestamp=decision_input.as_of,
+                    timeframe=decision_input.timeframe,
+                    reliability=min(1.0, consistency.sample_size / 10),
+                ),
+            )
+        historical_ids = (
+            tuple(item.analysis_id for item in decision_input.temporal_context.rolling_window)
+            if decision_input.temporal_context is not None
+            else ()
+        )
         return SignalDecision(
             decision_id=stable_id("decision", fingerprint, decision_input.mode.value),
             decision_key=f"{decision_input.instrument}:{decision_input.timeframe}:{direction.value}:{self.version}:{decision_input.mode.value}",
@@ -225,7 +385,7 @@ class ConservativeSignalDecisionPolicy:
             decision_policy_version=self.version,
             eligibility_score=eligibility,
             directional_strength=self._rounded(strength),
-            confidence_score=score.confidence_score,
+            confidence_score=self._rounded(independent_confidence),
             market_risk_score=score.market_risk_score,
             data_quality_score=score.data_quality_score,
             evidence_alignment_score=score.evidence_alignment_score,
@@ -245,6 +405,50 @@ class ConservativeSignalDecisionPolicy:
                 configuration_hash=self.configuration_hash,
                 ai_score_configuration_hash=score.metadata.configuration_hash if len(score.metadata.configuration_hash) == 64 else sha256(score.metadata.configuration_hash.encode()).hexdigest(),
             ),
+            final_action=final_action,
+            setup_family=(
+                "trend_continuation"
+                if actionable and ai_alignment
+                else "pullback_continuation"
+                if actionable
+                else None
+            ),
+            readiness=SignalReadiness.READY if actionable else SignalReadiness.WAITING,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            invalidation=invalidation,
+            stop_loss=stop_loss,
+            take_profit_targets=take_profit_targets,
+            risk_reward=risk_reward,
+            decision_reason=(
+                f"Deterministic synthesis produced {final_action.value} from market score, "
+                "validated AI interpretation, temporal consistency, and risk rules."
+            ),
+            opposite_direction_rejection=(
+                f"Opposite direction rejected because deterministic directional evidence is {direction.value}."
+                if direction != DecisionDirection.NEUTRAL
+                else "Neither direction has sufficient deterministic support."
+            ),
+            supporting_evidence=ai_evidence,
+            contradicting_evidence=contradictory_ai_evidence,
+            temporal_evidence=temporal_evidence,
+            source_lineage=SignalSourceLineage(
+                market_snapshot_id=decision_input.market_snapshot_id,
+                feature_snapshot_id=score.snapshot_id,
+                current_ai_analysis_id=analysis.analysis_id if analysis is not None else None,
+                historical_ai_analysis_ids=historical_ids,
+                quantitative_forecast_id=decision_input.quantitative_forecast_id,
+                strategy_evaluation_ids=tuple(item.rule_id for item in evaluations),
+                temporal_context_version=(
+                    decision_input.temporal_context.version
+                    if decision_input.temporal_context is not None
+                    else None
+                ),
+                signal_engine_version=self.config.engine_version,
+                strategy_configuration_version=self.config.configuration_version,
+                risk_policy_version=self.config.policy_version,
+            ),
+            publication_eligible=actionable,
         )
 
     def _threshold_rule(self, add: Callable[..., None], rule_id: str, value: float, observe: float, eligible: float, name: str) -> None:

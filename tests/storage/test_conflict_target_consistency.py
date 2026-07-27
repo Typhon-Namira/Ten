@@ -8,7 +8,6 @@ from sqlalchemy import Index, UniqueConstraint
 
 from backend.app.storage.models import Base
 from backend.app.storage.models import (
-    AIMarketForecastRecord,
     EconomicCalendarRevisionRecord,
     GuardrailEvaluationRecord,
     InstitutionalFlowSnapshotRecord,
@@ -67,11 +66,6 @@ SNAPSHOT_CONTRACTS = (
     (
         ROOT / "backend/app/quant_forecasting/repository.py",
         QuantForecastResultRecord,
-        ("request_id",),
-    ),
-    (
-        ROOT / "backend/app/ai_reasoning/repository.py",
-        AIMarketForecastRecord,
         ("request_id",),
     ),
     (

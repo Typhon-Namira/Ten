@@ -9,6 +9,11 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from backend.app.ai_reasoning.analysis import (
+    AIMarketAnalysis,
+    AIAnalysisTemporalContext,
+    TemporalAnalysisMetrics,
+)
 from backend.app.engines.ai_scoring_engine import AIScoreSnapshot
 
 NAMESPACE = UUID("81f5a757-4e58-5d38-b01d-ea7ec9f9e11d")
@@ -32,6 +37,52 @@ class DecisionDirection(StrEnum):
     BULLISH = "bullish"
     BEARISH = "bearish"
     NEUTRAL = "neutral"
+
+
+class FinalSignalAction(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+    WAIT = "WAIT"
+
+
+class SignalReadiness(StrEnum):
+    READY = "ready"
+    CONDITIONAL = "conditional"
+    WAITING = "waiting"
+    REJECTED = "rejected"
+
+
+class SignalEvidence(DecisionModel):
+    evidence_id: UUID
+    category: str
+    side: str
+    claim: str
+    source_type: str
+    source_reference: str
+    observed_value: JSONScalar = None
+    timestamp: datetime
+    timeframe: str | None = None
+    reliability: float = Field(ge=0, le=1)
+
+    @field_validator("timestamp")
+    @classmethod
+    def evidence_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("evidence timestamps must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class SignalSourceLineage(DecisionModel):
+    market_snapshot_id: UUID | None = None
+    feature_snapshot_id: UUID | None = None
+    current_ai_analysis_id: UUID | None = None
+    historical_ai_analysis_ids: tuple[UUID, ...] = ()
+    quantitative_forecast_id: UUID | None = None
+    strategy_evaluation_ids: tuple[str, ...] = ()
+    temporal_context_version: str | None = None
+    signal_engine_version: str
+    strategy_configuration_version: str
+    risk_policy_version: str
 
 
 class DecisionMode(StrEnum):
@@ -177,6 +228,13 @@ class SignalDecisionInput(DecisionModel):
     market_regime: MarketRegimeReference | None = None
     dependency_health: tuple[DependencyHealth, ...] = ()
     history: DecisionHistory = DecisionHistory()
+    current_ai_analysis: AIMarketAnalysis | None = None
+    temporal_context: AIAnalysisTemporalContext | None = None
+    temporal_metrics: TemporalAnalysisMetrics | None = None
+    market_snapshot_id: UUID | None = None
+    quantitative_forecast_id: UUID | None = None
+    current_price: float | None = Field(default=None, gt=0)
+    expected_move: float | None = Field(default=None, gt=0)
     mode: DecisionMode = DecisionMode.LIVE
     policy_name: str
     policy_version: str
@@ -198,6 +256,13 @@ class SignalDecisionInput(DecisionModel):
             raise ValueError("future economic context is prohibited")
         if self.market_regime and self.market_regime.as_of > self.as_of:
             raise ValueError("future market regime is prohibited")
+        if self.current_ai_analysis is not None:
+            if self.current_ai_analysis.analysis_timestamp > self.as_of:
+                raise ValueError("future AI analysis is prohibited")
+            if not self.current_ai_analysis.validation_passed:
+                raise ValueError("invalid AI analysis is prohibited")
+        if self.temporal_context is not None and self.temporal_context.as_of > self.as_of:
+            raise ValueError("future temporal context is prohibited")
         return self
 
     def fingerprint(self, configuration_hash: str) -> str:
@@ -300,6 +365,23 @@ class SignalDecision(DecisionModel):
     mode: DecisionMode
     explanation: DecisionExplanation
     metadata: DecisionMetadata
+    final_action: FinalSignalAction = FinalSignalAction.WAIT
+    setup_family: str | None = None
+    readiness: SignalReadiness = SignalReadiness.WAITING
+    entry_low: float | None = Field(default=None, gt=0)
+    entry_high: float | None = Field(default=None, gt=0)
+    invalidation: str | None = None
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit_targets: tuple[float, ...] = ()
+    risk_reward: float | None = Field(default=None, gt=0)
+    decision_reason: str = ""
+    opposite_direction_rejection: str = ""
+    supporting_evidence: tuple[SignalEvidence, ...] = ()
+    contradicting_evidence: tuple[SignalEvidence, ...] = ()
+    temporal_evidence: tuple[SignalEvidence, ...] = ()
+    risk_evidence: tuple[SignalEvidence, ...] = ()
+    source_lineage: SignalSourceLineage | None = None
+    publication_eligible: bool = False
 
     @field_validator("as_of", "decided_at", "valid_from", "valid_until")
     @classmethod
@@ -320,6 +402,28 @@ class SignalDecision(DecisionModel):
             raise ValueError("observe-only decisions require warnings and no blockers")
         if self.state in {DecisionState.INSUFFICIENT_EVIDENCE, DecisionState.INVALID} and not self.blockers:
             raise ValueError("non-actionable decisions require explicit limitations")
+        if self.final_action == FinalSignalAction.WAIT:
+            if any(
+                value is not None
+                for value in (
+                    self.entry_low,
+                    self.entry_high,
+                    self.stop_loss,
+                    self.risk_reward,
+                )
+            ) or self.take_profit_targets:
+                raise ValueError("WAIT cannot contain execution geometry")
+            if self.publication_eligible:
+                raise ValueError("WAIT cannot be publication eligible")
+        elif (
+            self.entry_low is None
+            or self.entry_high is None
+            or self.stop_loss is None
+            or not self.take_profit_targets
+            or not self.invalidation
+            or self.risk_reward is None
+        ):
+            raise ValueError("actionable signal requires entry, invalidation, stop, targets, and risk/reward")
         for value in (self.eligibility_score, self.directional_strength, self.confidence_score, self.market_risk_score, self.data_quality_score, self.evidence_alignment_score):
             if not math.isfinite(value):
                 raise ValueError("decision scores must be finite")
@@ -348,6 +452,13 @@ class DecisionRequest(BaseModel):
     decision_policy_version: str | None = Field(default=None, pattern=r"^\d+\.\d+\.\d+$")
     persist: bool = True
     publish_events: bool = True
+    current_ai_analysis: AIMarketAnalysis | None = None
+    temporal_context: AIAnalysisTemporalContext | None = None
+    temporal_metrics: TemporalAnalysisMetrics | None = None
+    market_snapshot_id: UUID | None = None
+    quantitative_forecast_id: UUID | None = None
+    current_price: float | None = Field(default=None, gt=0)
+    expected_move: float | None = Field(default=None, gt=0)
 
     @field_validator("instrument")
     @classmethod

@@ -39,6 +39,7 @@ from backend.app.ai_reasoning.validation import (
 )
 from backend.app.core.config import YamlConfigRepository
 from backend.app.core.exceptions import AIProviderRequestError
+from tests.ai_reasoning.test_analysis_architecture_v2 import output as analysis_output
 from tests.ai_reasoning.test_ai_reasoning_lifecycle import NOW, state_and_quant
 
 
@@ -51,13 +52,7 @@ class CapturingClient(AIProviderClient):
         self.calls = 0
         self.payloads: list[dict[str, Any]] = []
         self.requests: list[dict[str, Any]] = []
-        self.response = response or {
-            "decision": "WAIT",
-            "confidence": 0.8,
-            "rationale": "No actionable setup.",
-            "risk_flags": [],
-            "proposal": None,
-        }
+        self.response = response or analysis_output().model_dump(mode="python")
 
     async def available_models(self) -> tuple[str, ...]:
         return ("gpt-oss-120b",)
@@ -316,48 +311,20 @@ async def test_oversized_context_is_rejected_before_provider_and_not_typed_as_cr
 
 
 @pytest.mark.asyncio
-async def test_compact_wait_response_and_output_limit() -> None:
-    state, quant, config, request = await _request()
-    client = CapturingClient()
-    response = await _provider(client, config).reason(request, prompt_version=request.prompt_version)
-    validated = StructuredAIOutputValidator(
-        SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-    ).validate(response.raw_output, request=request, state=state, quant=quant)
-
-    assert response.raw_output == {
-        "decision": "WAIT",
-        "confidence": 0.8,
-        "rationale": "No actionable setup.",
-        "risk_flags": [],
-        "proposal": None,
-    }
-    assert validated.forecast.status.value == "non_actionable"
-    assert validated.forecast.dominant_direction is not None
-    assert validated.proposal is None
-    assert validated.degraded_validation is False
-    assert validated.repaired_fields == ()
-    assert validated.validation_issues == ()
-    assert client.calls == 1
-    assert config.max_tokens == 1_000
-
-
-@pytest.mark.asyncio
 async def test_groq_llama_uses_json_object_mode_with_application_validation() -> None:
-    state, quant, config, request = await _request()
-    client = CapturingClient()
+    _, _, config, request = await _request()
+    client = CapturingClient(analysis_output().model_dump(mode="python"))
 
     response = await _groq_provider(client, config).reason(
         request,
         prompt_version=request.prompt_version,
     )
-    validated = StructuredAIOutputValidator(
-        SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-    ).validate(response.raw_output, request=request, state=state, quant=quant)
+    validated = StructuredAIOutputValidator().validate_analysis(response.raw_output)
 
     assert client.calls == 1
     assert client.requests[0]["response_schema"] is None
     assert response.model_identifier == "llama-3.1-8b-instant"
-    assert validated.forecast.status.value == "non_actionable"
+    assert validated.market_regime.classification.value == "bullish"
 
 
 @pytest.mark.asyncio
@@ -370,15 +337,7 @@ async def test_groq_malformed_json_gets_exactly_one_correction_attempt() -> None
         content = (
             "not-json"
             if len(bodies) == 1
-            else json.dumps(
-                {
-                    "decision": "WAIT",
-                    "confidence": 0.8,
-                    "rationale": "No actionable setup.",
-                    "risk_flags": [],
-                    "proposal": None,
-                }
-            )
+            else json.dumps(analysis_output().model_dump(mode="python"))
         )
         return httpx.Response(
             200,
@@ -397,26 +356,22 @@ async def test_groq_malformed_json_gets_exactly_one_correction_attempt() -> None
         prompt_version=request.prompt_version,
     )
 
-    assert response.raw_output["decision"] == "WAIT"
+    assert response.raw_output["market_regime"]["classification"] == "bullish"
     assert len(bodies) == 2
     assert all(body["response_format"] == {"type": "json_object"} for body in bodies)
 
 
 @pytest.mark.asyncio
-async def test_groq_missing_rationale_gets_one_explicit_schema_correction() -> None:
-    state, quant, config, request = await _request()
+async def test_groq_missing_executive_summary_gets_one_explicit_schema_correction() -> None:
+    _, _, config, request = await _request()
     bodies: list[dict[str, Any]] = []
 
     def handler(http_request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(http_request.content))
-        output: dict[str, Any] = {
-            "decision": "WAIT",
-            "confidence": 0.8,
-            "risk_flags": [],
-            "proposal": None,
-        }
+        output = analysis_output().model_dump(mode="python")
+        output.pop("executive_summary", None)
         if len(bodies) == 2:
-            output["rationale"] = "No actionable setup."
+            output["executive_summary"] = "Validated analysis summary."
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(output)}}]},
@@ -433,40 +388,27 @@ async def test_groq_missing_rationale_gets_one_explicit_schema_correction() -> N
         request,
         prompt_version=request.prompt_version,
     )
-    validated = StructuredAIOutputValidator(
-        SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-    ).validate(response.raw_output, request=request, state=state, quant=quant)
+    validated = StructuredAIOutputValidator().validate_analysis(response.raw_output)
 
     assert len(bodies) == 2
-    assert "provider_response.rationale" in bodies[1]["messages"][0]["content"]
-    assert response.raw_output["rationale"] == "No actionable setup."
-    assert validated.degraded_validation is False
+    assert "provider_response.executive_summary" in bodies[1]["messages"][0]["content"]
+    assert response.raw_output["executive_summary"] == "Validated analysis summary."
+    assert validated.executive_summary == "Validated analysis summary."
 
 
 @pytest.mark.asyncio
-async def test_groq_missing_setup_family_is_visible_raw_and_corrected_before_validation(
+async def test_groq_missing_regime_classification_is_visible_and_corrected(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    state, quant, config, request = await _request()
+    _, _, config, request = await _request()
     bodies: list[dict[str, Any]] = []
 
     def handler(http_request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(http_request.content))
-        proposal: dict[str, Any] = {
-            "entry_low": 3300,
-            "entry_high": 3301,
-            "stop_loss": 3295,
-            "take_profit_levels": [3311],
-        }
+        output = analysis_output().model_dump(mode="python")
+        output["market_regime"].pop("classification", None)
         if len(bodies) == 2:
-            proposal["setup_family"] = "trend_continuation"
-        output = {
-            "decision": "LONG",
-            "confidence": 0.78,
-            "rationale": "Constructive trend continuation.",
-            "risk_flags": [],
-            "proposal": proposal,
-        }
+            output["market_regime"]["classification"] = "bullish"
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(output)}}]},
@@ -484,9 +426,7 @@ async def test_groq_missing_setup_family_is_visible_raw_and_corrected_before_val
             request,
             prompt_version=request.prompt_version,
         )
-        validated = StructuredAIOutputValidator(
-            SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-        ).validate(response.raw_output, request=request, state=state, quant=quant)
+        validated = StructuredAIOutputValidator().validate_analysis(response.raw_output)
 
     raw_logs = [
         record
@@ -502,31 +442,25 @@ async def test_groq_missing_setup_family_is_visible_raw_and_corrected_before_val
     )
 
     assert len(bodies) == 2
-    assert "setup_family" not in first_raw["proposal"]
+    assert "classification" not in first_raw["market_regime"]
     assert first_decoded == first_raw
-    assert "provider_response.proposal.setup_family" in bodies[1]["messages"][0]["content"]
-    assert json.loads(normalized_log.normalized_provider_json)["proposal"]["setup_family"] == (
-        "trend_continuation"
-    )
-    assert validated.forecast.selected_setup_family == "trend_continuation"
-    assert validated.proposal is not None
-    assert validated.degraded_validation is False
+    assert "provider_response.market_regime.classification" in bodies[1]["messages"][0][
+        "content"
+    ]
+    assert json.loads(normalized_log.normalized_provider_json)["market_regime"][
+        "classification"
+    ] == "bullish"
+    assert validated.market_regime.classification.value == "bullish"
 
 
 @pytest.mark.asyncio
 async def test_groq_echoed_schema_type_is_rejected_then_removed_by_correction() -> None:
-    state, quant, config, request = await _request()
+    _, _, config, request = await _request()
     bodies: list[dict[str, Any]] = []
 
     def handler(http_request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(http_request.content))
-        output: dict[str, Any] = {
-            "decision": "WAIT",
-            "confidence": 0.8,
-            "rationale": "No actionable setup.",
-            "risk_flags": [],
-            "proposal": None,
-        }
+        output = analysis_output().model_dump(mode="python")
         if len(bodies) == 1:
             output["schema_type"] = "ten_ai_reasoning_response"
         return httpx.Response(
@@ -545,16 +479,14 @@ async def test_groq_echoed_schema_type_is_rejected_then_removed_by_correction() 
         request,
         prompt_version=request.prompt_version,
     )
-    validated = StructuredAIOutputValidator(
-        SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-    ).validate(response.raw_output, request=request, state=state, quant=quant)
+    validated = StructuredAIOutputValidator().validate_analysis(response.raw_output)
 
     assert len(bodies) == 2
     correction_prompt = bodies[1]["messages"][0]["content"]
     assert "provider_response.schema_type" in correction_prompt
     assert "Remove that property" in correction_prompt
     assert "schema_type" not in response.raw_output
-    assert validated.degraded_validation is False
+    assert validated.analysis_confidence > 0
 
 
 @pytest.mark.asyncio
@@ -588,175 +520,62 @@ async def test_groq_second_malformed_json_fails_closed_without_more_attempts() -
 
 
 @pytest.mark.asyncio
-async def test_compact_response_missing_required_field_is_rejected() -> None:
-    state, quant, _, request = await _request()
-    raw = {
-        "decision": "WAIT",
-        "rationale": "No setup.",
-        "risk_flags": [],
-        "proposal": None,
-    }
+async def test_analysis_response_missing_required_field_is_rejected() -> None:
+    raw = analysis_output().model_dump(mode="python")
+    raw.pop("analysis_confidence")
 
     with pytest.raises(StructuredAIOutputError) as captured:
-        StructuredAIOutputValidator(
-            SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-        ).validate(raw, request=request, state=state, quant=quant)
+        StructuredAIOutputValidator().validate_analysis(raw)
 
     assert captured.value.first_issue is not None
-    assert captured.value.first_issue.field_path == "provider_response.confidence"
+    assert captured.value.first_issue.field_path == "provider_response.analysis_confidence"
 
 
 @pytest.mark.asyncio
-async def test_compact_response_additional_property_is_rejected() -> None:
-    state, quant, _, request = await _request()
-    raw = {
-        "decision": "WAIT",
-        "confidence": 0.8,
-        "rationale": "No setup.",
-        "risk_flags": [],
-        "proposal": None,
-        "unexpected": "must-not-be-accepted",
-    }
+async def test_analysis_response_additional_property_is_rejected() -> None:
+    raw = analysis_output().model_dump(mode="python")
+    raw["unexpected"] = "must-not-be-accepted"
 
     with pytest.raises(StructuredAIOutputError) as captured:
-        StructuredAIOutputValidator(
-            SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-        ).validate(raw, request=request, state=state, quant=quant)
+        StructuredAIOutputValidator().validate_analysis(raw)
 
     assert captured.value.first_issue is not None
     assert captured.value.first_issue.field_path == "provider_response.unexpected"
 
 
 @pytest.mark.asyncio
-async def test_response_contract_exposes_only_canonical_setup_family_ids() -> None:
+async def test_response_contract_is_analysis_only_and_strict() -> None:
     _, _, config, _ = await _request()
-    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
 
     contract = _provider(CapturingClient(), config)._response_contract()
 
-    assert contract["allowed_setup_families"] == [
-        item.setup_family_id for item in registry.all()
-    ]
-    assert "copy setup_family exactly from allowed_setup_families" in contract["rules"]
-    assert len(contract["allowed_setup_families"]) == 9
-    assert contract["required_top_level_fields"] == [
-        "decision",
-        "confidence",
-        "rationale",
-        "risk_flags",
-        "proposal",
-    ]
-    assert contract["proposal_contract"]["required_fields"] == [
-        "setup_family",
-        "entry_low",
-        "entry_high",
-        "stop_loss",
-        "take_profit_levels",
-    ]
-    assert contract["proposal_contract"]["setup_family"]["nullable"] is False
     assert contract["json_schema"] == reasoning_response_schema()
-    assert "schema_type" not in contract
-    assert "schema_version" not in contract
+    encoded = json.dumps(contract)
+    for prohibited in ("setup_family", "entry_low", "stop_loss", "take_profit_levels"):
+        assert prohibited not in encoded
+    assert "market_regime" in contract["json_schema"]["properties"]
+    assert "do not recommend BUY, SELL, WAIT" in " ".join(contract["rules"])
 
 
 def test_prompt_templates_explicitly_require_every_provider_wire_field() -> None:
     directory = Path("backend/app/ai_reasoning/prompts")
 
-    for name in ("new_market_analysis_v1.txt", "existing_signal_monitoring_v1.txt"):
+    for name in ("deep_market_analysis_v2.txt", "existing_position_market_analysis_v2.txt"):
         prompt = (directory / name).read_text(encoding="utf-8")
         for field in (
-            "decision",
-            "confidence",
-            "rationale",
-            "risk_flags",
-            "proposal",
-            "setup_family",
-            "entry_low",
-            "entry_high",
-            "stop_loss",
-            "take_profit_levels",
+            "market_regime",
+            "higher_timeframe_context",
+            "market_structure",
+            "liquidity_analysis",
+            "supply_demand_analysis",
+            "momentum_analysis",
+            "volatility_analysis",
+            "analysis_confidence",
+            "executive_summary",
         ):
             assert field in prompt
-        assert "Do not emit response-contract metadata" in prompt
-
-
-def _actionable_compact_response(setup_family: str) -> dict[str, Any]:
-    return {
-        "decision": "LONG",
-        "confidence": 0.78,
-        "rationale": "Constructive trend continuation.",
-        "risk_flags": [],
-        "proposal": {
-            "setup_family": setup_family,
-            "entry_low": 3300,
-            "entry_high": 3301,
-            "stop_loss": 3295,
-            "take_profit_levels": [3311, 3320],
-        },
-    }
-
-
-@pytest.mark.asyncio
-async def test_known_setup_family_alias_is_repaired_without_weakening_registry_validation() -> None:
-    state, quant, _, request = await _request()
-    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-
-    validated = StructuredAIOutputValidator(registry).validate(
-        _actionable_compact_response("Trend Following"),
-        request=request,
-        state=state,
-        quant=quant,
-    )
-
-    assert validated.forecast.selected_setup_family == "trend_continuation"
-    assert validated.proposal is not None
-    assert "proposal.setup_family" in validated.repaired_fields
-    assert validated.degraded_validation is True
-
-
-@pytest.mark.asyncio
-async def test_canonical_compact_response_is_valid_without_artificial_repair() -> None:
-    state, quant, _, request = await _request()
-    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-
-    validated = StructuredAIOutputValidator(registry).validate(
-        _actionable_compact_response("trend_continuation"),
-        request=request,
-        state=state,
-        quant=quant,
-    )
-
-    assert validated.forecast.selected_setup_family == "trend_continuation"
-    assert validated.proposal is not None
-    assert validated.repaired_fields == ()
-    assert validated.validation_issues == ()
-    assert validated.degraded_validation is False
-
-
-@pytest.mark.asyncio
-async def test_unknown_setup_family_preserves_reasoning_but_suppresses_unsafe_proposal() -> None:
-    state, quant, _, request = await _request()
-    registry = SetupFamilyRegistry.from_yaml(YamlConfigRepository())
-
-    validated = StructuredAIOutputValidator(registry).validate(
-        _actionable_compact_response("invented_smart_money_setup"),
-        request=request,
-        state=state,
-        quant=quant,
-    )
-
-    assert validated.forecast.dominant_direction.value == "BUY"
-    assert validated.forecast.reasoning_summary == "Constructive trend continuation."
-    assert validated.forecast.selected_setup_family is None
-    assert validated.forecast.setup_readiness.value == "not_ready"
-    assert validated.forecast.execution_confidence == 0
-    assert validated.proposal is None
-    assert validated.degraded_validation is True
-    first_issue = json.loads(validated.validation_issues[0])
-    assert first_issue["field_path"] == "proposal.setup_family"
-    assert first_issue["actual_value"] == "invented_smart_money_setup"
-    assert first_issue["validator_name"] == "setup_family_registry"
-    assert first_issue["recoverable"] is True
+        assert "do not emit response-contract metadata" in prompt.lower()
+        assert "Never output BUY, SELL, WAIT" in prompt
 
 
 def test_setup_family_registry_never_fuzzy_maps_unknown_values() -> None:

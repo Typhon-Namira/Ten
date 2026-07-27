@@ -7,13 +7,12 @@ from datetime import datetime
 import logging
 from typing import Protocol
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import (
-    AIForecastEvidenceLinkRecord,
-    AIForecastScenarioRecord,
+    AIMarketAnalysisRecord,
     AIMarketForecastRecord,
     AIReasoningRequestRecord,
     AIReasoningCycleLockRecord,
@@ -30,6 +29,7 @@ from backend.app.storage.models import (
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .llm_context import build_llm_analysis_context
+from .analysis import AIMarketAnalysis, AnalysisStatus
 from .models import (
     AIMarketForecast,
     AIReasoningRequest,
@@ -75,11 +75,40 @@ class AIReasoningRepository(Protocol):
         self,
         idempotency_key: str,
     ) -> tuple[AIMarketForecast, AISignalProposal | None] | None: ...
+    async def analysis_for_reasoning_cycle(self, idempotency_key: str) -> AIMarketAnalysis | None: ...
+    async def complete_analysis_cycle(
+        self,
+        idempotency_key: str,
+        request_id: object,
+        analysis_id: object,
+        status: str,
+        completed_at: datetime,
+    ) -> None: ...
+    async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis: ...
+    async def latest_analysis(self, instrument: str, timeframe: str | None = None) -> AIMarketAnalysis | None: ...
+    async def analyses_before(
+        self,
+        instrument: str,
+        timeframe: str,
+        at: datetime,
+        limit: int,
+    ) -> tuple[AIMarketAnalysis, ...]: ...
+    async def get_analysis(self, analysis_id: object) -> AIMarketAnalysis | None: ...
+    async def analysis_for_state(self, market_state_id: object) -> AIMarketAnalysis | None: ...
+    async def list_analyses(
+        self,
+        instrument: str,
+        timeframe: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        status: AnalysisStatus | None,
+        provider: str | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[AIMarketAnalysis, ...]: ...
     async def save_setup_family(self, value: SetupFamilyDefinition, registry_version: str) -> SetupFamilyDefinition: ...
     async def save_request(self, value: AIReasoningRequest) -> AIReasoningRequest: ...
     async def save_failure(self, value: LLMStructuredOutputFailure) -> LLMStructuredOutputFailure: ...
-    async def save_forecast(self, value: AIMarketForecast) -> AIMarketForecast: ...
-    async def save_proposal(self, value: AISignalProposal) -> AISignalProposal: ...
     async def latest_forecast(self, instrument: str) -> AIMarketForecast | None: ...
     async def latest_proposal(self) -> AISignalProposal | None: ...
     async def request_for_state(self, market_state_id: object) -> PersistedAIReasoningRequest | None: ...
@@ -103,6 +132,7 @@ class InMemoryAIReasoningRepository:
         self.requests: dict[object, AIReasoningRequest] = {}
         self.failures: dict[object, LLMStructuredOutputFailure] = {}
         self.forecasts: dict[object, AIMarketForecast] = {}
+        self.analyses: dict[object, AIMarketAnalysis] = {}
         self.proposals: dict[object, AISignalProposal] = {}
         self.signals: dict[object, ManagedSignal] = {}
         self.transitions: dict[object, SignalStateTransition] = {}
@@ -174,6 +204,121 @@ class InMemoryAIReasoningRepository:
             )
             return forecast, proposal
 
+    async def analysis_for_reasoning_cycle(self, idempotency_key: str) -> AIMarketAnalysis | None:
+        async with self._lock:
+            cycle = self.reasoning_cycles.get(idempotency_key)
+            if cycle is None or cycle.get("status") not in {"completed", "failed"}:
+                return None
+            return self.analyses.get(cycle.get("analysis_id"))
+
+    async def complete_analysis_cycle(
+        self,
+        idempotency_key: str,
+        request_id: object,
+        analysis_id: object,
+        status: str,
+        completed_at: datetime,
+    ) -> None:
+        async with self._lock:
+            self.reasoning_cycles[idempotency_key].update(
+                request_id=request_id,
+                analysis_id=analysis_id,
+                status=status,
+                completed_at=completed_at,
+            )
+
+    async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis:
+        async with self._lock:
+            existing = next(
+                (
+                    item
+                    for item in self.analyses.values()
+                    if item.request_id == value.request_id
+                    or (
+                        item.symbol == value.symbol
+                        and item.timeframe == value.timeframe
+                        and item.cycle_id == value.cycle_id
+                        and item.schema_version == value.schema_version
+                    )
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing
+            self.analyses[value.analysis_id] = value
+        return value
+
+    async def latest_analysis(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> AIMarketAnalysis | None:
+        async with self._lock:
+            values = [
+                item
+                for item in self.analyses.values()
+                if item.symbol == instrument
+                and (timeframe is None or item.timeframe == timeframe)
+                and item.status == AnalysisStatus.AVAILABLE
+            ]
+        return max(values, key=lambda item: item.analysis_timestamp, default=None)
+
+    async def analyses_before(
+        self,
+        instrument: str,
+        timeframe: str,
+        at: datetime,
+        limit: int,
+    ) -> tuple[AIMarketAnalysis, ...]:
+        async with self._lock:
+            values = [
+                item
+                for item in self.analyses.values()
+                if item.symbol == instrument
+                and item.timeframe == timeframe
+                and item.analysis_timestamp < at
+                and item.status == AnalysisStatus.AVAILABLE
+            ]
+        return tuple(sorted(values, key=lambda item: item.analysis_timestamp, reverse=True)[:limit])
+
+    async def get_analysis(self, analysis_id: object) -> AIMarketAnalysis | None:
+        async with self._lock:
+            return self.analyses.get(analysis_id)
+
+    async def analysis_for_state(self, market_state_id: object) -> AIMarketAnalysis | None:
+        async with self._lock:
+            values = [
+                item
+                for item in self.analyses.values()
+                if item.market_snapshot_id == market_state_id
+            ]
+        return max(values, key=lambda item: item.analysis_timestamp, default=None)
+
+    async def list_analyses(
+        self,
+        instrument: str,
+        timeframe: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        status: AnalysisStatus | None,
+        provider: str | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[AIMarketAnalysis, ...]:
+        async with self._lock:
+            values = [
+                item
+                for item in self.analyses.values()
+                if item.symbol == instrument
+                and (timeframe is None or item.timeframe == timeframe)
+                and (start is None or item.analysis_timestamp >= start)
+                and (end is None or item.analysis_timestamp <= end)
+                and (status is None or item.status == status)
+                and (provider is None or item.provider_metadata.provider == provider)
+            ]
+        ordered = sorted(values, key=lambda item: item.analysis_timestamp, reverse=True)
+        return tuple(ordered[offset : offset + limit])
+
     async def save_setup_family(self, value: SetupFamilyDefinition, registry_version: str) -> SetupFamilyDefinition:
         async with self._lock:
             self.setup_families[(value.setup_family_id, value.version)] = value
@@ -187,19 +332,6 @@ class InMemoryAIReasoningRepository:
     async def save_failure(self, value: LLMStructuredOutputFailure) -> LLMStructuredOutputFailure:
         async with self._lock:
             self.failures[value.failure_id] = value
-        return value
-
-    async def save_forecast(self, value: AIMarketForecast) -> AIMarketForecast:
-        async with self._lock:
-            existing = self.forecasts.get(value.request_id)
-            if existing is not None:
-                return existing
-            self.forecasts[value.request_id] = value
-            return value
-
-    async def save_proposal(self, value: AISignalProposal) -> AISignalProposal:
-        async with self._lock:
-            self.proposals[value.proposal_id] = value
         return value
 
     async def latest_forecast(self, instrument: str) -> AIMarketForecast | None:
@@ -389,6 +521,193 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         )
 
     @scoped_session
+    async def analysis_for_reasoning_cycle(self, idempotency_key: str) -> AIMarketAnalysis | None:
+        lock = (
+            await self.session.scalars(
+                select(AIReasoningCycleLockRecord)
+                .where(
+                    AIReasoningCycleLockRecord.idempotency_key == idempotency_key,
+                    AIReasoningCycleLockRecord.status.in_(("completed", "failed")),
+                )
+                .limit(1)
+            )
+        ).first()
+        if lock is None or lock.analysis_id is None:
+            return None
+        record = await self.session.get(AIMarketAnalysisRecord, lock.analysis_id)
+        return AIMarketAnalysis.model_validate(record.payload) if record is not None else None
+
+    @scoped_session
+    async def complete_analysis_cycle(
+        self,
+        idempotency_key: str,
+        request_id: object,
+        analysis_id: object,
+        status: str,
+        completed_at: datetime,
+    ) -> None:
+        await self.session.execute(
+            update(AIReasoningCycleLockRecord)
+            .where(AIReasoningCycleLockRecord.idempotency_key == idempotency_key)
+            .values(
+                request_id=request_id,
+                analysis_id=analysis_id,
+                status=status,
+                completed_at=completed_at,
+            )
+        )
+        await self.session.commit()
+
+    @scoped_session
+    async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis:
+        statement = (
+            insert(AIMarketAnalysisRecord)
+            .values(
+                analysis_id=value.analysis_id,
+                request_id=value.request_id,
+                cycle_id=value.cycle_id,
+                market_snapshot_id=value.market_snapshot_id,
+                quantitative_forecast_id=value.quantitative_forecast_id,
+                symbol=value.symbol,
+                timeframe=value.timeframe,
+                analysis_timestamp=value.analysis_timestamp,
+                status=value.status.value,
+                schema_version=value.schema_version,
+                provider=value.provider_metadata.provider,
+                validation_passed=value.validation_passed,
+                payload=value.model_dump(mode="json"),
+                created_at=value.created_at,
+            )
+            .on_conflict_do_nothing()
+            .returning(AIMarketAnalysisRecord.analysis_id)
+        )
+        identifier = (await self.session.execute(statement)).scalar_one_or_none()
+        if identifier is None:
+            record = (
+                await self.session.scalars(
+                    select(AIMarketAnalysisRecord)
+                    .where(
+                        or_(
+                            AIMarketAnalysisRecord.request_id == value.request_id,
+                            (
+                                (AIMarketAnalysisRecord.symbol == value.symbol)
+                                & (AIMarketAnalysisRecord.timeframe == value.timeframe)
+                                & (AIMarketAnalysisRecord.cycle_id == value.cycle_id)
+                                & (
+                                    AIMarketAnalysisRecord.schema_version
+                                    == value.schema_version
+                                )
+                            ),
+                        )
+                    )
+                    .limit(1)
+                )
+            ).first()
+            if record is None:
+                await self.session.rollback()
+                raise RuntimeError("AI analysis conflict did not resolve to a persisted row")
+            await self.session.commit()
+            return AIMarketAnalysis.model_validate(record.payload)
+        await self.session.commit()
+        return value
+
+    @scoped_session
+    async def latest_analysis(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> AIMarketAnalysis | None:
+        query = select(AIMarketAnalysisRecord).where(
+            AIMarketAnalysisRecord.symbol == instrument,
+            AIMarketAnalysisRecord.status == AnalysisStatus.AVAILABLE.value,
+        )
+        if timeframe is not None:
+            query = query.where(AIMarketAnalysisRecord.timeframe == timeframe)
+        record = (
+            await self.session.scalars(
+                query.order_by(
+                    AIMarketAnalysisRecord.analysis_timestamp.desc(),
+                    AIMarketAnalysisRecord.analysis_id.desc(),
+                ).limit(1)
+            )
+        ).first()
+        return AIMarketAnalysis.model_validate(record.payload) if record is not None else None
+
+    @scoped_session
+    async def analyses_before(
+        self,
+        instrument: str,
+        timeframe: str,
+        at: datetime,
+        limit: int,
+    ) -> tuple[AIMarketAnalysis, ...]:
+        records = (
+            await self.session.scalars(
+                select(AIMarketAnalysisRecord)
+                .where(
+                    AIMarketAnalysisRecord.symbol == instrument,
+                    AIMarketAnalysisRecord.timeframe == timeframe,
+                    AIMarketAnalysisRecord.analysis_timestamp < at,
+                    AIMarketAnalysisRecord.status == AnalysisStatus.AVAILABLE.value,
+                )
+                .order_by(AIMarketAnalysisRecord.analysis_timestamp.desc())
+                .limit(limit)
+            )
+        ).all()
+        return tuple(AIMarketAnalysis.model_validate(item.payload) for item in records)
+
+    @scoped_session
+    async def get_analysis(self, analysis_id: object) -> AIMarketAnalysis | None:
+        record = await self.session.get(AIMarketAnalysisRecord, analysis_id)
+        return AIMarketAnalysis.model_validate(record.payload) if record is not None else None
+
+    @scoped_session
+    async def analysis_for_state(self, market_state_id: object) -> AIMarketAnalysis | None:
+        record = (
+            await self.session.scalars(
+                select(AIMarketAnalysisRecord)
+                .where(AIMarketAnalysisRecord.market_snapshot_id == market_state_id)
+                .order_by(AIMarketAnalysisRecord.analysis_timestamp.desc())
+                .limit(1)
+            )
+        ).first()
+        return AIMarketAnalysis.model_validate(record.payload) if record is not None else None
+
+    @scoped_session
+    async def list_analyses(
+        self,
+        instrument: str,
+        timeframe: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        status: AnalysisStatus | None,
+        provider: str | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[AIMarketAnalysis, ...]:
+        query = select(AIMarketAnalysisRecord).where(
+            AIMarketAnalysisRecord.symbol == instrument
+        )
+        if timeframe is not None:
+            query = query.where(AIMarketAnalysisRecord.timeframe == timeframe)
+        if start is not None:
+            query = query.where(AIMarketAnalysisRecord.analysis_timestamp >= start)
+        if end is not None:
+            query = query.where(AIMarketAnalysisRecord.analysis_timestamp <= end)
+        if status is not None:
+            query = query.where(AIMarketAnalysisRecord.status == status.value)
+        if provider is not None:
+            query = query.where(AIMarketAnalysisRecord.provider == provider)
+        records = (
+            await self.session.scalars(
+                query.order_by(AIMarketAnalysisRecord.analysis_timestamp.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+        ).all()
+        return tuple(AIMarketAnalysis.model_validate(item.payload) for item in records)
+
+    @scoped_session
     async def save_setup_family(self, value: SetupFamilyDefinition, registry_version: str) -> SetupFamilyDefinition:
         await self.session.execute(
             insert(AISetupFamilyVersionRecord)
@@ -434,71 +753,6 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 created_at=value.created_at,
             )
             .on_conflict_do_nothing(index_elements=["failure_id"])
-        )
-        await self.session.commit()
-        return value
-
-    @scoped_session
-    async def save_forecast(self, value: AIMarketForecast) -> AIMarketForecast:
-        statement = (
-            insert(AIMarketForecastRecord)
-            .values(
-                forecast_id=value.forecast_id,
-                request_id=value.request_id,
-                market_state_id=value.market_state_id,
-                quantitative_forecast_id=value.quantitative_forecast_id,
-                status=value.status.value,
-                dominant_direction=value.dominant_direction.value if value.dominant_direction else None,
-                selected_setup_family=value.selected_setup_family,
-                payload=value.model_dump(mode="json"),
-                generated_at=value.generated_at,
-            )
-            .on_conflict_do_nothing(index_elements=["request_id"])
-            .returning(AIMarketForecastRecord.forecast_id)
-        )
-        forecast_id = (await self.session.execute(statement)).scalar_one_or_none()
-        persisted = value
-        if forecast_id is None:
-            record = (
-                await self.session.scalars(
-                    select(AIMarketForecastRecord).where(AIMarketForecastRecord.request_id == value.request_id).limit(1)
-                )
-            ).first()
-            if record is None:
-                await self.session.rollback()
-                raise RuntimeError("AI forecast conflict did not resolve to a persisted row")
-            forecast_id = record.forecast_id
-            persisted = AIMarketForecast.model_validate(record.payload)
-        for ordinal, scenario in enumerate(persisted.alternative_scenarios):
-            await self.session.execute(
-                insert(AIForecastScenarioRecord)
-                .values(forecast_id=forecast_id, ordinal=ordinal, scenario_name=scenario.name, payload=scenario.model_dump(mode="json"))
-                .on_conflict_do_nothing(index_elements=["forecast_id", "ordinal"])
-            )
-        for role, evidence_ids in (("supporting", persisted.supporting_evidence_ids), ("contradicting", persisted.contradicting_evidence_ids)):
-            for evidence_id in evidence_ids:
-                await self.session.execute(
-                    insert(AIForecastEvidenceLinkRecord)
-                    .values(forecast_id=forecast_id, evidence_id=evidence_id, role=role)
-                    .on_conflict_do_nothing(index_elements=["forecast_id", "evidence_id", "role"])
-                )
-        await self.session.commit()
-        return persisted
-
-    @scoped_session
-    async def save_proposal(self, value: AISignalProposal) -> AISignalProposal:
-        await self.session.execute(
-            insert(AISignalProposalRecord)
-            .values(
-                proposal_id=value.proposal_id,
-                forecast_id=value.forecast_id,
-                market_state_id=value.market_state_id,
-                structural_opportunity_key=value.structural_opportunity_key,
-                recommended_action=value.recommended_action.value,
-                payload=value.model_dump(mode="json"),
-                created_at=value.created_at,
-            )
-            .on_conflict_do_nothing(index_elements=["proposal_id"])
         )
         await self.session.commit()
         return value

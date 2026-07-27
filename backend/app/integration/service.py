@@ -247,6 +247,9 @@ class FullSystemIntegrationService:
             tracker.begin(symbol, timeframe.value, boundary, correlation_id=str(correlation))
             tracker.mark(symbol, timeframe.value, boundary, ("candle_received", "candle_normalized", "stored_in_database"), "success")
         outputs: list[tuple[str, object]] = []
+        validated_analysis = None
+        market_state = None
+        quantitative_forecast = None
         failure_stage = "market_data_history"
         # Everything from here through the final `tracker.complete(...)` below is one failure
         # domain: ANY exception in this span — including `market_data.history()` and
@@ -361,7 +364,10 @@ class FullSystemIntegrationService:
                                     "dispatch_mode": "inline_integration_worker",
                                 },
                             )
-                            await self.ai_reasoning.process(market_state, quantitative_forecast)
+                            validated_analysis = await self.ai_reasoning.process(
+                                market_state,
+                                quantitative_forecast,
+                            )
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)
             failure_stage = "evidence_assembly"
@@ -388,7 +394,58 @@ class FullSystemIntegrationService:
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("ai_scoring", "confidence_calculation"), "success")
                 failure_stage = "signal_decision"
-                decision = await self.signal_decision.evaluate(DecisionRequest(instrument=symbol, timeframe=timeframe.value, ai_score_snapshot_id=score.snapshot_id, as_of=boundary, mode=decision_mode))
+                forecast_predictions = (
+                    quantitative_forecast.predictions
+                    if quantitative_forecast is not None
+                    and hasattr(quantitative_forecast, "predictions")
+                    else ()
+                )
+                prediction = forecast_predictions[0] if forecast_predictions else None
+                decision = await self.signal_decision.evaluate(
+                    DecisionRequest(
+                        instrument=symbol,
+                        timeframe=timeframe.value,
+                        ai_score_snapshot_id=score.snapshot_id,
+                        as_of=boundary,
+                        mode=decision_mode,
+                        current_ai_analysis=(
+                            validated_analysis.analysis
+                            if validated_analysis is not None
+                            else None
+                        ),
+                        temporal_context=(
+                            validated_analysis.temporal_context
+                            if validated_analysis is not None
+                            else None
+                        ),
+                        temporal_metrics=(
+                            validated_analysis.temporal_metrics
+                            if validated_analysis is not None
+                            else None
+                        ),
+                        market_snapshot_id=(
+                            getattr(market_state, "state_id", None)
+                            if market_state is not None
+                            else None
+                        ),
+                        quantitative_forecast_id=(
+                            getattr(quantitative_forecast, "result_id", None)
+                            if quantitative_forecast is not None
+                            else None
+                        ),
+                        current_price=(
+                            getattr(prediction, "reference_price", None)
+                            if prediction
+                            else None
+                        ),
+                        expected_move=(
+                            getattr(prediction, "expected_base_movement", None)
+                            if prediction
+                            and getattr(prediction, "expected_base_movement", 0) > 0
+                            else None
+                        ),
+                    )
+                )
                 self.last_decision_persisted_at = self.clock()
                 logger.info(
                     "decision.persist.completed",
@@ -436,7 +493,15 @@ class FullSystemIntegrationService:
             blocker_codes = tuple(item.reason_code for item in decision.blockers)
             warning_codes = tuple(item.reason_code for item in decision.warnings)
             semantic = canonical_hash({"snapshot": snapshot.semantic_hash, "score": score.metadata.input_fingerprint, "decision": decision.input_fingerprint, "policies": (score.policy_version, decision.decision_policy_version)})
-            if not publish_signal or decision.state.value != DecisionState.ELIGIBLE.value:
+            if (
+                not publish_signal
+                or decision.state.value != DecisionState.ELIGIBLE.value
+                or not getattr(
+                    decision,
+                    "publication_eligible",
+                    decision.state.value == DecisionState.ELIGIBLE.value,
+                )
+            ):
                 failure_stage = "mark_processed"
                 await self.repository.mark_processed(envelope.event_id)
                 failure_stage = "trace_completed"

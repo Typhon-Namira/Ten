@@ -4,12 +4,9 @@ Root cause this exists to fix: `dashboard.py` used to derive the `ai_reasoning` 
 from "does a persisted `AIMarketForecast` row exist for this market state" — `None` always meant
 `status: "pending", reason: "ai_reasoning_not_yet_persisted_for_cycle"`, with no way to tell a
 genuinely-fresh cycle apart from one whose provider attempt already failed. The same collapse-to-"pending"
-problem existed one level down: `guardrails`/`final_action` showed `"awaiting_ai_proposal"`
-forever whenever the AI legitimately concluded WAIT (no proposal, or a proposal whose
-`recommended_action` is `WAIT` — `AIReasoningLifecycleService.apply_proposal` deliberately never
-creates a managed signal for a WAIT proposal, so `final_decision.evaluate()` is never called and
-no `FinalSystemAction` row is ever persisted for that cycle) — a *correct, terminal, non-actionable
-outcome* was indistinguishable from a step that just hadn't run yet.
+problem existed one level down: historical `guardrails`/`final_action` records could show
+`"awaiting_ai_proposal"` forever when a legacy AI result was non-actionable. That terminal
+historical outcome was indistinguishable from a step that had not run yet.
 
 Every function here is pure (no I/O, no `Request`/session access) so it can be unit-tested without
 a database or FastAPI app; `dashboard.py` is the only caller and owns fetching the rows these
@@ -162,9 +159,7 @@ def derive_ai_proposal_stage(
 
 
 def no_actionable_proposal(proposal: Any | None) -> bool:
-    """A missing proposal and an explicit WAIT proposal are the same outcome for status purposes:
-    `AIReasoningLifecycleService.apply_proposal` deliberately returns `None` (no managed signal)
-    for `ProposalAction.WAIT`, so neither ever reaches `final_decision.evaluate()`."""
+    """Treat missing and historical WAIT proposals as non-actionable dashboard records."""
     return proposal is None or _value(getattr(proposal, "recommended_action", None)) == "wait"
 
 

@@ -11,7 +11,7 @@ import json
 import logging
 import random
 from time import perf_counter
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -25,8 +25,8 @@ from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.core.exceptions import AIProviderFailureDetails, AIProviderRequestError
 
 from .llm_context import build_llm_analysis_context
+from .analysis import AIAnalysisOutput
 from .models import AIReasoningRequest
-from .validation import CompactAIReasoningOutput
 
 logger = logging.getLogger(__name__)
 AI_REASONING_RESPONSE_SCHEMA_TYPE = "ten_ai_reasoning_response"
@@ -100,47 +100,20 @@ class AIReasoningProvider(Protocol):
 
 
 def reasoning_response_schema() -> dict[str, Any]:
-    """Strict schema accepted by both configured OpenAI-compatible providers."""
+    """Strict analysis-only schema accepted by both configured providers."""
 
-    proposal = {
-        "type": ["object", "null"],
-        "properties": {
-            "setup_family": {"type": "string"},
-            "entry_low": {"type": "number", "exclusiveMinimum": 0},
-            "entry_high": {"type": "number", "exclusiveMinimum": 0},
-            "stop_loss": {"type": "number", "exclusiveMinimum": 0},
-            "take_profit_levels": {
-                "type": "array",
-                "items": {"type": "number", "exclusiveMinimum": 0},
-                "minItems": 1,
-                "maxItems": 3,
-            },
-        },
-        "required": [
-            "setup_family",
-            "entry_low",
-            "entry_high",
-            "stop_loss",
-            "take_profit_levels",
-        ],
-        "additionalProperties": False,
-    }
-    return {
-        "type": "object",
-        "properties": {
-            "decision": {"type": "string", "enum": ["LONG", "SHORT", "WAIT"]},
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "rationale": {"type": "string", "maxLength": 500},
-            "risk_flags": {
-                "type": "array",
-                "items": {"type": "string"},
-                "maxItems": 5,
-            },
-            "proposal": proposal,
-        },
-        "required": ["decision", "confidence", "rationale", "risk_flags", "proposal"],
-        "additionalProperties": False,
-    }
+    def compact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: compact(item)
+                for key, item in value.items()
+                if key not in {"title", "default"}
+            }
+        if isinstance(value, list):
+            return [compact(item) for item in value]
+        return value
+
+    return cast(dict[str, Any], compact(AIAnalysisOutput.model_json_schema()))
 
 
 class _OpenAICompatibleReasoningProvider:
@@ -349,43 +322,16 @@ class _OpenAICompatibleReasoningProvider:
     def _response_contract(self) -> dict[str, Any]:
         schema = reasoning_response_schema()
         return {
-            "allowed_setup_families": list(self.setup_family_ids),
-            "required_top_level_fields": [
-                "decision",
-                "confidence",
-                "rationale",
-                "risk_flags",
-                "proposal",
-            ],
-            "proposal_contract": {
-                "required_when": "decision is LONG or SHORT",
-                "null_when": "decision is WAIT",
-                "required_fields": [
-                    "setup_family",
-                    "entry_low",
-                    "entry_high",
-                    "stop_loss",
-                    "take_profit_levels",
-                ],
-                "setup_family": {
-                    "required": True,
-                    "nullable": False,
-                    "allowed_values": list(self.setup_family_ids),
-                },
-            },
             # Groq JSON Object Mode does not receive response_format.json_schema,
             # so the complete schema must be present in the prompt payload.
             "json_schema": schema,
             "rules": [
                 "return exactly one JSON object matching the supplied schema",
+                "return no markdown and no prose outside the JSON object",
                 "do not include chain-of-thought or private reasoning",
-                "WAIT requires proposal=null",
-                (
-                    "LONG/SHORT requires proposal.setup_family, entry_low, entry_high, "
-                    "stop_loss, and take_profit_levels"
-                ),
-                "proposal.setup_family must never be null when proposal is an object",
-                "copy setup_family exactly from allowed_setup_families",
+                "do not recommend BUY, SELL, WAIT, LONG, SHORT, HOLD, or any trading action",
+                "do not emit a proposal, setup family, entry, stop loss, target, readiness, or publication decision",
+                "reference only evidence present in analysis_context and never invent evidence",
             ],
         }
 
@@ -430,7 +376,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             correction_reason = exc.details.reason_code
         else:
             try:
-                CompactAIReasoningOutput.model_validate(response.raw_output)
+                AIAnalysisOutput.model_validate(response.raw_output)
                 return response
             except ValidationError as exc:
                 errors = exc.errors()
@@ -459,8 +405,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                     correction_instruction = (
                         f"The previous JSON failed schema validation at {field_path}: {expected}. "
                         "Return that exact missing field and every required property in json_schema. "
-                        "For LONG or SHORT, proposal.setup_family is mandatory, non-null, and must "
-                        "exactly match one allowed_setup_families value."
+                        "Return analysis only and do not add signal, proposal, execution, or publication fields."
                     )
                 correction_reason = "structured_output_invalid"
 

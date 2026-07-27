@@ -1120,6 +1120,12 @@ class AIReasoningCycleLockRecord(Base):
         nullable=True,
         index=True,
     )
+    analysis_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_analyses.analysis_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -1136,6 +1142,56 @@ class AIMarketForecastRecord(Base):
     selected_setup_family: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AIMarketAnalysisRecord(Base):
+    """Immutable analysis-only provider result introduced by architecture v2."""
+
+    __tablename__ = "ai_market_analyses"
+    __table_args__ = (
+        Index(
+            "ux_ai_market_analysis_cycle",
+            "symbol",
+            "timeframe",
+            "cycle_id",
+            "schema_version",
+            unique=True,
+        ),
+        Index(
+            "ix_ai_market_analysis_history",
+            "symbol",
+            "timeframe",
+            "analysis_timestamp",
+        ),
+    )
+
+    analysis_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_reasoning_requests.request_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    market_snapshot_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    quantitative_forecast_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quantitative_forecasts.result_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    analysis_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    schema_version: Mapped[str] = mapped_column(String(32), index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    validation_passed: Mapped[bool] = mapped_column(Boolean, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class AIForecastScenarioRecord(Base):

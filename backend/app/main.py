@@ -68,18 +68,16 @@ from backend.app.quant_forecasting.features import PointInTimeFeatureExtractor
 from backend.app.quant_forecasting.provider import DeterministicBaselineProvider
 from backend.app.quant_forecasting.repository import InMemoryQuantForecastRepository, QuantForecastRepository, SqlAlchemyQuantForecastRepository
 from backend.app.quant_forecasting.service import QuantForecastService
-from backend.app.ai_reasoning import (
-    AIReasoningConfig,
-    AIProviderRouter,
-    AIReasoningService,
-    CerebrasProvider,
-    GroqProvider,
+from backend.app.ai_reasoning.config import AIReasoningConfig
+from backend.app.ai_reasoning.provider import AIProviderRouter, CerebrasProvider, GroqProvider
+from backend.app.ai_reasoning.repository import (
+    AIReasoningRepository,
     InMemoryAIReasoningRepository,
-    SetupFamilyRegistry,
     SqlAlchemyAIReasoningRepository,
 )
-from backend.app.ai_reasoning.repository import AIReasoningRepository
 from backend.app.ai_reasoning.request_builder import AIReasoningRequestBuilder
+from backend.app.ai_reasoning.service import AIReasoningService
+from backend.app.ai_reasoning.setup_families import SetupFamilyRegistry
 from backend.app.ai_reasoning.validation import StructuredAIOutputValidator
 from backend.app.final_decision import (
     FinalDecisionRepository,
@@ -501,14 +499,12 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 ai_reasoning_config,
                 model_identifier=settings.cerebras_model,
             ),
-            StructuredAIOutputValidator(setup_family_registry),
-            setup_family_registry,
+            StructuredAIOutputValidator(),
             ai_reasoning_config,
             shadow_enabled=ai_centric_shadow_mode,
             proposals_enabled=ai_proposals_enabled,
             monitoring_enabled=ai_monitoring_enabled,
             final_decision=app.state.final_decision_service,
-            market_sessions=app.state.market_data_service.sessions,
         )
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
