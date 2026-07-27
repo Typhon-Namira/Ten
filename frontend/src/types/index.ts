@@ -767,6 +767,18 @@ export interface AIReasoningDashboard {
     total_tokens: number | null
     successful_requests: number
     failed_requests: number
+    legacy_cumulative_daily: {
+      provider_http_calls: number
+      total_tokens: number | null
+      successful_requests: number
+      failed_requests: number
+    }
+    five_minute_policy: {
+      provider_http_calls: number
+      total_tokens: number | null
+      successful_requests: number
+      failed_requests: number
+    }
   }
   performance: Record<string, unknown> | null
   production_readiness: {
@@ -791,9 +803,13 @@ export interface AIReasoningDashboard {
     provider_available: boolean | null
     provider: string
     primary_provider: string
-    active_provider: string
-    fallback_status: 'ACTIVE' | 'STANDBY'
-    provider_readiness: 'healthy' | 'degraded' | 'failed'
+    active_provider: string | null
+    latest_successful_provider: string | null
+    latest_successful_analysis_at: string | null
+    latest_eligible_cycle_at: string | null
+    fallback_status: string
+    provider_readiness: 'healthy' | 'degraded' | 'unhealthy' | 'idle' | 'configuration_error'
+    operations_status: 'healthy' | 'degraded' | 'unhealthy' | 'idle' | 'configuration_error'
     model_identifier: string
     prompt_version: string
     latest_latency_ms: number | null
@@ -805,12 +821,14 @@ export interface AIReasoningDashboard {
     shadow_only: boolean
     awaiting_guardrail_validation: boolean
     providers: Record<string, {
-      status: 'HEALTHY' | 'STANDBY' | 'RATE_LIMITED' | 'QUOTA_EXHAUSTED' | 'AUTH_FAILED' | 'UNAVAILABLE' | 'CIRCUIT_OPEN' | 'UNCONFIGURED'
+      status: 'HEALTHY' | 'STANDBY' | 'RATE_LIMITED' | 'QUOTA_EXHAUSTED' | 'AUTH_FAILED' | 'UNAVAILABLE' | 'CIRCUIT_OPEN' | 'CONFIGURATION_ERROR' | 'UNCONFIGURED'
       model: string
       last_success_at: string | null
       last_failure_at: string | null
       circuit_open_until: string | null
       last_failure_code: string | null
+      last_http_status: number | null
+      last_provider_error_code: string | null
     }>
     call_control: {
       analysis_timeframe: 'M5'

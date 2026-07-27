@@ -448,6 +448,27 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
     )
 
     usage_rows = await request.app.state.final_decision_repository.usage_for_date(now.date().isoformat())
+    policy_usage_rows = tuple(
+        item
+        for item in usage_rows
+        if item.generation_parameters.get("telemetry_policy") == "five_minute_v1"
+    )
+    legacy_usage_rows = tuple(
+        item for item in usage_rows if item not in policy_usage_rows
+    )
+
+    def usage_summary(rows: tuple[Any, ...]) -> dict[str, int | None]:
+        return {
+            "provider_http_calls": sum(item.request_count for item in rows),
+            "total_tokens": (
+                sum(item.total_tokens or 0 for item in rows)
+                if any(item.total_tokens is not None for item in rows)
+                else None
+            ),
+            "successful_requests": sum(item.success for item in rows),
+            "failed_requests": sum(not item.success for item in rows),
+        }
+
     def usage_parameter(name: str) -> int:
         return sum(
             int(item.generation_parameters.get(name, 0))
@@ -471,6 +492,8 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         ),
         "successful_requests": sum(item.success for item in usage_rows),
         "failed_requests": sum(not item.success for item in usage_rows),
+        "legacy_cumulative_daily": usage_summary(legacy_usage_rows),
+        "five_minute_policy": usage_summary(policy_usage_rows),
     }
     calibration = await request.app.state.quant_forecast_repository.latest_calibration(
         request.app.state.quant_forecast_service.config.model_name

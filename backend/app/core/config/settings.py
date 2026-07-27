@@ -144,7 +144,36 @@ class Settings(BaseSettings):
         if parsed.scheme != "https" or not parsed.netloc:
             variable = f"TEN_{(info.field_name or 'AI_PROVIDER_BASE_URL').upper()}"
             raise ValueError(f"{variable} must be an absolute HTTPS URL")
+        normalized_path = parsed.path.rstrip("/").lower()
+        if normalized_path.endswith("/v1/v1") or normalized_path.endswith(
+            "/chat/completions"
+        ):
+            variable = f"TEN_{(info.field_name or 'AI_PROVIDER_BASE_URL').upper()}"
+            raise ValueError(
+                f"{variable} must be a base URL without duplicated /v1 "
+                "or /chat/completions"
+            )
         return value.rstrip("/")
+
+    @field_validator("cerebras_api_key", "groq_api_key")
+    @classmethod
+    def validate_ai_provider_key(
+        cls,
+        value: str | None,
+        info: ValidationInfo,
+    ) -> str | None:
+        if value is None or value == "":
+            return None
+        variable = f"TEN_{(info.field_name or 'AI_PROVIDER_API_KEY').upper()}"
+        if value != value.strip() or (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in {'"', "'"}
+        ):
+            raise ValueError(
+                f"{variable} must not contain surrounding whitespace or quotes"
+            )
+        return value
 
     @field_validator("cerebras_model", "groq_model")
     @classmethod

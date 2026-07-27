@@ -8,6 +8,7 @@ import json
 import logging
 from time import perf_counter
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -66,6 +67,7 @@ def _reason_code(
         402: "quota_exhausted",
         403: "authentication_failed",
         404: "model_unavailable",
+        408: "request_timeout",
         413: "request_too_large",
         429: "rate_limited",
     }
@@ -99,6 +101,48 @@ def _error_fields(
         _safe_text(metadata.get("error_type"), limit=128),
         _safe_text(metadata.get("provider_code"), limit=128),
     )
+
+
+def _sanitized_error_body(response: httpx.Response) -> str | None:
+    """Return bounded provider error diagnostics without echoing request content."""
+
+    code, message, error_type, provider_code = _error_fields(response)
+    if any((code, message, error_type, provider_code)):
+        return json.dumps(
+            {
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "error_type": error_type,
+                    "provider_code": provider_code,
+                }
+            },
+            separators=(",", ":"),
+        )
+    content_type = _safe_text(response.headers.get("content-type"), limit=128)
+    return (
+        f"provider_error_without_safe_fields body_bytes={len(response.content)} "
+        f"content_type={content_type or 'unknown'}"
+    )
+
+
+def _network_categories(exc: httpx.RequestError) -> tuple[str | None, str]:
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "connect_timeout", "timeout"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "read_timeout", "timeout"
+    if isinstance(exc, httpx.WriteTimeout):
+        return "write_timeout", "timeout"
+    if isinstance(exc, httpx.PoolTimeout):
+        return "pool_timeout", "timeout"
+    text = str(exc).lower()
+    if "name or service not known" in text or "getaddrinfo" in text or "dns" in text:
+        return None, "dns"
+    if "ssl" in text or "tls" in text or "certificate" in text:
+        return None, "tls"
+    if isinstance(exc, httpx.ConnectError):
+        return None, "connection"
+    return None, "network"
 
 
 @dataclass(frozen=True)
@@ -163,6 +207,7 @@ class AIProviderClient(Protocol):
         attempt: int = 1,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
+        attempt_type: str | None = None,
     ) -> AIProviderCompletion: ...
 
 
@@ -348,12 +393,14 @@ class HttpAIProviderClient:
         attempt: int = 1,
         fallback_used: bool = False,
         fallback_reason: str | None = None,
+        attempt_type: str | None = None,
     ) -> AIProviderCompletion:
         if not self.api_key:
             raise ConfigurationError(
                 f"TEN_{self.provider.upper()}_API_KEY is required for {self.provider}"
             )
         endpoint = f"{self.base_url}/chat/completions"
+        endpoint_parts = urlsplit(endpoint)
         body = build_request_body(
             system_prompt=system_prompt,
             payload=payload,
@@ -381,6 +428,9 @@ class HttpAIProviderClient:
             "fallback_reason": fallback_reason,
             "request_id": request_id,
             "endpoint": endpoint,
+            "endpoint_host": endpoint_parts.netloc,
+            "endpoint_path": endpoint_parts.path,
+            "http_method": "POST",
             "status_code": None,
             "error_type": None,
             "sanitized_error_code": None,
@@ -390,6 +440,8 @@ class HttpAIProviderClient:
             "rate_limit_reset": None,
             "exception_type": None,
             "network_error_category": None,
+            "timeout_category": None,
+            "attempt_type": attempt_type,
         }
         logger.info(
             "ai_provider.request.started",
@@ -426,19 +478,34 @@ class HttpAIProviderClient:
                 started=started,
                 fallback_used=fallback_used,
                 fallback_reason=fallback_reason,
+                serialized_request_bytes=metrics.serialized_request_bytes,
+                estimated_input_tokens=metrics.estimated_input_tokens,
+                attempt_type=attempt_type,
             ) from exc
         except httpx.RequestError as exc:
+            timeout_category, network_category = _network_categories(exc)
             details = AIProviderFailureDetails(
                 provider=self.provider,
-                reason_code="provider_unavailable",
+                reason_code=(
+                    "request_timeout"
+                    if timeout_category is not None
+                    else "provider_unavailable"
+                ),
                 phase="http_request",
                 endpoint=endpoint,
                 model=model,
+                endpoint_host=endpoint_parts.netloc,
+                endpoint_path=endpoint_parts.path,
                 request_id=request_id,
                 cycle_id=cycle_id,
                 error_message=_safe_text(str(exc)),
                 elapsed_ms=(perf_counter() - started) * 1000,
                 exception_class=type(exc).__name__,
+                serialized_request_bytes=metrics.serialized_request_bytes,
+                estimated_input_tokens=metrics.estimated_input_tokens,
+                timeout_category=timeout_category,
+                network_error_category=network_category,
+                attempt_type=attempt_type,
                 fallback_used=fallback_used,
                 fallback_reason=fallback_reason,
             )
@@ -481,11 +548,17 @@ class HttpAIProviderClient:
                 phase="response_decoding",
                 endpoint=endpoint,
                 model=model,
+                endpoint_host=endpoint_parts.netloc,
+                endpoint_path=endpoint_parts.path,
                 request_id=request_id,
                 cycle_id=cycle_id,
                 http_status=response.status_code,
                 content_type=_safe_text(headers.get("content-type"), limit=128),
                 body_length=len(response.content),
+                sanitized_response_body=_sanitized_error_body(response),
+                serialized_request_bytes=metrics.serialized_request_bytes,
+                estimated_input_tokens=metrics.estimated_input_tokens,
+                attempt_type=attempt_type,
                 provider_request_id=provider_request_id,
                 elapsed_ms=elapsed,
                 exception_class=type(exc).__name__,
@@ -501,10 +574,16 @@ class HttpAIProviderClient:
                 phase="domain_parsing",
                 endpoint=endpoint,
                 model=model,
+                endpoint_host=endpoint_parts.netloc,
+                endpoint_path=endpoint_parts.path,
                 request_id=request_id,
                 cycle_id=cycle_id,
                 http_status=response.status_code,
                 body_length=len(response.content),
+                sanitized_response_body=_sanitized_error_body(response),
+                serialized_request_bytes=metrics.serialized_request_bytes,
+                estimated_input_tokens=metrics.estimated_input_tokens,
+                attempt_type=attempt_type,
                 provider_request_id=provider_request_id,
                 elapsed_ms=elapsed,
                 exception_class="TypeError",
@@ -564,11 +643,16 @@ class HttpAIProviderClient:
         started: float,
         fallback_used: bool,
         fallback_reason: str | None,
+        serialized_request_bytes: int,
+        estimated_input_tokens: int,
+        attempt_type: str | None,
     ) -> AIProviderRequestError:
         error_code, error_message, metadata_error_type, metadata_provider_code = (
             _error_fields(response)
         )
         headers = response.headers
+        endpoint = f"{self.base_url}/chat/completions"
+        endpoint_parts = urlsplit(endpoint)
         request_limit = _safe_text(headers.get("x-ratelimit-limit-requests"))
         request_remaining = _safe_text(headers.get("x-ratelimit-remaining-requests"))
         request_reset = _safe_text(headers.get("x-ratelimit-reset-requests"))
@@ -584,8 +668,10 @@ class HttpAIProviderClient:
                 metadata_error_type,
             ),
             phase="http_request",
-            endpoint=f"{self.base_url}/chat/completions",
+            endpoint=endpoint,
             model=model,
+            endpoint_host=endpoint_parts.netloc,
+            endpoint_path=endpoint_parts.path,
             request_id=request_id,
             cycle_id=cycle_id,
             http_status=response.status_code,
@@ -595,6 +681,10 @@ class HttpAIProviderClient:
             metadata_provider_code=metadata_provider_code,
             content_type=_safe_text(headers.get("content-type"), limit=128),
             body_length=len(response.content),
+            sanitized_response_body=_sanitized_error_body(response),
+            serialized_request_bytes=serialized_request_bytes,
+            estimated_input_tokens=estimated_input_tokens,
+            attempt_type=attempt_type,
             retry_after=_safe_text(headers.get("retry-after")),
             rate_limit_limit=_safe_text(
                 request_limit or headers.get("x-ratelimit-limit")
@@ -637,11 +727,14 @@ class HttpAIProviderClient:
         attempt: int = 1,
     ) -> None:
         logger.error(
-            "ai_provider.request.failed",
+            "ai_provider.request.failure_diagnostic",
             extra={
                 "provider": details.provider,
                 "request_id": details.request_id,
                 "model": details.model,
+                "endpoint_host": details.endpoint_host,
+                "endpoint_path": details.endpoint_path,
+                "http_method": details.http_method,
                 "instrument": instrument,
                 "cycle_id": details.cycle_id,
                 "ums_boundary": ums_boundary,
@@ -650,6 +743,9 @@ class HttpAIProviderClient:
                 "fallback_reason": details.fallback_reason,
                 "status_code": details.http_status,
                 "error_type": details.metadata_error_type,
+                "provider_error_code": details.error_code,
+                "provider_error_type": details.metadata_error_type,
+                "provider_response": details.sanitized_response_body,
                 "sanitized_error_code": details.reason_code,
                 "latency_ms": details.elapsed_ms,
                 "provider_request_id": details.provider_request_id,
@@ -664,10 +760,13 @@ class HttpAIProviderClient:
                 "exception_type": details.exception_class,
                 "safe_exception_message": details.error_message,
                 "network_error_category": (
-                    details.exception_class
-                    if details.phase == "http_request"
-                    and details.http_status is None
-                    else None
+                    details.network_error_category
                 ),
+                "timeout_category": details.timeout_category,
+                "serialized_request_bytes": details.serialized_request_bytes,
+                "estimated_input_tokens": details.estimated_input_tokens,
+                "response_content_type": details.content_type,
+                "response_body_length": details.body_length,
+                "attempt_type": details.attempt_type,
             },
         )

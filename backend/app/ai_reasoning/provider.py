@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 import json
@@ -51,6 +51,7 @@ class ProviderStatus(StrEnum):
     AUTH_FAILED = "AUTH_FAILED"
     UNAVAILABLE = "UNAVAILABLE"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
+    CONFIGURATION_ERROR = "CONFIGURATION_ERROR"
     UNCONFIGURED = "UNCONFIGURED"
 
 
@@ -62,6 +63,9 @@ class ProviderRuntimeState:
     last_failure_at: datetime | None = None
     circuit_open_until: datetime | None = None
     last_failure_code: str | None = None
+    last_http_status: int | None = None
+    last_provider_error_code: str | None = None
+    recent_failures: list[datetime] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -73,6 +77,8 @@ class ProviderRuntimeState:
                 self.circuit_open_until.isoformat() if self.circuit_open_until else None
             ),
             "last_failure_code": self.last_failure_code,
+            "last_http_status": self.last_http_status,
+            "last_provider_error_code": self.last_provider_error_code,
         }
 
 
@@ -271,6 +277,15 @@ class _OpenAICompatibleReasoningProvider:
         # This increment is intentionally adjacent to the transport call. Preflight
         # rejections, scheduler ticks, cache reads, and dashboard reads never reach it.
         self.http_calls += 1
+        attempt_type = (
+            "correction"
+            if correction_instruction
+            else "fallback"
+            if fallback_used
+            else "retry"
+            if attempt > 1
+            else "primary"
+        )
         completion = await self.client.complete_json(
             system_prompt=system_prompt,
             payload=payload,
@@ -292,6 +307,7 @@ class _OpenAICompatibleReasoningProvider:
             attempt=attempt,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
+            attempt_type=attempt_type,
         )
         return self._response(completion, started, fallback_used, fallback_reason)
 
@@ -486,6 +502,8 @@ class AIProviderRouter:
         maximum_retries: int = 1,
         circuit_seconds: float = 300,
         auth_circuit_seconds: float = 3600,
+        circuit_failure_threshold: int = 2,
+        circuit_rolling_window_seconds: float = 60,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.primary = primary
@@ -493,6 +511,8 @@ class AIProviderRouter:
         self.maximum_retries = maximum_retries
         self.circuit_seconds = circuit_seconds
         self.auth_circuit_seconds = auth_circuit_seconds
+        self.circuit_failure_threshold = circuit_failure_threshold
+        self.circuit_rolling_window_seconds = circuit_rolling_window_seconds
         self.clock = clock or (lambda: datetime.now(UTC))
         self.states = {
             "cerebras": ProviderRuntimeState(
@@ -504,7 +524,8 @@ class AIProviderRouter:
                 fallback.model,
             ),
         }
-        self.active_provider = "cerebras"
+        self.active_provider: str | None = None
+        self.latest_successful_analysis_at: datetime | None = None
         self.retry_attempts = 0
         self.fallback_attempts = 0
 
@@ -558,6 +579,7 @@ class AIProviderRouter:
                 self._success("cerebras")
                 return response
             except AIProviderRequestError as exc:
+                self._failure("cerebras", exc.details)
                 logger.warning(
                     "ai_provider.primary.failed",
                     extra={
@@ -573,15 +595,15 @@ class AIProviderRouter:
                 )
                 if not self._fallback_allowed(exc.details):
                     raise
-                self._failure("cerebras", exc.details)
                 fallback_reason = f"cerebras_{exc.details.reason_code}"
         else:
+            primary_state = self.states["cerebras"]
             fallback_reason = (
                 "cerebras_unconfigured"
-                if self.states["cerebras"].status == ProviderStatus.UNCONFIGURED
+                if primary_state.status == ProviderStatus.UNCONFIGURED
                 else (
-                    f"cerebras_{self.states['cerebras'].last_failure_code}"
-                    if self.states["cerebras"].last_failure_code
+                    f"cerebras_{primary_state.last_failure_code}"
+                    if primary_state.last_failure_code
                     else None
                 )
                 or "cerebras_circuit_open"
@@ -603,6 +625,25 @@ class AIProviderRouter:
                     ),
                 },
             )
+            if primary_state.status == ProviderStatus.UNCONFIGURED or (
+                primary_state.last_failure_code
+                not in {"rate_limited", "provider_unavailable", "request_timeout"}
+            ):
+                raise AIProviderRequestError(
+                    AIProviderFailureDetails(
+                        provider="cerebras",
+                        reason_code=(
+                            primary_state.last_failure_code
+                            or "provider_unconfigured"
+                        ),
+                        phase="provider_routing",
+                        endpoint=f"{self.primary.client.base_url}/chat/completions",
+                        model=self.primary.model,
+                        request_id=str(request.request_id),
+                        cycle_id=str(request.cycle_id),
+                        exception_class="AIProviderRoutingError",
+                    )
+                )
 
         logger.info(
             "ai_provider.fallback.started",
@@ -644,8 +685,7 @@ class AIProviderRouter:
                 fallback_reason=fallback_reason,
             )
         except AIProviderRequestError as exc:
-            if self._fallback_allowed(exc.details):
-                self._failure("groq", exc.details)
+            self._failure("groq", exc.details)
             details = replace(
                 exc.details,
                 fallback_used=True,
@@ -669,7 +709,6 @@ class AIProviderRouter:
             )
             raise AIProviderRequestError(details) from exc
         self._success("groq")
-        self.active_provider = "groq"
         logger.info(
             "ai_provider.fallback.completed",
             extra={
@@ -709,7 +748,10 @@ class AIProviderRouter:
                 )
             except AIProviderRequestError as exc:
                 last_error = exc
-                retryable = exc.details.reason_code == "provider_unavailable"
+                retryable = exc.details.reason_code in {
+                    "provider_unavailable",
+                    "request_timeout",
+                }
                 if not retryable or attempt > self.maximum_retries:
                     raise
                 await asyncio.sleep(random.uniform(0.05, 0.15))
@@ -738,7 +780,6 @@ class AIProviderRouter:
         state.last_success_at = self.clock()
         state.circuit_open_until = None
         state.last_failure_code = None
-        self.active_provider = provider
         if was_open:
             logger.info(
                 "ai_provider.circuit.closed",
@@ -750,9 +791,26 @@ class AIProviderRouter:
         now = self.clock()
         state.last_failure_at = now
         state.last_failure_code = details.reason_code
+        state.last_http_status = details.http_status
+        state.last_provider_error_code = details.error_code
+        state.recent_failures = [
+            value
+            for value in state.recent_failures
+            if (now - value).total_seconds() <= self.circuit_rolling_window_seconds
+        ]
+        state.recent_failures.append(now)
         duration = self.circuit_seconds
+        configuration_failure = details.reason_code in {
+            "authentication_failed",
+            "invalid_request",
+            "model_unavailable",
+            "provider_unconfigured",
+        }
         if details.reason_code == "authentication_failed":
-            state.status = ProviderStatus.AUTH_FAILED
+            state.status = ProviderStatus.CONFIGURATION_ERROR
+            duration = self.auth_circuit_seconds
+        elif details.reason_code in {"invalid_request", "model_unavailable", "provider_unconfigured"}:
+            state.status = ProviderStatus.CONFIGURATION_ERROR
             duration = self.auth_circuit_seconds
         elif details.reason_code == "quota_exhausted":
             state.status = ProviderStatus.QUOTA_EXHAUSTED
@@ -763,15 +821,29 @@ class AIProviderRouter:
             state.status = ProviderStatus.RATE_LIMITED
         else:
             state.status = ProviderStatus.UNAVAILABLE
-        state.circuit_open_until = self._reset_at(details, now, duration)
+        should_open = (
+            configuration_failure
+            or details.reason_code
+            in {"quota_exhausted", "token_quota_exhausted", "rate_limited"}
+            or len(state.recent_failures) >= self.circuit_failure_threshold
+        )
+        state.circuit_open_until = (
+            self._reset_at(details, now, duration) if should_open else None
+        )
         logger.warning(
-            "ai_provider.circuit.opened",
+            "ai_provider.failure.recorded",
             extra={
                 "provider": provider,
                 "model": state.model,
                 "status": state.status.value,
                 "sanitized_error_code": details.reason_code,
-                "circuit_open_until": state.circuit_open_until.isoformat(),
+                "circuit_open_until": (
+                    state.circuit_open_until.isoformat()
+                    if state.circuit_open_until
+                    else None
+                ),
+                "failure_count_in_window": len(state.recent_failures),
+                "circuit_failure_threshold": self.circuit_failure_threshold,
             },
         )
 
@@ -801,12 +873,9 @@ class AIProviderRouter:
         if details.phase in {"request_validation", "response_decoding", "domain_parsing"}:
             return False
         return details.reason_code in {
-            "authentication_failed",
-            "quota_exhausted",
-            "token_quota_exhausted",
             "rate_limited",
             "provider_unavailable",
-            "model_unavailable",
+            "request_timeout",
         }
 
     def metadata(self) -> dict[str, object]:
@@ -814,17 +883,49 @@ class AIProviderRouter:
             "provider": self.active_provider,
             "primary_provider": "cerebras",
             "active_provider": self.active_provider,
+            "latest_successful_provider": self.active_provider,
+            "latest_successful_analysis_at": (
+                self.latest_successful_analysis_at.isoformat()
+                if self.latest_successful_analysis_at
+                else None
+            ),
             "model_identifier": (
                 self.primary.model
                 if self.active_provider == "cerebras"
                 else self.fallback.model
+                if self.active_provider == "groq"
+                else self.primary.model
             ),
             "external_ai_apis": ("cerebras", "groq"),
             "providers": {
                 name: state.snapshot() for name, state in self.states.items()
             },
             "call_metrics": self.metrics(),
+            "circuit_policy": {
+                "failure_threshold": self.circuit_failure_threshold,
+                "rolling_window_seconds": self.circuit_rolling_window_seconds,
+                "open_duration_seconds": self.circuit_seconds,
+                "configuration_open_duration_seconds": self.auth_circuit_seconds,
+                "half_open_probe": "one eligible request after open duration",
+                "success_threshold_to_close": 1,
+                "permanent_4xx_retried": False,
+                "fallback_failure_classes": (
+                    "rate_limited",
+                    "provider_unavailable",
+                    "request_timeout",
+                ),
+            },
         }
+
+    def mark_analysis_persisted(
+        self,
+        provider: str,
+        persisted_at: datetime,
+    ) -> None:
+        """Select an active provider only after its validated analysis is durable."""
+
+        self.active_provider = provider
+        self.latest_successful_analysis_at = persisted_at.astimezone(UTC)
 
     def metrics(self) -> dict[str, int]:
         cerebras_calls = self.primary.http_calls

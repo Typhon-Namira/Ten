@@ -306,6 +306,55 @@ async def test_valid_analysis_is_persisted_without_forecast_proposal_or_signal()
     assert repository.signals == {}
 
 
+def test_reasoning_health_is_idle_before_an_eligible_cycle() -> None:
+    service = build_service(InMemoryAIReasoningRepository(), ValidProvider())
+
+    health = service.health()
+
+    assert health["operations_status"] == "idle"
+    assert health["provider_readiness"] == "idle"
+
+
+def test_reasoning_health_returns_to_idle_without_a_recent_eligible_cycle() -> None:
+    service = build_service(InMemoryAIReasoningRepository(), ValidProvider())
+    service.last_eligible_cycle_at = NOW - timedelta(minutes=11)
+    service.last_cycle_outcome = "primary_success"
+
+    assert service.health()["operations_status"] == "idle"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    (
+        ("primary_success", "healthy"),
+        ("fallback_success", "degraded"),
+        ("failed", "unhealthy"),
+        ("configuration_error", "configuration_error"),
+    ),
+)
+def test_reasoning_health_reflects_latest_recent_cycle_outcome(
+    outcome: str,
+    expected: str,
+) -> None:
+    service = build_service(InMemoryAIReasoningRepository(), ValidProvider())
+    service.last_eligible_cycle_at = NOW
+    service.last_cycle_outcome = outcome
+
+    assert service.health()["operations_status"] == expected
+
+
+@pytest.mark.asyncio
+async def test_primary_persisted_analysis_reports_healthy_operations() -> None:
+    state, quant = await state_and_quant()
+    service = build_service(InMemoryAIReasoningRepository(), ValidProvider())
+
+    assert await service.process(state, quant) is not None
+
+    health = service.health()
+    assert health["operations_status"] == "healthy"
+    assert health["provider_readiness"] == "healthy"
+
+
 @pytest.mark.asyncio
 async def test_invalid_signal_or_proposal_output_fails_closed() -> None:
     state, quant = await state_and_quant()
@@ -353,6 +402,12 @@ async def test_provider_failure_persists_analysis_failure_without_trade_artifact
     persisted = tuple(repository.analyses.values())
     assert len(persisted) == 1
     assert persisted[0].status.value == "failed"
+    failure = next(iter(repository.failures.values()))
+    assert failure.provider_failure is not None
+    terminal = failure.provider_failure["terminal"]
+    assert terminal["provider"] == "cerebras"
+    assert terminal["http_status"] == 401
+    assert terminal["reason_code"] == "authentication_failed"
     assert repository.forecasts == {}
     assert repository.proposals == {}
     assert repository.signals == {}
