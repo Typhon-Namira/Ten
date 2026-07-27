@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +22,11 @@ from backend.app.ai_reasoning.config import AIReasoningConfig
 from backend.app.ai_reasoning.llm_context import LLMAnalysisContext, build_llm_analysis_context
 from backend.app.ai_reasoning.memory import MarketMemory
 from backend.app.ai_reasoning.models import MarketMemoryEntry, MarketMemorySummary
-from backend.app.ai_reasoning.provider import CerebrasProvider, GroqProvider
+from backend.app.ai_reasoning.provider import (
+    CerebrasProvider,
+    GroqProvider,
+    reasoning_response_schema,
+)
 from backend.app.ai_reasoning.request_persistence import (
     decode_persisted_request,
     persisted_request_payload,
@@ -439,6 +444,120 @@ async def test_groq_missing_rationale_gets_one_explicit_schema_correction() -> N
 
 
 @pytest.mark.asyncio
+async def test_groq_missing_setup_family_is_visible_raw_and_corrected_before_validation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state, quant, config, request = await _request()
+    bodies: list[dict[str, Any]] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(http_request.content))
+        proposal: dict[str, Any] = {
+            "entry_low": 3300,
+            "entry_high": 3301,
+            "stop_loss": 3295,
+            "take_profit_levels": [3311],
+        }
+        if len(bodies) == 2:
+            proposal["setup_family"] = "trend_continuation"
+        output = {
+            "decision": "LONG",
+            "confidence": 0.78,
+            "rationale": "Constructive trend continuation.",
+            "risk_flags": [],
+            "proposal": proposal,
+        }
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(output)}}]},
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    with caplog.at_level(logging.INFO):
+        response = await _groq_provider(client, config).reason(
+            request,
+            prompt_version=request.prompt_version,
+        )
+        validated = StructuredAIOutputValidator(
+            SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+        ).validate(response.raw_output, request=request, state=state, quant=quant)
+
+    raw_logs = [
+        record
+        for record in caplog.records
+        if record.message == "ai_provider.response.raw"
+    ]
+    first_raw = json.loads(raw_logs[0].raw_provider_json)
+    first_decoded = json.loads(raw_logs[0].decoded_provider_json)
+    normalized_log = next(
+        record
+        for record in caplog.records
+        if record.message == "ai_provider.response.normalized"
+    )
+
+    assert len(bodies) == 2
+    assert "setup_family" not in first_raw["proposal"]
+    assert first_decoded == first_raw
+    assert "provider_response.proposal.setup_family" in bodies[1]["messages"][0]["content"]
+    assert json.loads(normalized_log.normalized_provider_json)["proposal"]["setup_family"] == (
+        "trend_continuation"
+    )
+    assert validated.forecast.selected_setup_family == "trend_continuation"
+    assert validated.proposal is not None
+    assert validated.degraded_validation is False
+
+
+@pytest.mark.asyncio
+async def test_groq_echoed_schema_type_is_rejected_then_removed_by_correction() -> None:
+    state, quant, config, request = await _request()
+    bodies: list[dict[str, Any]] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(http_request.content))
+        output: dict[str, Any] = {
+            "decision": "WAIT",
+            "confidence": 0.8,
+            "rationale": "No actionable setup.",
+            "risk_flags": [],
+            "proposal": None,
+        }
+        if len(bodies) == 1:
+            output["schema_type"] = "ten_ai_reasoning_response"
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(output)}}]},
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    response = await _groq_provider(client, config).reason(
+        request,
+        prompt_version=request.prompt_version,
+    )
+    validated = StructuredAIOutputValidator(
+        SetupFamilyRegistry.from_yaml(YamlConfigRepository())
+    ).validate(response.raw_output, request=request, state=state, quant=quant)
+
+    assert len(bodies) == 2
+    correction_prompt = bodies[1]["messages"][0]["content"]
+    assert "provider_response.schema_type" in correction_prompt
+    assert "Remove that property" in correction_prompt
+    assert "schema_type" not in response.raw_output
+    assert validated.degraded_validation is False
+
+
+@pytest.mark.asyncio
 async def test_groq_second_malformed_json_fails_closed_without_more_attempts() -> None:
     _, _, config, request = await _request()
     calls = 0
@@ -520,6 +639,45 @@ async def test_response_contract_exposes_only_canonical_setup_family_ids() -> No
     ]
     assert "copy setup_family exactly from allowed_setup_families" in contract["rules"]
     assert len(contract["allowed_setup_families"]) == 9
+    assert contract["required_top_level_fields"] == [
+        "decision",
+        "confidence",
+        "rationale",
+        "risk_flags",
+        "proposal",
+    ]
+    assert contract["proposal_contract"]["required_fields"] == [
+        "setup_family",
+        "entry_low",
+        "entry_high",
+        "stop_loss",
+        "take_profit_levels",
+    ]
+    assert contract["proposal_contract"]["setup_family"]["nullable"] is False
+    assert contract["json_schema"] == reasoning_response_schema()
+    assert "schema_type" not in contract
+    assert "schema_version" not in contract
+
+
+def test_prompt_templates_explicitly_require_every_provider_wire_field() -> None:
+    directory = Path("backend/app/ai_reasoning/prompts")
+
+    for name in ("new_market_analysis_v1.txt", "existing_signal_monitoring_v1.txt"):
+        prompt = (directory / name).read_text(encoding="utf-8")
+        for field in (
+            "decision",
+            "confidence",
+            "rationale",
+            "risk_flags",
+            "proposal",
+            "setup_family",
+            "entry_low",
+            "entry_high",
+            "stop_loss",
+            "take_profit_levels",
+        ):
+            assert field in prompt
+        assert "Do not emit response-contract metadata" in prompt
 
 
 def _actionable_compact_response(setup_family: str) -> dict[str, Any]:

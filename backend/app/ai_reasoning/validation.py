@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
 import json
+import logging
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -17,6 +18,17 @@ from backend.app.quant_forecasting.models import QuantForecastResult
 
 from .models import AIMarketForecast, AIReasoningRequest, AISignalProposal, AIResultStatus, ProposalAction
 from .setup_families import SetupFamilyRegistry
+
+logger = logging.getLogger(__name__)
+_MAX_NORMALIZED_JSON_LOG_CHARACTERS = 8_000
+
+
+def _normalized_json_for_log(value: dict[str, Any]) -> tuple[str, bool]:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    return (
+        encoded[:_MAX_NORMALIZED_JSON_LOG_CHARACTERS],
+        len(encoded) > _MAX_NORMALIZED_JSON_LOG_CHARACTERS,
+    )
 
 
 def structural_opportunity_key(
@@ -124,8 +136,20 @@ class StructuredAIOutputValidator:
     ) -> ValidatedAIOutput:
         if "forecast" not in raw:
             try:
-                raw = CompactAIReasoningOutput.model_validate(raw).model_dump(mode="python")
+                normalized_compact = CompactAIReasoningOutput.model_validate(raw).model_dump(
+                    mode="python"
+                )
             except ValidationError as exc:
+                logger.warning(
+                    "ai_provider.response.normalization.skipped",
+                    extra={
+                        "request_id": str(request.request_id),
+                        "cycle_id": str(request.cycle_id),
+                        "normalization_status": "not_run_wire_schema_invalid",
+                        "normalized_provider_json": None,
+                        "validation_error_count": len(exc.errors()),
+                    },
+                )
                 issues = tuple(
                     self._pydantic_issue("provider_response", item, raw)
                     for item in exc.errors()
@@ -134,6 +158,20 @@ class StructuredAIOutputValidator:
                     tuple(item.encoded() for item in issues),
                     first_issue=issues[0] if issues else None,
                 ) from exc
+            normalized_json, normalized_truncated = _normalized_json_for_log(
+                normalized_compact
+            )
+            logger.info(
+                "ai_provider.response.normalized",
+                extra={
+                    "request_id": str(request.request_id),
+                    "cycle_id": str(request.cycle_id),
+                    "normalization_status": "wire_schema_valid",
+                    "normalized_provider_json": normalized_json,
+                    "normalized_provider_json_truncated": normalized_truncated,
+                },
+            )
+            raw = normalized_compact
         raw, repaired_fields, normalization_issues = self._normalize(raw, request=request, state=state, quant=quant)
         errors: list[str] = list(normalization_issues)
         if not isinstance(raw.get("forecast"), dict):

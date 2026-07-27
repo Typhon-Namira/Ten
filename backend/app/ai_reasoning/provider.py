@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+import json
 import logging
 import random
 from time import perf_counter
@@ -30,6 +31,16 @@ from .validation import CompactAIReasoningOutput
 logger = logging.getLogger(__name__)
 AI_REASONING_RESPONSE_SCHEMA_TYPE = "ten_ai_reasoning_response"
 AI_REASONING_RESPONSE_SCHEMA_VERSION = "1.0"
+_MAX_PROVIDER_JSON_LOG_CHARACTERS = 8_000
+
+
+def _bounded_provider_json(value: str) -> tuple[str, bool]:
+    """Bound compact provider output diagnostics without logging prompts or credentials."""
+
+    return (
+        value[:_MAX_PROVIDER_JSON_LOG_CHARACTERS],
+        len(value) > _MAX_PROVIDER_JSON_LOG_CHARACTERS,
+    )
 
 
 class ProviderStatus(StrEnum):
@@ -289,6 +300,28 @@ class _OpenAICompatibleReasoningProvider:
         fallback_used: bool,
         fallback_reason: str | None,
     ) -> AIProviderResponse:
+        decoded_json = json.dumps(
+            completion.content,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        raw_json, raw_truncated = _bounded_provider_json(
+            completion.raw_json_text or decoded_json
+        )
+        decoded_json, decoded_truncated = _bounded_provider_json(decoded_json)
+        logger.info(
+            "ai_provider.response.raw",
+            extra={
+                "provider": self.provider_name,
+                "model": self.model,
+                "provider_request_id": completion.provider_request_id,
+                "status_code": completion.status_code,
+                "raw_provider_json": raw_json,
+                "raw_provider_json_truncated": raw_truncated,
+                "decoded_provider_json": decoded_json,
+                "decoded_provider_json_truncated": decoded_truncated,
+            },
+        )
         return AIProviderResponse(
             raw_output=completion.content,
             provider=self.provider_name,
@@ -314,15 +347,44 @@ class _OpenAICompatibleReasoningProvider:
         )
 
     def _response_contract(self) -> dict[str, Any]:
+        schema = reasoning_response_schema()
         return {
-            "schema_type": AI_REASONING_RESPONSE_SCHEMA_TYPE,
-            "schema_version": AI_REASONING_RESPONSE_SCHEMA_VERSION,
             "allowed_setup_families": list(self.setup_family_ids),
+            "required_top_level_fields": [
+                "decision",
+                "confidence",
+                "rationale",
+                "risk_flags",
+                "proposal",
+            ],
+            "proposal_contract": {
+                "required_when": "decision is LONG or SHORT",
+                "null_when": "decision is WAIT",
+                "required_fields": [
+                    "setup_family",
+                    "entry_low",
+                    "entry_high",
+                    "stop_loss",
+                    "take_profit_levels",
+                ],
+                "setup_family": {
+                    "required": True,
+                    "nullable": False,
+                    "allowed_values": list(self.setup_family_ids),
+                },
+            },
+            # Groq JSON Object Mode does not receive response_format.json_schema,
+            # so the complete schema must be present in the prompt payload.
+            "json_schema": schema,
             "rules": [
                 "return exactly one JSON object matching the supplied schema",
                 "do not include chain-of-thought or private reasoning",
                 "WAIT requires proposal=null",
-                "LONG/SHORT requires valid ordered entry, stop, and target geometry",
+                (
+                    "LONG/SHORT requires proposal.setup_family, entry_low, entry_high, "
+                    "stop_loss, and take_profit_levels"
+                ),
+                "proposal.setup_family must never be null when proposal is an object",
                 "copy setup_family exactly from allowed_setup_families",
             ],
         }
@@ -381,14 +443,25 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                         )
                     )
                     expected = str(first["msg"] or first["type"])
+                    error_type = str(first["type"])
                 else:
                     field_path = "provider_response"
                     expected = "schema validation"
-                correction_instruction = (
-                    f"The previous JSON failed schema validation at {field_path}: {expected}. "
-                    "Return all required fields, including rationale, confidence, risk_flags, "
-                    "and proposal."
-                )
+                    error_type = "schema_validation"
+                if error_type == "extra_forbidden":
+                    correction_instruction = (
+                        f"The previous JSON contained an unexpected property at {field_path}: "
+                        f"{expected}. Remove that property. Return only properties declared in "
+                        "response_contract.json_schema. Do not emit contract metadata such as "
+                        "schema_type, schema_version, or json_schema."
+                    )
+                else:
+                    correction_instruction = (
+                        f"The previous JSON failed schema validation at {field_path}: {expected}. "
+                        "Return that exact missing field and every required property in json_schema. "
+                        "For LONG or SHORT, proposal.setup_family is mandatory, non-null, and must "
+                        "exactly match one allowed_setup_families value."
+                    )
                 correction_reason = "structured_output_invalid"
 
         logger.warning(
