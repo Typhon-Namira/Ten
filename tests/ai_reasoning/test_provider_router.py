@@ -83,7 +83,12 @@ class StubProvider:
         self.client = SimpleNamespace(base_url=f"https://api.{name}.test/v1")
         self.outcomes = outcomes
         self.calls = 0
+        self.correction_attempts = 0
         self.cycle_ids: list[str] = []
+
+    @property
+    def http_calls(self) -> int:
+        return self.calls
 
     async def reason(self, request: Any, **kwargs: Any) -> AIProviderResponse:
         self.calls += 1
@@ -150,16 +155,17 @@ async def test_primary_success_does_not_contact_fallback() -> None:
     assert primary.calls == 1
     assert fallback.calls == 0
     assert router.states["cerebras"].circuit_open_until is None
+    assert router.active_provider is None
+    router.mark_analysis_persisted("cerebras", NOW)
+    assert router.active_provider == "cerebras"
+    assert router.metadata()["latest_successful_analysis_at"] == NOW.isoformat()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("reason_code", "status"),
     (
-        ("authentication_failed", 401),
-        ("quota_exhausted", 402),
         ("rate_limited", 429),
-        ("model_unavailable", 404),
     ),
 )
 async def test_typed_primary_failures_fall_back_without_retry(
@@ -181,6 +187,33 @@ async def test_typed_primary_failures_fall_back_without_retry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason_code", "status", "expected_status"),
+    (
+        ("authentication_failed", 401, ProviderStatus.CONFIGURATION_ERROR),
+        ("quota_exhausted", 402, ProviderStatus.QUOTA_EXHAUSTED),
+        ("model_unavailable", 404, ProviderStatus.CONFIGURATION_ERROR),
+    ),
+)
+async def test_permanent_primary_failures_do_not_retry_or_fall_back(
+    reason_code: str,
+    status: int,
+    expected_status: ProviderStatus,
+) -> None:
+    primary = StubProvider("cerebras", [failure("cerebras", reason_code, status=status)])
+    fallback = StubProvider("groq", [response("groq")])
+    router = AIProviderRouter(primary, fallback, clock=lambda: NOW)  # type: ignore[arg-type]
+
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert primary.calls == 1
+    assert fallback.calls == 0
+    assert router.states["cerebras"].status == expected_status
+    assert router.states["cerebras"].circuit_open_until is not None
+
+
+@pytest.mark.asyncio
 async def test_invalid_request_is_not_retried_or_sent_to_fallback() -> None:
     primary = StubProvider(
         "cerebras",
@@ -194,7 +227,8 @@ async def test_invalid_request_is_not_retried_or_sent_to_fallback() -> None:
 
     assert primary.calls == 1
     assert fallback.calls == 0
-    assert router.states["cerebras"].circuit_open_until is None
+    assert router.states["cerebras"].status == ProviderStatus.CONFIGURATION_ERROR
+    assert router.states["cerebras"].circuit_open_until is not None
 
 
 @pytest.mark.asyncio
@@ -222,12 +256,61 @@ async def test_transient_5xx_gets_one_retry_then_fallback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_daily_quota_opens_long_primary_circuit_and_next_cycle_uses_fallback() -> None:
+async def test_transient_circuit_opens_only_after_threshold_inside_window() -> None:
+    primary = StubProvider(
+        "cerebras",
+        [
+            failure("cerebras", "provider_unavailable", status=503),
+            failure("cerebras", "provider_unavailable", status=503),
+        ],
+    )
+    fallback = StubProvider("groq", [response("groq"), response("groq")])
+    router = AIProviderRouter(
+        primary,  # type: ignore[arg-type]
+        fallback,  # type: ignore[arg-type]
+        maximum_retries=0,
+        circuit_failure_threshold=2,
+        clock=lambda: NOW,
+    )
+
+    await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+    assert router.states["cerebras"].circuit_open_until is None
+    await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+    assert router.states["cerebras"].circuit_open_until is not None
+
+
+@pytest.mark.asyncio
+async def test_failed_fallback_is_never_reported_as_standby() -> None:
+    primary = StubProvider(
+        "cerebras",
+        [failure("cerebras", "rate_limited", status=429)],
+    )
+    fallback = StubProvider(
+        "groq",
+        [failure("groq", "provider_unavailable", status=503)],
+    )
+    router = AIProviderRouter(
+        primary,  # type: ignore[arg-type]
+        fallback,  # type: ignore[arg-type]
+        maximum_retries=0,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert router.active_provider is None
+    assert router.states["groq"].status == ProviderStatus.UNAVAILABLE
+    assert router.metadata()["providers"]["groq"]["status"] == "UNAVAILABLE"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_daily_quota_opens_long_primary_circuit_without_fallback() -> None:
     primary = StubProvider(
         "cerebras",
         [failure("cerebras", "quota_exhausted", status=402)],
     )
-    fallback = StubProvider("groq", [response("groq"), response("groq")])
+    fallback = StubProvider("groq", [response("groq")])
     router = AIProviderRouter(
         primary,  # type: ignore[arg-type]
         fallback,  # type: ignore[arg-type]
@@ -235,15 +318,17 @@ async def test_daily_quota_opens_long_primary_circuit_and_next_cycle_uses_fallba
         clock=lambda: NOW,
     )
 
-    await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
-    await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
 
     state = router.states["cerebras"]
     assert state.status == ProviderStatus.QUOTA_EXHAUSTED
     assert state.circuit_open_until is not None
     assert (state.circuit_open_until - NOW).total_seconds() >= 3600
     assert primary.calls == 1
-    assert fallback.calls == 2
+    assert fallback.calls == 0
 
 
 @pytest.mark.asyncio
@@ -278,6 +363,27 @@ async def test_short_rate_limit_expires_and_cerebras_returns_to_primary() -> Non
     assert router.states["cerebras"].status == ProviderStatus.HEALTHY
     assert primary.calls == 2
     assert fallback.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_open_retryable_primary_circuit_uses_fallback_without_primary_call() -> None:
+    primary = StubProvider(
+        "cerebras",
+        [failure("cerebras", "rate_limited", status=429)],
+    )
+    fallback = StubProvider("groq", [response("groq"), response("groq")])
+    router = AIProviderRouter(
+        primary,  # type: ignore[arg-type]
+        fallback,  # type: ignore[arg-type]
+        clock=lambda: NOW,
+    )
+
+    first = await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+    second = await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert first.provider == second.provider == "groq"
+    assert primary.calls == 1
+    assert fallback.calls == 2
 
 
 @pytest.mark.asyncio
@@ -323,7 +429,7 @@ async def test_groq_429_never_promotes_groq_ahead_of_recovered_cerebras() -> Non
 
 
 @pytest.mark.asyncio
-async def test_both_providers_fail_once_and_terminal_failure_records_fallback() -> None:
+async def test_primary_authentication_failure_never_contacts_fallback() -> None:
     primary = StubProvider(
         "cerebras",
         [failure("cerebras", "authentication_failed", status=401)],
@@ -338,7 +444,6 @@ async def test_both_providers_fail_once_and_terminal_failure_records_fallback() 
         await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
 
     assert primary.calls == 1
-    assert fallback.calls == 1
-    assert captured.value.details.provider == "groq"
-    assert captured.value.details.fallback_used is True
-    assert captured.value.details.fallback_reason == "cerebras_authentication_failed"
+    assert fallback.calls == 0
+    assert captured.value.details.provider == "cerebras"
+    assert captured.value.details.fallback_used is False

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
@@ -119,6 +120,8 @@ class AIReasoningService:
         self.last_validation_passed: bool | None = None
         self.last_retry_count = 0
         self.last_failure_state: str | None = None
+        self.last_cycle_outcome: str | None = None
+        self.last_eligible_cycle_at: datetime | None = None
         self.metrics: Counter[str] = Counter()
         self.skip_reasons: Counter[str] = Counter()
 
@@ -155,6 +158,7 @@ class AIReasoningService:
             self._skip(eligibility_failure, worker_context, window_start=window_start)
             return None
         self.metrics["eligible_five_minute_cycles"] += 1
+        self.last_eligible_cycle_at = self.clock().astimezone(UTC)
         contract_version = ":".join(
             (
                 LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION,
@@ -210,22 +214,6 @@ class AIReasoningService:
             )
             return await self._validated_analysis(duplicate) if duplicate is not None else None
 
-        if not self._primary_provider_eligible():
-            self._skip(
-                AIAnalysisSkipReason.PROVIDER_UNAVAILABLE,
-                worker_context,
-                window_start=window_start,
-                idempotency_key=idempotency_key,
-            )
-            await self.repository.complete_analysis_cycle(
-                idempotency_key,
-                None,
-                None,
-                "skipped",
-                self.clock(),
-            )
-            return None
-
         recent_memory = await self.repository.recent_memory(
             state.instrument,
             self.config.maximum_memory_entries,
@@ -246,6 +234,7 @@ class AIReasoningService:
         )
         await self.repository.save_request(request)
         response = None
+        provider_failure: dict[str, Any] | None = None
         provider_metrics_before = self._provider_metrics()
         provider_delta: dict[str, int] = {}
         failure_state = "llm_unavailable"
@@ -347,6 +336,10 @@ class AIReasoningService:
             )
             analysis = self._failed_analysis(request, failure_state, failure_errors)
         except AIProviderRequestError as exc:
+            provider_failure = {
+                "terminal": asdict(exc.details),
+                "providers": self.provider.metadata().get("providers"),
+            }
             provider_delta = self._metric_delta(
                 provider_metrics_before,
                 self._provider_metrics(),
@@ -414,6 +407,17 @@ class AIReasoningService:
             self.failed_requests += 1
             self.last_validation_passed = False
             self.last_failure_state = failure_state
+            self.last_cycle_outcome = (
+                "configuration_error"
+                if failure_state
+                in {
+                    "authentication_failed",
+                    "invalid_request",
+                    "model_unavailable",
+                    "provider_unconfigured",
+                }
+                else "failed"
+            )
             await self._record_failure(
                 request.request_id,
                 0,
@@ -422,7 +426,7 @@ class AIReasoningService:
                 response.raw_output if response is not None else None,
                 failure_errors,
                 failure_state,
-                None,
+                provider_failure,
             )
             await self._record_usage(
                 request,
@@ -443,7 +447,14 @@ class AIReasoningService:
 
         self.last_validation_passed = True
         self.last_failure_state = None
+        assert response is not None
+        self.last_cycle_outcome = (
+            "fallback_success" if response.fallback_used else "primary_success"
+        )
         self.metrics["analyses_successfully_completed"] += 1
+        mark_persisted = getattr(self.provider, "mark_analysis_persisted", None)
+        if callable(mark_persisted):
+            mark_persisted(response.provider, analysis.created_at)
         logger.info(
             "ai_reasoning.persist.completed",
             extra={
@@ -587,6 +598,7 @@ class AIReasoningService:
                 "temperature": self.config.temperature,
                 "max_tokens": self.config.max_tokens,
                 "provider": provider,
+                "telemetry_policy": "five_minute_v1",
                 **(provider_metrics or {}),
                 "provider_failure": int(
                     failure_state is not None
@@ -655,16 +667,6 @@ class AIReasoningService:
             return AIAnalysisSkipReason.MARKET_DATA_STALE
         return None
 
-    def _primary_provider_eligible(self) -> bool:
-        providers = self.provider.metadata().get("providers")
-        if not isinstance(providers, dict):
-            return True
-        primary = providers.get("cerebras")
-        return (
-            isinstance(primary, dict)
-            and primary.get("status") in {"HEALTHY", "STANDBY"}
-        )
-
     def _skip(
         self,
         reason: AIAnalysisSkipReason,
@@ -730,15 +732,26 @@ class AIReasoningService:
     def health(self) -> dict[str, object]:
         metadata = self.provider.metadata()
         provider_states = metadata.get("providers")
-        ready_provider_count = (
-            sum(
-                1
-                for item in provider_states.values()
-                if isinstance(item, dict)
-                and item.get("status") in {"HEALTHY", "STANDBY"}
-            )
+        now = self.clock().astimezone(UTC)
+        recent_eligible_cycle = (
+            self.last_eligible_cycle_at is not None
+            and now - self.last_eligible_cycle_at <= timedelta(minutes=10)
+        )
+        if not recent_eligible_cycle:
+            operations_status = "idle"
+        elif self.last_cycle_outcome == "primary_success":
+            operations_status = "healthy"
+        elif self.last_cycle_outcome == "fallback_success":
+            operations_status = "degraded"
+        elif self.last_cycle_outcome == "configuration_error":
+            operations_status = "configuration_error"
+        else:
+            operations_status = "unhealthy"
+        active_provider = metadata.get("active_provider")
+        fallback_provider = (
+            provider_states.get("groq")
             if isinstance(provider_states, dict)
-            else 0
+            else None
         )
         return {
             "enabled": self.enabled,
@@ -755,7 +768,16 @@ class AIReasoningService:
             else None,
             "provider": metadata["provider"],
             "primary_provider": metadata.get("primary_provider"),
-            "active_provider": metadata.get("active_provider"),
+            "active_provider": active_provider,
+            "latest_successful_provider": metadata.get("latest_successful_provider"),
+            "latest_successful_analysis_at": metadata.get(
+                "latest_successful_analysis_at"
+            ),
+            "latest_eligible_cycle_at": (
+                self.last_eligible_cycle_at.isoformat()
+                if self.last_eligible_cycle_at
+                else None
+            ),
             "model_identifier": metadata["model_identifier"],
             "prompt_version": self.config.prompt_version_new_market,
             "reasoning_policy_version": self.config.reasoning_policy_version,
@@ -790,19 +812,15 @@ class AIReasoningService:
             "failure_state": self.last_failure_state,
             "fallback_state": "ai_analysis_unavailable" if self.last_failure_state else None,
             "fallback_status": (
-                "ACTIVE"
-                if metadata.get("active_provider") == "groq"
-                else "STANDBY"
+                fallback_provider.get("status")
+                if isinstance(fallback_provider, dict)
+                else "UNCONFIGURED"
             ),
             "shadow_only": True,
             "awaiting_guardrail_validation": True,
             "providers": provider_states,
-            "provider_readiness": (
-                "failed"
-                if ready_provider_count == 0
-                else "healthy"
-                if ready_provider_count == 2
-                else "degraded"
-            ),
+            "circuit_policy": metadata.get("circuit_policy"),
+            "provider_readiness": operations_status,
+            "operations_status": operations_status,
             "final_decision": self.final_decision.health() if self.final_decision else None,
         }

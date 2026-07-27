@@ -139,10 +139,13 @@ export function ValidationSummary({ data, unavailableReason }: { data: AIReasoni
 export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard | null; stale: boolean }) {
   const health = data?.health
   const usage = data?.llm_usage
+  const cerebras = health?.providers.cerebras
+  const groq = health?.providers.groq
   return <section className="ai-card ai-card--wide">
     <SectionHeader eyebrow="Operations" title="AI usage and system health" action={<Activity size={19} />} />
     <div className="health-grid">
-      <Metric label="AI provider calls today" value={usage?.provider_http_calls ?? 'Unavailable'} detail={`Allowance ${health?.guardrails.daily_request_allowance ?? 'Unavailable'}`} />
+      <Metric label="Five-minute policy calls" value={usage?.five_minute_policy?.provider_http_calls ?? 'Unavailable'} detail={`Allowance ${health?.guardrails.daily_request_allowance ?? 'Unavailable'}`} />
+      <Metric label="Legacy daily calls" value={usage?.legacy_cumulative_daily?.provider_http_calls ?? 'Unavailable'} detail="Pre-policy telemetry retained" />
       <Metric label="Eligible 5-minute cycles" value={health?.call_control.eligible_five_minute_cycles ?? 'Unavailable'} />
       <Metric label="Analyses completed" value={health?.call_control.analyses_successfully_completed ?? 'Unavailable'} />
       <Metric label="Cerebras calls" value={usage?.cerebras_calls ?? 'Unavailable'} />
@@ -159,9 +162,13 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
       <Metric label="Concurrency limit" value={health?.guardrails.llm_concurrency_limit ?? 'Unavailable'} />
       <Metric label="AI latency" value={health?.latest_latency_ms == null ? 'Unavailable' : `${health.latest_latency_ms.toFixed(0)} ms`} />
       <Metric label="Data freshness" value={stale ? 'Stale' : 'Fresh'} />
+      <Metric label="Cerebras state" value={cerebras?.status ?? 'UNCONFIGURED'} detail={`HTTP ${cerebras?.last_http_status ?? 'none'} · ${cerebras?.last_provider_error_code ?? cerebras?.last_failure_code ?? 'no error'}`} />
+      <Metric label="Groq state" value={groq?.status ?? 'UNCONFIGURED'} detail={`HTTP ${groq?.last_http_status ?? 'none'} · ${groq?.last_provider_error_code ?? groq?.last_failure_code ?? 'no error'}`} />
+      <Metric label="Primary circuit" value={cerebras?.circuit_open_until ? 'OPEN' : 'CLOSED'} detail={cerebras?.circuit_open_until ?? 'No open circuit'} />
+      <Metric label="Fallback circuit" value={groq?.circuit_open_until ? 'OPEN' : 'CLOSED'} detail={groq?.circuit_open_until ?? 'No open circuit'} />
     </div>
     <div className="card-foot">
-      <span>Primary {health?.primary_provider ?? 'cerebras'} · active {health?.active_provider ?? 'Unavailable'} · fallback {health?.fallback_status ?? 'STANDBY'} · {health?.model_identifier ?? 'Model unavailable'}</span>
+      <span>Status {health?.operations_status ?? 'idle'} · primary {health?.primary_provider ?? 'cerebras'} · active {health?.active_provider ?? 'none'} · fallback {health?.fallback_status ?? 'UNCONFIGURED'} · {health?.model_identifier ?? 'Model unavailable'}</span>
       <StatusBadge tone={health?.guardrails.status === 'healthy' && !stale ? 'positive' : 'warning'}>{humanize(health?.guardrails.status ?? 'unavailable')}</StatusBadge>
     </div>
   </section>

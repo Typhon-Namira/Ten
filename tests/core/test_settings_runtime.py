@@ -14,6 +14,34 @@ def test_ai_provider_defaults_are_cerebras_primary_and_groq_fallback() -> None:
     assert settings.groq_model == "llama-3.1-8b-instant"
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "https://api.cerebras.ai/v1/v1",
+        "https://api.cerebras.ai/v1/chat/completions",
+    ),
+)
+def test_cerebras_base_url_rejects_endpoint_path_misconfiguration(
+    base_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="must be a base URL"):
+        Settings(
+            _env_file=None,
+            cerebras_base_url=base_url,
+            market_data_worker_enabled=False,
+        )
+
+
+@pytest.mark.parametrize("api_key", (" key", "key ", '"key"', "'key'"))
+def test_cerebras_key_rejects_shell_quoting_and_whitespace(api_key: str) -> None:
+    with pytest.raises(ValueError, match="must not contain surrounding"):
+        Settings(
+            _env_file=None,
+            cerebras_api_key=api_key,
+            market_data_worker_enabled=False,
+        )
+
+
 def test_market_data_provider_defaults_to_the_keyless_public_source() -> None:
     assert Settings(_env_file=None, market_data_worker_enabled=False).market_data_provider == "lbma_gold_price"
 

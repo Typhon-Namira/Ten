@@ -78,21 +78,61 @@ async def test_quota_failure_is_sanitized_and_logged(caplog: pytest.LogCaptureFi
             max_tokens=10,
             request_id="request-123",
             cycle_id="cycle-456",
+            attempt_type="primary",
         )
 
     details = captured.value.details
     assert details.reason_code == "quota_exhausted"
     assert details.http_status == 402
     assert details.retry_after == "60"
+    assert details.endpoint_host == "api.cerebras.ai"
+    assert details.endpoint_path == "/v1/chat/completions"
+    assert details.http_method == "POST"
+    assert details.sanitized_response_body == (
+        '{"error":{"code":"quota_exhausted","message":"Daily quota exhausted",'
+        '"error_type":null,"provider_code":null}}'
+    )
+    assert details.serialized_request_bytes is not None
+    assert details.estimated_input_tokens is not None
+    assert details.attempt_type == "primary"
     failure = next(
         record for record in caplog.records
-        if record.message == "ai_provider.request.failed"
+        if record.message == "ai_provider.request.failure_diagnostic"
     )
     assert failure.provider == "cerebras"
     assert failure.request_id == "request-123"
+    assert failure.endpoint_host == "api.cerebras.ai"
+    assert failure.endpoint_path == "/v1/chat/completions"
+    assert failure.http_method == "POST"
+    assert failure.status_code == 402
+    assert failure.response_content_type == "application/json"
+    assert failure.response_body_length > 0
+    assert failure.attempt_type == "primary"
     assert api_key not in caplog.text
     assert prompt not in caplog.text
     assert "private" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timeout_failure_has_safe_network_classification() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("safe timeout", request=request)
+
+    with pytest.raises(AIProviderRequestError) as captured:
+        await client_for(handler).complete_json(
+            system_prompt="system",
+            payload={"input": "test"},
+            model="gpt-oss-120b",
+            temperature=0,
+            max_tokens=10,
+            attempt_type="retry",
+        )
+
+    details = captured.value.details
+    assert details.reason_code == "request_timeout"
+    assert details.timeout_category == "read_timeout"
+    assert details.network_error_category == "timeout"
+    assert details.attempt_type == "retry"
 
 
 @pytest.mark.asyncio

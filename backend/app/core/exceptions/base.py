@@ -30,6 +30,9 @@ class AIProviderFailureDetails:
     phase: str
     endpoint: str
     model: str
+    http_method: str = "POST"
+    endpoint_host: str | None = None
+    endpoint_path: str | None = None
     request_id: str | None = None
     cycle_id: str | None = None
     http_status: int | None = None
@@ -39,6 +42,12 @@ class AIProviderFailureDetails:
     metadata_provider_code: str | None = None
     content_type: str | None = None
     body_length: int | None = None
+    sanitized_response_body: str | None = None
+    serialized_request_bytes: int | None = None
+    estimated_input_tokens: int | None = None
+    timeout_category: str | None = None
+    network_error_category: str | None = None
+    attempt_type: str | None = None
     retry_after: str | None = None
     rate_limit_limit: str | None = None
     rate_limit_remaining: str | None = None

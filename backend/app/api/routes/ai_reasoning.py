@@ -96,6 +96,25 @@ async def latest(
         for signal in signals
     }
     usage = await final_repository.usage_for_date(service.clock().date().isoformat())
+    policy_usage = tuple(
+        item
+        for item in usage
+        if item.generation_parameters.get("telemetry_policy") == "five_minute_v1"
+    )
+    legacy_usage = tuple(item for item in usage if item not in policy_usage)
+
+    def usage_summary(rows: tuple[Any, ...]) -> dict[str, int | None]:
+        return {
+            "provider_http_calls": sum(item.request_count for item in rows),
+            "total_tokens": (
+                sum(item.total_tokens or 0 for item in rows)
+                if any(item.total_tokens is not None for item in rows)
+                else None
+            ),
+            "successful_requests": sum(item.success for item in rows),
+            "failed_requests": sum(not item.success for item in rows),
+        }
+
     def usage_parameter(name: str) -> int:
         return sum(
             int(item.generation_parameters.get(name, 0))
@@ -129,6 +148,8 @@ async def latest(
             ),
             "successful_requests": sum(item.success for item in usage),
             "failed_requests": sum(not item.success for item in usage),
+            "legacy_cumulative_daily": usage_summary(legacy_usage),
+            "five_minute_policy": usage_summary(policy_usage),
         },
         "performance": performance.model_dump(mode="json") if performance else None,
         "production_readiness": readiness.model_dump(mode="json") if readiness else None,
