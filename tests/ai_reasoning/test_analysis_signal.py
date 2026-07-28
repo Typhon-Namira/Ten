@@ -124,8 +124,13 @@ async def test_latest_completed_cycle_ignores_newer_analysis_without_signal() ->
     await repository.save_analysis_signal(completed_signal)
     await repository.save_analysis(incomplete_newer_analysis)
 
-    latest = await repository.latest_completed_analysis_cycle("XAUUSD", "M15")
+    chart_timeframe_filtered = await repository.latest_completed_analysis_cycle(
+        "XAUUSD",
+        "M5",
+    )
+    latest = await repository.latest_completed_analysis_cycle("XAUUSD")
 
+    assert chart_timeframe_filtered is None
     assert latest == (completed_analysis, completed_signal)
 
 

@@ -141,12 +141,14 @@ export const tenApi = {
   },
   dashboardSystemStatus: (instrument: string) =>
     request<DashboardSystemStatus>(`/api/dashboard/system-status?instrument=${encodeURIComponent(instrument)}`),
-  dashboardLatestCycle: (instrument: string, timeframe: string) =>
-    request<LatestCompletedCycle>(`/api/dashboard/latest-cycle?symbol=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}`),
-  dashboardSignals: (instrument: string, timeframe: string, cursor = 0, limit = 50) =>
-    request<AnalysisSignalPage>(`/api/dashboard/signals?symbol=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}&cursor=${cursor}&limit=${limit}`),
-  dashboardAnalyses: (instrument: string, timeframe: string, cursor = 0, limit = 50) =>
-    request<AnalysisHistoryPage>(`/api/dashboard/analyses?symbol=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}&cursor=${cursor}&limit=${limit}`),
+  // AI analysis has its own configured cadence/timeframe (currently M5). The chart timeframe is
+  // presentation state and must never filter the authoritative analytical-cycle selector.
+  dashboardLatestCycle: (instrument: string) =>
+    request<LatestCompletedCycle>(`/api/dashboard/latest-cycle?symbol=${encodeURIComponent(instrument)}`),
+  dashboardSignals: (instrument: string, cursor = 0, limit = 50) =>
+    request<AnalysisSignalPage>(`/api/dashboard/signals?symbol=${encodeURIComponent(instrument)}&cursor=${cursor}&limit=${limit}`),
+  dashboardAnalyses: (instrument: string, cursor = 0, limit = 50) =>
+    request<AnalysisHistoryPage>(`/api/dashboard/analyses?symbol=${encodeURIComponent(instrument)}&cursor=${cursor}&limit=${limit}`),
   // Explainability: every AI-authored answer here is prose over a context TEN itself assembled —
   // the AI never fetches its own data, so a chat answer can never disagree with these same panels.
   explainCurrent: (instrument: string, timeframe: string) => request<ExplainResponse>(`/api/v1/explain/current?${scoped(instrument, timeframe)}`),

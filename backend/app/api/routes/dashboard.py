@@ -112,9 +112,33 @@ async def _completed_cycle_projection(
     instrument: str,
     timeframe: str | None,
 ) -> dict[str, Any] | None:
+    logger.info(
+        "dashboard.latest_cycle.selector",
+        extra={
+            "instrument": instrument,
+            "requested_timeframe": timeframe,
+            "joins": [
+                "ai_market_analyses.analysis_id = ai_analysis_signals.analysis_id",
+                "ai_analysis_signals.snapshot_id -> unified_market_states.state_id",
+                "ai_market_analyses.quantitative_forecast_id -> quantitative_forecasts.result_id",
+                "signal_decisions.source_lineage.current_ai_signal_id = ai_analysis_signals.signal_id",
+            ],
+            "predicates": [
+                "ai_market_analyses.symbol = :instrument",
+                "ai_market_analyses.status = 'available'",
+                "ai_market_analyses.validation_passed IS TRUE",
+                "no timeframe predicate (AI cadence is independent of chart timeframe)",
+            ],
+            "ordering": [
+                "ai_analysis_signals.generated_at DESC",
+                "ai_market_analyses.analysis_timestamp DESC",
+                "ai_analysis_signals.signal_id DESC",
+            ],
+        },
+    )
     pair = await request.app.state.ai_reasoning_repository.latest_completed_analysis_cycle(
         instrument,
-        timeframe,
+        None,
     )
     if pair is None:
         return None
@@ -141,6 +165,20 @@ async def _completed_cycle_projection(
         )
     )
     now = datetime.now(UTC)
+    logger.info(
+        "dashboard.latest_cycle.selected",
+        extra={
+            "instrument": instrument,
+            "requested_timeframe": timeframe,
+            "unified_market_state_id": str(signal.snapshot_id),
+            "quantitative_forecast_id": str(analysis.quantitative_forecast_id),
+            "ai_market_analysis_id": str(analysis.analysis_id),
+            "ai_analysis_signal_id": str(signal.signal_id),
+            "signal_decision_id": (
+                str(decision.decision_id) if decision is not None else None
+            ),
+        },
+    )
     market_time = (
         state.market_data_boundary if state is not None else analysis.knowledge_cutoff
     )
@@ -268,6 +306,100 @@ async def _completed_cycle_projection(
         },
     }
     return result
+
+
+async def _latest_cycle_selection_diagnostics(
+    request: Request,
+    instrument: str,
+    requested_timeframe: str | None,
+) -> dict[str, Any]:
+    repository = request.app.state.ai_reasoning_repository
+    state = await request.app.state.unified_market_state_repository.latest_state(
+        instrument
+    )
+    quant = await request.app.state.quant_forecast_repository.latest_result(instrument)
+    analysis = await repository.latest_analysis(instrument)
+    signal = await repository.latest_analysis_signal(instrument)
+    decision = (
+        await _decision_for_analysis_signal(request, signal)
+        if signal is not None
+        else None
+    )
+    conditions = {
+        "analysis_exists_for_symbol": analysis is not None,
+        "signal_exists_for_symbol": signal is not None,
+        "analysis_signal_join_matches": bool(
+            analysis is not None
+            and signal is not None
+            and signal.analysis_id == analysis.analysis_id
+        ),
+        "analysis_status_is_available": bool(
+            analysis is not None and analysis.status.value == "available"
+        ),
+        "analysis_validation_passed": bool(
+            analysis is not None and analysis.validation_passed
+        ),
+    }
+    predicate_names = {
+        "analysis_exists_for_symbol": "ai_market_analyses.symbol = :instrument",
+        "signal_exists_for_symbol": "ai_analysis_signals.instrument = :instrument",
+        "analysis_signal_join_matches": (
+            "ai_market_analyses.analysis_id = ai_analysis_signals.analysis_id"
+        ),
+        "analysis_status_is_available": (
+            "ai_market_analyses.status = 'available'"
+        ),
+        "analysis_validation_passed": (
+            "ai_market_analyses.validation_passed IS TRUE"
+        ),
+    }
+    eliminated_by = next(
+        (
+            predicate_names[name]
+            for name, passed in conditions.items()
+            if not passed
+        ),
+        None,
+    )
+    diagnostics = {
+        "latest_unified_market_state_id": (
+            str(state.state_id) if state is not None else None
+        ),
+        "latest_quantitative_forecast_id": (
+            str(quant.result_id) if quant is not None else None
+        ),
+        "latest_ai_market_analysis_id": (
+            str(analysis.analysis_id) if analysis is not None else None
+        ),
+        "latest_ai_analysis_signal_id": (
+            str(signal.signal_id) if signal is not None else None
+        ),
+        "latest_signal_decision_id": (
+            str(decision.decision_id) if decision is not None else None
+        ),
+        "latest_analysis_timeframe": (
+            analysis.timeframe if analysis is not None else None
+        ),
+        "latest_signal_timeframe": (
+            signal.timeframe if signal is not None else None
+        ),
+        "requested_timeframe": requested_timeframe,
+        "requested_chart_timeframe_matches_signal": bool(
+            requested_timeframe is None
+            or (
+                signal is not None
+                and signal.timeframe.upper() == requested_timeframe.upper()
+            )
+        ),
+        "requested_chart_timeframe_is_filter": False,
+        "conditions": conditions,
+        "eliminated_by": eliminated_by,
+    }
+    logger.warning(
+        "dashboard.latest_cycle.no_match",
+        extra=diagnostics,
+    )
+    return diagnostics
 
 
 def _system_stage(
@@ -490,6 +622,11 @@ async def dashboard_latest_cycle(
     cycle = await _completed_cycle_projection(request, instrument, timeframe)
     if cycle is not None:
         return cycle
+    diagnostics = await _latest_cycle_selection_diagnostics(
+        request,
+        instrument,
+        timeframe,
+    )
     return {
         "status": "no_data",
         "symbol": instrument,
@@ -515,6 +652,7 @@ async def dashboard_latest_cycle(
         },
         "stages": {},
         "lineage": {},
+        "selection_diagnostics": diagnostics,
         "performance": {
             "signals_generated": 0,
             "signals_awaiting_outcome": 0,

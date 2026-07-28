@@ -39,10 +39,10 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
     const operation = (async () => {
       const results = await Promise.allSettled([
         tenApi.marketIntelligence(instrument, timeframe),
-        tenApi.dashboardLatestCycle(instrument, timeframe),
+        tenApi.dashboardLatestCycle(instrument),
         tenApi.dashboardSystemStatus(instrument),
-        tenApi.dashboardSignals(instrument, timeframe),
-        tenApi.dashboardAnalyses(instrument, timeframe),
+        tenApi.dashboardSignals(instrument),
+        tenApi.dashboardAnalyses(instrument),
       ] as const)
       const nextErrors: Record<string, string> = {}
       const sources = ['market-intelligence', 'latest-cycle', 'dashboard-system', 'signal-history', 'analysis-history'] as const
