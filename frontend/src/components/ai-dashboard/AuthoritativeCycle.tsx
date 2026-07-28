@@ -9,6 +9,12 @@ function formatPrice(value: number | null | undefined) {
   return value == null ? 'Not applicable' : value.toLocaleString(undefined, { maximumFractionDigits: 3 })
 }
 
+function formatDuration(seconds: number | null | undefined) {
+  if (seconds == null) return 'Not available'
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`
+}
+
 export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle | null }) {
   if (!cycle || cycle.status === 'no_data' || !cycle.analytical_signal || !cycle.analysis) {
     return <section className="ai-card ai-card--wide">
@@ -18,12 +24,13 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
   const signal = cycle.analytical_signal
   const analysis = cycle.analysis
   const decision = cycle.final_decision
+  const lifecycle = cycle.signal_lifecycle
   return <>
     <section className="ai-card ai-card--wide authoritative-signal">
       <SectionHeader eyebrow="Latest completed coherent cycle" title="Current analytical signal" action={<TrendingUp size={19} />} />
       <div className="authoritative-signal__hero">
         <StatusBadge tone={signalTone(signal.signal)}>{signal.signal}</StatusBadge>
-        <div><strong>{signal.confidence}% confidence · {humanize(signal.strength)}</strong><small>{signal.reasoning_summary}</small></div>
+        <div><strong>{signal.signal_confidence.toFixed(0)}% signal confidence · {humanize(signal.strength)}</strong><small>{signal.reasoning_summary}</small></div>
         <div className="authoritative-signal__time"><Clock3 size={14} /><span>Market {new Date(cycle.market_time!).toLocaleString()}</span><small>Refreshed {new Date(cycle.dashboard_refreshed_at).toLocaleTimeString()}</small></div>
       </div>
       <div className="health-grid">
@@ -31,7 +38,23 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
         <Metric label="Stop loss" value={formatPrice(signal.stop_loss)} />
         <Metric label="Take profit" value={formatPrice(signal.take_profit)} />
         <Metric label="Risk / reward" value={signal.risk_reward_ratio?.toFixed(2) ?? 'Not applicable'} />
+        <Metric label="Signal status" value={humanize(lifecycle?.status ?? signal.lifecycle_status)} />
+        <Metric label="Signal age" value={formatDuration(lifecycle?.signal_age_seconds)} />
+        <Metric label="Remaining validity" value={formatDuration(lifecycle?.remaining_validity_seconds)} />
+        <Metric label="Expected horizon" value={formatDuration(signal.expected_holding_seconds)} />
       </div>
+      <div className="health-grid">
+        <Metric label="Analysis confidence" value={`${signal.analysis_confidence.toFixed(0)}%`} />
+        <Metric label="Quant confidence" value={signal.quant_confidence == null ? 'Not available' : `${signal.quant_confidence.toFixed(0)}%`} />
+        <Metric label="Guardrail confidence" value={decision == null ? 'Pending' : `${decision.guardrail_confidence.toFixed(0)}%`} />
+        <Metric label="Overall confidence" value={`${(decision?.overall_confidence ?? signal.overall_confidence).toFixed(0)}%`} />
+        <Metric label="Trend score" value={`${(signal.scoring_components.trend_alignment ?? 0).toFixed(0)}%`} />
+        <Metric label="Institutional score" value={`${(signal.scoring_components.institutional_flow ?? 0).toFixed(0)}%`} />
+        <Metric label="Evidence score" value={`${(signal.scoring_components.signal_quality ?? 0).toFixed(0)}%`} />
+        <Metric label="Risk score" value={decision == null ? 'Pending' : `${decision.market_risk_score.toFixed(0)}%`} />
+      </div>
+      <p className="reasoning-copy"><strong>Quant vs AI: {humanize(signal.quant_ai_alignment)}.</strong> {signal.quant_ai_explanation}</p>
+      {lifecycle?.outcome ? <p className="reasoning-copy">Actual RR {lifecycle.outcome.actual_risk_reward?.toFixed(2) ?? 'pending'} · MFE {formatPrice(lifecycle.outcome.maximum_favorable_excursion)} · MAE {formatPrice(lifecycle.outcome.maximum_adverse_excursion)} · Entry {lifecycle.outcome.entry_reached ? 'reached' : 'not reached'}</p> : null}
       <div className="cycle-lineage">
         <span>Cycle <code>{cycle.cycle_id}</code></span>
         <span>Analysis <code>{cycle.analysis_id}</code></span>

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import (
     AIMarketAnalysisRecord,
+    AIAnalysisSignalOutcomeRecord,
     AIAnalysisSignalRecord,
     AIMarketForecastRecord,
     AIReasoningRequestRecord,
@@ -33,7 +34,12 @@ from backend.app.storage.models import (
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .llm_context import build_llm_analysis_context
-from .analysis import AIAnalysisSignal, AIMarketAnalysis, AnalysisStatus
+from .analysis import (
+    AIAnalysisSignal,
+    AIAnalysisSignalOutcome,
+    AIMarketAnalysis,
+    AnalysisStatus,
+)
 from .models import (
     AIMarketForecast,
     AIReasoningRequest,
@@ -139,6 +145,15 @@ class AIReasoningRepository(Protocol):
     ) -> AIMarketAnalysis | None: ...
     async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis: ...
     async def save_analysis_signal(self, value: AIAnalysisSignal) -> AIAnalysisSignal: ...
+    async def save_analysis_signal_outcome(
+        self, value: AIAnalysisSignalOutcome
+    ) -> AIAnalysisSignalOutcome: ...
+    async def analysis_signal_outcome(
+        self, signal_id: object
+    ) -> AIAnalysisSignalOutcome | None: ...
+    async def count_analysis_signal_outcomes(
+        self, instrument: str
+    ) -> tuple[int, int]: ...
     async def signal_for_analysis(self, analysis_id: object) -> AIAnalysisSignal | None: ...
     async def latest_analysis_signal(
         self,
@@ -217,6 +232,7 @@ class InMemoryAIReasoningRepository:
         self.forecasts: dict[object, AIMarketForecast] = {}
         self.analyses: dict[object, AIMarketAnalysis] = {}
         self.analysis_signals: dict[object, AIAnalysisSignal] = {}
+        self.analysis_signal_outcomes: dict[object, AIAnalysisSignalOutcome] = {}
         self.proposals: dict[object, AISignalProposal] = {}
         self.signals: dict[object, ManagedSignal] = {}
         self.transitions: dict[object, SignalStateTransition] = {}
@@ -431,6 +447,39 @@ class InMemoryAIReasoningRepository:
                 return existing
             self.analysis_signals[value.signal_id] = value
             return value
+
+    async def save_analysis_signal_outcome(
+        self,
+        value: AIAnalysisSignalOutcome,
+    ) -> AIAnalysisSignalOutcome:
+        async with self._lock:
+            self.analysis_signal_outcomes[value.signal_id] = value
+            return value
+
+    async def analysis_signal_outcome(
+        self,
+        signal_id: object,
+    ) -> AIAnalysisSignalOutcome | None:
+        async with self._lock:
+            return self.analysis_signal_outcomes.get(signal_id)
+
+    async def count_analysis_signal_outcomes(
+        self,
+        instrument: str,
+    ) -> tuple[int, int]:
+        async with self._lock:
+            signal_ids = {
+                item.signal_id
+                for item in self.analysis_signals.values()
+                if item.instrument == instrument
+            }
+            values = [
+                item
+                for signal_id, item in self.analysis_signal_outcomes.items()
+                if signal_id in signal_ids
+            ]
+        complete = sum(item.completed_at is not None for item in values)
+        return len(values), complete
 
     async def signal_for_analysis(self, analysis_id: object) -> AIAnalysisSignal | None:
         async with self._lock:
@@ -1041,6 +1090,74 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             return AIAnalysisSignal.model_validate(record.payload)
         await self.session.commit()
         return value
+
+    @scoped_session
+    async def save_analysis_signal_outcome(
+        self,
+        value: AIAnalysisSignalOutcome,
+    ) -> AIAnalysisSignalOutcome:
+        await self.session.execute(
+            insert(AIAnalysisSignalOutcomeRecord)
+            .values(
+                outcome_id=value.outcome_id,
+                signal_id=value.signal_id,
+                status=value.status.value,
+                entry_reached=value.entry_reached,
+                payload=value.model_dump(mode="json"),
+                evaluated_at=value.evaluated_at,
+                completed_at=value.completed_at,
+            )
+            .on_conflict_do_update(
+                index_elements=["signal_id"],
+                set_={
+                    "status": value.status.value,
+                    "entry_reached": value.entry_reached,
+                    "payload": value.model_dump(mode="json"),
+                    "evaluated_at": value.evaluated_at,
+                    "completed_at": value.completed_at,
+                },
+            )
+        )
+        await self.session.commit()
+        return value
+
+    @scoped_session
+    async def analysis_signal_outcome(
+        self,
+        signal_id: object,
+    ) -> AIAnalysisSignalOutcome | None:
+        record = (
+            await self.session.scalars(
+                select(AIAnalysisSignalOutcomeRecord)
+                .where(AIAnalysisSignalOutcomeRecord.signal_id == signal_id)
+                .limit(1)
+            )
+        ).first()
+        return (
+            AIAnalysisSignalOutcome.model_validate(record.payload)
+            if record is not None
+            else None
+        )
+
+    @scoped_session
+    async def count_analysis_signal_outcomes(
+        self,
+        instrument: str,
+    ) -> tuple[int, int]:
+        base = (
+            select(AIAnalysisSignalOutcomeRecord.completed_at)
+            .join(
+                AIAnalysisSignalRecord,
+                AIAnalysisSignalRecord.signal_id
+                == AIAnalysisSignalOutcomeRecord.signal_id,
+            )
+            .where(AIAnalysisSignalRecord.instrument == instrument)
+        )
+        completed_values = list((await self.session.scalars(base)).all())
+        return (
+            len(completed_values),
+            sum(value is not None for value in completed_values),
+        )
 
     @scoped_session
     async def signal_for_analysis(self, analysis_id: object) -> AIAnalysisSignal | None:

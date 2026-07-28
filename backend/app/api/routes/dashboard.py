@@ -6,7 +6,7 @@ This endpoint never runs analytics. It only joins persisted records through the 
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import logging
@@ -107,6 +107,60 @@ def _publication_projection(decision: Any | None) -> dict[str, Any]:
     }
 
 
+async def _signal_lifecycle_projection(
+    request: Request,
+    signal: Any,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    outcome = await request.app.state.ai_reasoning_repository.analysis_signal_outcome(
+        signal.signal_id
+    )
+    serialized = outcome.model_dump(mode="json") if outcome is not None else None
+    status = (
+        outcome.status.value
+        if outcome is not None
+        else getattr(getattr(signal, "lifecycle_status", None), "value", "ACTIVE")
+    )
+    valid_until = getattr(signal, "valid_until", None)
+    if valid_until is None:
+        legacy_validity_seconds = {
+            "M1": 60,
+            "M5": 300,
+            "M15": 900,
+            "M30": 1800,
+            "H1": 3600,
+            "H4": 14400,
+            "D1": 86400,
+        }.get(str(getattr(signal, "timeframe", "")).upper(), 300)
+        valid_until = signal.generated_at + timedelta(
+            seconds=legacy_validity_seconds
+        )
+    if status in {"ACTIVE", "STALE"} and valid_until is not None and now >= valid_until:
+        status = "EXPIRED"
+    remaining = (
+        max(0.0, (valid_until - now).total_seconds())
+        if valid_until is not None
+        else None
+    )
+    return {
+        "status": status,
+        "signal_age_seconds": max(
+            0.0,
+            (now - signal.generated_at).total_seconds(),
+        ),
+        "remaining_validity_seconds": remaining,
+        "valid_from": getattr(signal, "valid_from", None),
+        "valid_until": valid_until,
+        "expected_holding_seconds": getattr(
+            signal,
+            "expected_holding_seconds",
+            None,
+        ),
+        "outcome": serialized,
+    }
+
+
 async def _completed_cycle_projection(
     request: Request,
     instrument: str,
@@ -165,6 +219,16 @@ async def _completed_cycle_projection(
         )
     )
     now = datetime.now(UTC)
+    lifecycle = await _signal_lifecycle_projection(
+        request,
+        signal,
+        now=now,
+    )
+    outcome_count, completed_outcome_count = (
+        await request.app.state.ai_reasoning_repository.count_analysis_signal_outcomes(
+            instrument
+        )
+    )
     logger.info(
         "dashboard.latest_cycle.selected",
         extra={
@@ -238,6 +302,16 @@ async def _completed_cycle_projection(
     serialized_state = state.model_dump(mode="json") if state is not None else None
     serialized_quant = quant.model_dump(mode="json") if quant is not None else None
     serialized_analysis = analysis.model_dump(mode="json")
+    serialized_signal = signal.model_dump(mode="json")
+    serialized_signal["lifecycle_status"] = lifecycle["status"]
+    if signal.schema_version == "1.0":
+        serialized_signal["signal_confidence"] = signal.confidence
+        serialized_signal["overall_confidence"] = signal.confidence
+        serialized_signal["analysis_confidence"] = (
+            analysis.output.analysis_confidence * 100
+            if analysis.output is not None
+            else 0
+        )
     result = {
         "status": "completed",
         "symbol": signal.instrument,
@@ -257,7 +331,8 @@ async def _completed_cycle_projection(
         "quant_forecast": serialized_quant,
         "analysis": serialized_analysis,
         "ai_analysis": serialized_analysis,
-        "analytical_signal": signal.model_dump(mode="json"),
+        "analytical_signal": serialized_signal,
+        "signal_lifecycle": lifecycle,
         "guardrail_decision": (
             {
                 "state": decision.state.value,
@@ -294,13 +369,20 @@ async def _completed_cycle_projection(
         },
         "performance": {
             "signals_generated": generated_signal_count,
-            "signals_awaiting_outcome": generated_signal_count,
-            "signals_evaluated": 0,
+            "signals_awaiting_outcome": max(
+                0,
+                generated_signal_count - completed_outcome_count,
+            ),
+            "signals_evaluated": completed_outcome_count,
             "minimum_required_sample": minimum_sample,
-            "calibration_sample_size": 0,
+            "calibration_sample_size": completed_outcome_count,
             "state": (
-                "signals_exist_outcomes_pending"
-                if generated_signal_count
+                "available"
+                if completed_outcome_count >= minimum_sample
+                else "insufficient_sample"
+                if completed_outcome_count
+                else "signals_exist_outcomes_pending"
+                if outcome_count
                 else "no_signals"
             ),
         },
@@ -757,9 +839,16 @@ async def dashboard_signal_history(
     for item in visible:
         decision = await _decision_for_analysis_signal(request, item)
         publication = _publication_projection(decision)
+        lifecycle = await _signal_lifecycle_projection(
+            request,
+            item,
+            now=datetime.now(UTC),
+        )
+        serialized_signal = item.model_dump(mode="json")
+        serialized_signal["lifecycle_status"] = lifecycle["status"]
         history_items.append(
             {
-                "analytical_signal": item.model_dump(mode="json"),
+                "analytical_signal": serialized_signal,
                 "publication": publication,
                 "guardrail_outcome": (
                     decision.state.value if decision is not None else "pending"
@@ -767,7 +856,8 @@ async def dashboard_signal_history(
                 "final_action": (
                     decision.final_action.value if decision is not None else "PENDING"
                 ),
-                "outcome_status": "pending",
+                "outcome_status": lifecycle["status"],
+                "outcome": lifecycle["outcome"],
                 "decision_id": (
                     str(decision.decision_id) if decision is not None else None
                 ),

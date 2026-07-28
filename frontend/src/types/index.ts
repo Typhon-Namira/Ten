@@ -93,6 +93,8 @@ export interface SignalDecisionSnapshot {
   decision_policy_version: string
   eligibility_score: number
   confidence_score: number
+  guardrail_confidence: number
+  overall_confidence: number
   market_risk_score: number
   data_quality_score: number
   evidence_alignment_score: number
@@ -761,6 +763,18 @@ export interface AIAnalysisSignal {
   reasoning_summary: string
   risk_flags: string[]
   scoring_components: Record<string, number>
+  analysis_confidence: number
+  signal_confidence: number
+  quant_confidence: number | null
+  overall_confidence: number
+  quant_ai_alignment: 'agreement' | 'disagreement' | 'quant_unavailable' | 'neutral'
+  quant_ai_explanation: string
+  quality_threshold: number
+  geometry_basis: string[]
+  valid_from: string | null
+  valid_until: string | null
+  expected_holding_seconds: number | null
+  lifecycle_status: 'ACTIVE' | 'COMPLETED' | 'STALE' | 'EXPIRED' | 'STOPPED' | 'TARGET_HIT' | 'STOP_HIT' | 'SUPERSEDED'
   fallback: boolean
   source: string
   generated_at: string
@@ -788,6 +802,21 @@ export interface LatestCompletedCycle {
   quant_forecast?: QuantForecastResult | null
   analysis: AIMarketAnalysis | null
   analytical_signal: AIAnalysisSignal | null
+  signal_lifecycle?: {
+    status: AIAnalysisSignal['lifecycle_status']
+    signal_age_seconds: number
+    remaining_validity_seconds: number | null
+    valid_from: string | null
+    valid_until: string | null
+    expected_holding_seconds: number | null
+    outcome: {
+      actual_risk_reward: number | null
+      profit_loss: number | null
+      maximum_favorable_excursion: number
+      maximum_adverse_excursion: number
+      entry_reached: boolean
+    } | null
+  }
   guardrail_decision: {
     state: string
     readiness: string
@@ -824,6 +853,7 @@ export interface AnalysisSignalPage {
     guardrail_outcome: string
     final_action: string
     outcome_status: string
+    outcome?: Record<string, unknown> | null
     decision_id: string | null
   }>
   cursor: number

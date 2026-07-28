@@ -39,6 +39,24 @@ class AnalysisSignalStrength(StrEnum):
     VERY_STRONG = "VERY_STRONG"
 
 
+class AnalysisSignalLifecycle(StrEnum):
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    STALE = "STALE"
+    EXPIRED = "EXPIRED"
+    STOPPED = "STOPPED"
+    TARGET_HIT = "TARGET_HIT"
+    STOP_HIT = "STOP_HIT"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class QuantAIAlignment(StrEnum):
+    AGREEMENT = "agreement"
+    DISAGREEMENT = "disagreement"
+    QUANT_UNAVAILABLE = "quant_unavailable"
+    NEUTRAL = "neutral"
+
+
 class EvidenceKind(StrEnum):
     OBSERVED_FACT = "observed_fact"
     CALCULATED_FEATURE = "calculated_feature"
@@ -238,7 +256,7 @@ class AIMarketAnalysis(StrictAnalysisModel):
 class AIAnalysisSignal(StrictAnalysisModel):
     """Deterministic signal derived from a validated analysis, never from LLM fields."""
 
-    schema_version: str = "1.0"
+    schema_version: str = "2.0"
     signal_id: UUID
     cycle_id: UUID
     snapshot_id: UUID
@@ -256,13 +274,27 @@ class AIAnalysisSignal(StrictAnalysisModel):
     reasoning_summary: str
     risk_flags: tuple[str, ...] = ()
     scoring_components: dict[str, float]
+    analysis_confidence: float = Field(default=0, ge=0, le=100)
+    signal_confidence: float = Field(default=0, ge=0, le=100)
+    quant_confidence: float | None = Field(default=None, ge=0, le=100)
+    overall_confidence: float = Field(default=0, ge=0, le=100)
+    quant_ai_alignment: QuantAIAlignment = QuantAIAlignment.QUANT_UNAVAILABLE
+    quant_ai_explanation: str = "Quantitative alignment was not evaluated."
+    quality_threshold: float = Field(default=0, ge=0, le=100)
+    geometry_basis: tuple[str, ...] = ()
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    expected_holding_seconds: int | None = Field(default=None, gt=0)
+    lifecycle_status: AnalysisSignalLifecycle = AnalysisSignalLifecycle.ACTIVE
     fallback: bool = False
     source: str = "deterministic_analysis_signal"
     generated_at: datetime
 
-    @field_validator("generated_at")
+    @field_validator("generated_at", "valid_from", "valid_until")
     @classmethod
-    def signal_time_is_aware(cls, value: datetime) -> datetime:
+    def signal_time_is_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
         if value.tzinfo is None:
             raise ValueError("analysis-signal timestamp must be timezone-aware")
         return value.astimezone(UTC)
@@ -272,6 +304,12 @@ class AIAnalysisSignal(StrictAnalysisModel):
         expected_strength = signal_strength(self.confidence)
         if self.strength != expected_strength:
             raise ValueError("analysis-signal strength does not match confidence")
+        if (
+            self.valid_from is not None
+            and self.valid_until is not None
+            and self.valid_until <= self.valid_from
+        ):
+            raise ValueError("analysis-signal validity must have positive duration")
         geometry = (self.entry, self.stop_loss, self.take_profit, self.risk_reward_ratio)
         if self.signal == AnalysisSignalAction.HOLD:
             if any(value is not None for value in geometry):
@@ -291,6 +329,37 @@ class AIAnalysisSignal(StrictAnalysisModel):
         ):
             raise ValueError("SELL analysis-signal geometry is invalid")
         return self
+
+
+class AIAnalysisSignalOutcome(StrictAnalysisModel):
+    """Latest immutable evaluation snapshot for one deterministic analysis signal."""
+
+    schema_version: str = "1.0"
+    outcome_id: UUID
+    signal_id: UUID
+    status: AnalysisSignalLifecycle
+    entry_reached: bool
+    entry_reached_at: datetime | None = None
+    stop_hit: bool
+    target_hit: bool
+    expired: bool
+    maximum_favorable_excursion: float = Field(default=0, ge=0)
+    maximum_adverse_excursion: float = Field(default=0, ge=0)
+    holding_time_seconds: float | None = Field(default=None, ge=0)
+    actual_risk_reward: float | None = None
+    profit_loss: float | None = None
+    evaluated_at: datetime
+    completed_at: datetime | None = None
+    reason_codes: tuple[str, ...] = ()
+
+    @field_validator("entry_reached_at", "evaluated_at", "completed_at")
+    @classmethod
+    def outcome_time_is_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("analysis-signal outcome timestamp must be timezone-aware")
+        return value.astimezone(UTC)
 
 
 def signal_strength(confidence: int) -> AnalysisSignalStrength:

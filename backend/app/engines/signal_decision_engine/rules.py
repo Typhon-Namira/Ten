@@ -42,6 +42,7 @@ def production_rule_registry() -> RuleRegistry:
         ("strength.minimum", RuleCategory.DIRECTIONAL_STRENGTH),
         ("confidence.minimum", RuleCategory.CONFIDENCE),
         ("risk.maximum", RuleCategory.RISK),
+        ("geometry.minimum_risk_reward", RuleCategory.RISK),
         ("quality.minimum", RuleCategory.DATA_QUALITY),
         ("alignment.minimum", RuleCategory.ALIGNMENT),
         ("ai.signal_authority", RuleCategory.ALIGNMENT),

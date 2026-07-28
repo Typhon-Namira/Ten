@@ -47,6 +47,7 @@ from .provider import AIReasoningProvider
 from .repository import AIReasoningRepository
 from .request_builder import AIReasoningRequestBuilder
 from .signal import DeterministicAnalysisSignalGenerator
+from .signal_outcomes import AnalysisSignalOutcomeEvaluator
 from .validation import StructuredAIOutputError, StructuredAIOutputValidator
 
 logger = logging.getLogger(__name__)
@@ -115,7 +116,8 @@ class AIReasoningService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self._llm_semaphore = asyncio.Semaphore(config.llm_concurrency_limit)
         self.memory = MarketMemory(config.maximum_memory_entries)
-        self.signal_generator = DeterministicAnalysisSignalGenerator()
+        self.signal_generator = DeterministicAnalysisSignalGenerator(config)
+        self.signal_outcomes = AnalysisSignalOutcomeEvaluator()
         self.requests = 0
         self.failed_requests = 0
         self.last_latency_ms: float | None = None
@@ -788,6 +790,8 @@ class AIReasoningService:
                         "snapshot_id": str(analysis.market_snapshot_id),
                     },
                 )
+        if signal is not None and state is not None:
+            await self._update_analysis_signal_outcomes(signal, state)
         logger.info(
             "ai_analysis.temporal_context.completed",
             extra={
@@ -805,6 +809,84 @@ class AIReasoningService:
             temporal_metrics=metrics,
             signal=signal,
         )
+
+    async def _update_analysis_signal_outcomes(
+        self,
+        current_signal: Any,
+        state: UnifiedMarketState,
+    ) -> None:
+        current_outcome = await self.repository.analysis_signal_outcome(
+            current_signal.signal_id
+        )
+        if current_outcome is None:
+            current_outcome = await self.repository.save_analysis_signal_outcome(
+                self.signal_outcomes.initial(current_signal)
+            )
+        market_items = [
+            item
+            for item in state.evidence
+            if item.source_engine.lower() == "market_data"
+            and isinstance(item.raw_value, Mapping)
+        ]
+        if not market_items:
+            return
+        latest_market = max(
+            market_items,
+            key=lambda item: item.source_candle_close_timestamp,
+        )
+        raw = latest_market.raw_value
+        assert isinstance(raw, Mapping)
+        high = raw.get("high")
+        low = raw.get("low")
+        close = raw.get("close")
+        numeric_values = tuple(
+            float(value)
+            for value in (high, low, close)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+        if len(numeric_values) != 3:
+            return
+        candle_high, candle_low, candle_close = numeric_values
+        previous_signals = await self.repository.list_analysis_signals(
+            current_signal.instrument,
+            None,
+            None,
+            current_signal.generated_at,
+            None,
+            None,
+            None,
+            0,
+            100,
+        )
+        for signal in previous_signals:
+            if signal.signal_id == current_signal.signal_id:
+                continue
+            previous = await self.repository.analysis_signal_outcome(signal.signal_id)
+            if previous is None:
+                previous = self.signal_outcomes.initial(signal)
+            evaluated = self.signal_outcomes.evaluate(
+                signal,
+                previous,
+                candle_high=candle_high,
+                candle_low=candle_low,
+                candle_close=candle_close,
+                evaluated_at=state.market_data_boundary,
+                superseded=True,
+            )
+            if evaluated != previous:
+                await self.repository.save_analysis_signal_outcome(evaluated)
+                logger.info(
+                    "ai_reasoning.signal.outcome.updated",
+                    extra={
+                        "signal_id": str(signal.signal_id),
+                        "cycle_id": str(signal.cycle_id),
+                        "status": evaluated.status.value,
+                        "entry_reached": evaluated.entry_reached,
+                        "target_hit": evaluated.target_hit,
+                        "stop_hit": evaluated.stop_hit,
+                        "actual_risk_reward": evaluated.actual_risk_reward,
+                    },
+                )
 
     async def _record_usage(
         self,

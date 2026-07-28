@@ -95,6 +95,7 @@ retention:
   cleanup_batch_size: 500
 future_clock_skew_seconds: 5
 output_precision: 4
+minimum_risk_reward: 2.0
 persistence_required_in_production: true
 publish_replay_events: false
 publish_replay_features: false

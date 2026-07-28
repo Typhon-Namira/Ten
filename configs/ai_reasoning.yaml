@@ -41,3 +41,7 @@ temporal_tolerance_minutes:
   1h: 20
   4h: 60
 temporal_rolling_window: 60
+signal_minimum_risk_reward: 2.0
+signal_preferred_risk_reward: 2.5
+signal_exceptional_risk_reward: 3.0
+signal_quality_threshold: 65

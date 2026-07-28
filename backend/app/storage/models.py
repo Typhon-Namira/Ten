@@ -1268,6 +1268,29 @@ class AIAnalysisSignalRecord(Base):
     )
 
 
+class AIAnalysisSignalOutcomeRecord(Base):
+    """Latest lifecycle/outcome projection for a deterministic analysis signal."""
+
+    __tablename__ = "ai_analysis_signal_outcomes"
+
+    outcome_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    signal_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_analysis_signals.signal_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    entry_reached: Mapped[bool] = mapped_column(Boolean, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+
 class AIForecastScenarioRecord(Base):
     __tablename__ = "ai_forecast_scenarios"
 
