@@ -19,12 +19,11 @@ from backend.app.ai.provider_client import (
 )
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.ai_reasoning.config import AIReasoningConfig
-from backend.app.ai_reasoning.llm_context import LLMAnalysisContext, build_llm_analysis_context
+from backend.app.ai_reasoning.llm_context import build_llm_analysis_context
 from backend.app.ai_reasoning.memory import MarketMemory
 from backend.app.ai_reasoning.models import MarketMemoryEntry, MarketMemorySummary
 from backend.app.ai_reasoning.provider import (
     GroqProvider,
-    reasoning_response_schema,
 )
 from backend.app.ai_reasoning.request_persistence import (
     decode_persisted_request,
@@ -158,7 +157,7 @@ async def test_provider_serializes_only_typed_compact_context_without_candles_or
     assert client.calls == 1
     payload = client.payloads[0]
     assert set(payload) == {"analysis_context", "response_contract"}
-    context = LLMAnalysisContext.model_validate(payload["analysis_context"])
+    context = payload["analysis_context"]
     encoded = json.dumps(payload, sort_keys=True)
     prohibited = (
         '"analysis_request"',
@@ -172,7 +171,9 @@ async def test_provider_serializes_only_typed_compact_context_without_candles_or
         '"dashboard"',
     )
     assert all(token not in encoded for token in prohibited)
-    assert context.current_price > 0
+    assert context["current_price"] > 0
+    assert "request_id" not in context
+    assert context["evidence_catalog"]
 
 
 def _request_record(request: Any, payload: dict[str, Any]) -> SimpleNamespace:
@@ -292,7 +293,7 @@ async def test_normal_context_stays_below_target_token_budget() -> None:
     )
 
     assert metrics.estimated_input_tokens <= config.target_input_tokens
-    assert metrics.maximum_output_tokens == 1_000
+    assert metrics.maximum_output_tokens == 1_400
     assert metrics.maximum_output_tokens <= config.absolute_max_output_tokens
 
 
@@ -456,9 +457,9 @@ async def test_finish_reason_length_is_not_sent_as_schema_correction() -> None:
             prompt_version=request.prompt_version,
         )
 
-    assert calls == 1
-    assert captured.value.details.reason_code == "truncated_response"
-    assert captured.value.details.schema_error_code == "finish_reason_length"
+    assert calls == 2
+    assert captured.value.details.reason_code == "output_budget_exceeded"
+    assert captured.value.details.schema_error_code == "OUTPUT_BUDGET_EXCEEDED"
 
 
 @pytest.mark.asyncio
@@ -651,12 +652,12 @@ async def test_response_contract_is_analysis_only_and_strict() -> None:
 
     contract = _provider(CapturingClient(), config)._response_contract()
 
-    assert contract["json_schema"] == reasoning_response_schema()
+    assert "shape" in contract
     encoded = json.dumps(contract)
     for prohibited in ("setup_family", "entry_low", "stop_loss", "take_profit_levels"):
         assert prohibited not in encoded
-    assert "market_regime" in contract["json_schema"]["properties"]
-    assert "do not recommend BUY, SELL, WAIT" in " ".join(contract["rules"])
+    assert "market_regime" in contract["shape"]
+    assert "no trade" in " ".join(contract["rules"])
 
 
 def test_prompt_templates_explicitly_require_every_provider_wire_field() -> None:
@@ -664,20 +665,11 @@ def test_prompt_templates_explicitly_require_every_provider_wire_field() -> None
 
     for name in ("deep_market_analysis_v2.txt", "existing_position_market_analysis_v2.txt"):
         prompt = (directory / name).read_text(encoding="utf-8")
-        for field in (
-            "market_regime",
-            "higher_timeframe_context",
-            "market_structure",
-            "liquidity_analysis",
-            "supply_demand_analysis",
-            "momentum_analysis",
-            "volatility_analysis",
-            "analysis_confidence",
-            "executive_summary",
-        ):
-            assert field in prompt
-        assert "do not emit response-contract metadata" in prompt.lower()
-        assert "Never output BUY, SELL, WAIT" in prompt
+        assert "response_contract" in prompt
+        assert "evidence_catalog" in prompt
+        assert "maxLength" in prompt
+        assert "maxItems" in prompt
+        assert "Never emit a trading action" in prompt
 
 
 def test_setup_family_registry_never_fuzzy_maps_unknown_values() -> None:

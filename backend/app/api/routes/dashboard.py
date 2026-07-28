@@ -486,6 +486,22 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         key=lambda item: str(item.get("recorded_at") or ""),
         reverse=True,
     )[:20]
+    all_provider_attempts = tuple(
+        attempt
+        for item in usage_rows
+        for attempt in item.generation_parameters.get("provider_attempts", ())
+        if isinstance(attempt, dict)
+    )
+    output_token_samples = sorted(
+        int(value)
+        for attempt in all_provider_attempts
+        if isinstance((value := attempt.get("output_tokens")), int)
+    )
+    completed_analyses = sum(item.success for item in policy_usage_rows)
+    policy_tokens = sum(item.total_tokens or 0 for item in policy_usage_rows)
+    policy_calls = sum(item.request_count for item in policy_usage_rows)
+    truncated_outputs = usage_parameter("truncated_outputs")
+    analysis_requests = usage_parameter("analysis_requests")
     usage = {
         "request_count": sum(item.request_count for item in usage_rows),
         "provider_http_calls": sum(item.request_count for item in usage_rows),
@@ -504,6 +520,68 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             "schema_corrections_failed"
         ),
         "http_429_responses": usage_parameter("http_429_responses"),
+        "provider_http_successes": usage_parameter("provider_http_successes"),
+        "schema_valid_analyses": usage_parameter("schema_valid_analyses"),
+        "truncated_outputs": truncated_outputs,
+        "compact_retries": usage_parameter("compact_retries"),
+        "request_policy_failures": usage_parameter("request_policy_failures"),
+        "tokens_per_completed_analysis": (
+            round(policy_tokens / completed_analyses, 2)
+            if completed_analyses
+            else None
+        ),
+        "provider_calls_per_completed_analysis": (
+            round(policy_calls / completed_analyses, 2)
+            if completed_analyses
+            else None
+        ),
+        "truncation_rate": (
+            round(truncated_outputs / analysis_requests, 4)
+            if analysis_requests
+            else None
+        ),
+        "average_input_tokens": (
+            round(
+                sum(
+                    int(value)
+                    for attempt in all_provider_attempts
+                    if isinstance((value := attempt.get("input_tokens")), int)
+                )
+                / max(
+                    1,
+                    sum(
+                        isinstance(attempt.get("input_tokens"), int)
+                        for attempt in all_provider_attempts
+                    ),
+                ),
+                2,
+            )
+            if any(
+                isinstance(attempt.get("input_tokens"), int)
+                for attempt in all_provider_attempts
+            )
+            else None
+        ),
+        "average_output_tokens": (
+            round(sum(output_token_samples) / len(output_token_samples), 2)
+            if output_token_samples
+            else None
+        ),
+        "p95_output_tokens": (
+            output_token_samples[
+                min(
+                    len(output_token_samples) - 1,
+                    int(len(output_token_samples) * 0.95),
+                )
+            ]
+            if output_token_samples
+            else None
+        ),
+        "completion_rate": (
+            round(completed_analyses / analysis_requests, 4)
+            if analysis_requests
+            else None
+        ),
         "recent_provider_attempts": recent_provider_attempts,
         "provider_failures": usage_parameter("provider_failure"),
         "validation_failures": usage_parameter("validation_failure"),

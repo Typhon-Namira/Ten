@@ -346,6 +346,16 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         )
         await app.state.signal_decision_service.start()
         ai_reasoning_config = configs.load_model("ai_reasoning", AIReasoningConfig)
+        ai_reasoning_config = ai_reasoning_config.model_copy(
+            update={
+                "output_profile": settings.ai_output_profile,
+                "target_output_tokens": settings.ai_target_output_tokens,
+                "max_tokens": settings.ai_max_output_tokens,
+                "input_token_budget": settings.ai_input_token_budget,
+                "target_input_tokens": settings.ai_input_token_budget,
+                "token_safety_margin": settings.ai_token_safety_margin,
+            }
+        )
         groq_keys = settings.groq_pool_api_keys
         app.state.groq_clients = {
             f"groq_{index}": HttpAIProviderClient(
@@ -452,6 +462,10 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 input_cost_per_million_usd=ai_reasoning_config.input_cost_per_million_usd,
                 output_cost_per_million_usd=ai_reasoning_config.output_cost_per_million_usd,
                 setup_family_ids=setup_family_ids,
+                output_profile=ai_reasoning_config.output_profile,
+                target_output_tokens=ai_reasoning_config.target_output_tokens,
+                token_safety_margin=ai_reasoning_config.token_safety_margin,
+                model_context_limit=ai_reasoning_config.model_context_limit,
             )
             for account_id, client in app.state.groq_clients.items()
         )

@@ -4,7 +4,7 @@ from functools import lru_cache
 import json
 import logging
 import os
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     groq_rate_limit_cooldown_seconds: float = Field(default=3600, ge=1, le=86400)
     groq_quota_cooldown_seconds: float = Field(default=86400, ge=60, le=604800)
     groq_pool_strategy: str = "ordered_failover"
+    ai_output_profile: Literal["compact", "standard", "expanded"] = "compact"
+    ai_target_output_tokens: int = Field(default=900, ge=256, le=10_000)
+    ai_max_output_tokens: int = Field(default=1400, ge=256, le=10_000)
+    ai_input_token_budget: int = Field(default=3500, ge=512, le=100_000)
+    ai_token_safety_margin: int = Field(default=256, ge=64, le=4096)
     integration_enabled: bool = True
     live_pipeline_enabled: bool = True
     integration_worker_enabled: bool = False
@@ -203,6 +208,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def production_security(self) -> "Settings":
+        if self.ai_target_output_tokens > self.ai_max_output_tokens:
+            raise ValueError(
+                "TEN_AI_TARGET_OUTPUT_TOKENS must not exceed "
+                "TEN_AI_MAX_OUTPUT_TOKENS"
+            )
         if self.ai_primary_provider != "groq":
             raise ValueError("TEN_AI_PRIMARY_PROVIDER must be groq")
         if self.groq_pool_strategy != "ordered_failover":

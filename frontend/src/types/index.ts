@@ -767,12 +767,24 @@ export interface AIReasoningDashboard {
     schema_corrections_succeeded: number
     schema_corrections_failed: number
     http_429_responses: number
+    provider_http_successes: number
+    schema_valid_analyses: number
+    truncated_outputs: number
+    compact_retries: number
+    request_policy_failures: number
+    tokens_per_completed_analysis: number | null
+    provider_calls_per_completed_analysis: number | null
+    truncation_rate: number | null
+    average_input_tokens: number | null
+    average_output_tokens: number | null
+    p95_output_tokens: number | null
+    completion_rate: number | null
     recent_provider_attempts: Array<{
       analysis_job_id: string
       eligible_cycle_id: string
       provider_attempt_id: string
       account_id: string
-      request_kind: 'analysis' | 'schema_correction' | 'transport_retry' | 'model_probe'
+      request_kind: 'analysis' | 'schema_correction' | 'transport_retry' | 'model_probe' | 'compact_retry'
       request_sequence: number
       recorded_at: string
       input_tokens: number | null
@@ -786,6 +798,16 @@ export interface AIReasoningDashboard {
       response_size_bytes: number | null
       response_character_count: number | null
       prompt_character_count: number | null
+      target_output_tokens: number | null
+      hard_output_limit: number | null
+      output_profile: string | null
+      analysis_schema_version: string | null
+      input_budget_utilization_percent: number | null
+      output_budget_utilization_percent: number | null
+      token_estimator: string | null
+      context_sections_included: string[]
+      context_sections_omitted: string[]
+      fields_completed_before_failure: number | null
       schema_valid: boolean | null
       schema_error_code: string | null
       schema_error_path: string | null
@@ -871,6 +893,8 @@ export interface AIReasoningDashboard {
       rate_limit_state: 'ACTIVE' | 'CLEAR'
       quota_state: 'EXHAUSTED' | 'AVAILABLE'
       last_request_status: number | null
+      last_request_result: string | null
+      request_policy_health: 'healthy' | 'degraded'
       calls_today: number
       successful_analyses: number
       provider_failures: number
@@ -879,6 +903,12 @@ export interface AIReasoningDashboard {
       analysis_requests: number
       schema_correction_requests: number
       http_429_responses: number
+      provider_http_successes: number
+      schema_valid_analyses: number
+      truncated_outputs: number
+      compact_retries: number
+      request_policy_failures: number
+      truncation_rate: number
       token_usage: {
         input_tokens: number
         output_tokens: number

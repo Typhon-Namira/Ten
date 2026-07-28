@@ -14,7 +14,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .compact_output import EvidenceCatalogItem
 from .models import AIReasoningRequest
+from .token_budget import OutputProfile
 
 _MAX_SUMMARY_CHARS = 480
 _MAX_REASON_CHARS = 160
@@ -174,6 +176,7 @@ class LLMAnalysisContext(_ImmutableDTO):
     active_position: CompactPositionSummary | None = None
     previous_final_decision: PreviousDecisionSummary | None = None
     material_changes: tuple[MaterialChange, ...] = Field(default=(), max_length=5)
+    evidence_catalog: tuple[EvidenceCatalogItem, ...] = Field(default=(), max_length=20)
     prompt_version: str = Field(max_length=64)
     reasoning_policy_version: str = Field(max_length=64)
     setup_family_registry_version: str = Field(max_length=64)
@@ -191,6 +194,79 @@ class LLMAnalysisContext(_ImmutableDTO):
         if self.analysis_boundary > self.market_data_cutoff:
             raise ValueError("LLM context exceeds its market-data cutoff")
         return self
+
+
+_REQUIRED_PROVIDER_CONTEXT_FIELDS = (
+    "symbol",
+    "analysis_boundary",
+    "market_data_cutoff",
+    "current_price",
+    "market_regime",
+    "timeframe_trends",
+    "smc",
+    "nearest_supply_zones",
+    "nearest_demand_zones",
+    "nearest_liquidity_levels",
+    "volume_profile",
+    "institutional_flow",
+    "quant",
+    "risk",
+    "evidence_catalog",
+)
+_OPTIONAL_PROVIDER_CONTEXT_FIELDS = (
+    "active_position",
+    "previous_final_decision",
+    "material_changes",
+    "relevant_order_blocks",
+    "relevant_fair_value_gaps",
+)
+
+
+def provider_context_payload(
+    context: LLMAnalysisContext,
+    profile: OutputProfile | str,
+) -> tuple[dict[str, Any], tuple[str, ...], tuple[str, ...]]:
+    """Select provider context deterministically by priority."""
+
+    selected = OutputProfile(profile)
+    dumped = context.model_dump(mode="json")
+    included = list(_REQUIRED_PROVIDER_CONTEXT_FIELDS)
+    if context.active_position is not None:
+        included.append("active_position")
+    if selected in {OutputProfile.STANDARD, OutputProfile.EXPANDED}:
+        included.extend(("relevant_order_blocks", "relevant_fair_value_gaps"))
+        if context.previous_final_decision is not None:
+            included.append("previous_final_decision")
+        if context.material_changes:
+            included.append("material_changes")
+    elif selected == OutputProfile.COMPACT and context.material_changes:
+        included.append("material_changes")
+        dumped["material_changes"] = dumped["material_changes"][-3:]
+    if selected in {OutputProfile.COMPACT, OutputProfile.COMPACT_RETRY}:
+        for key in ("market_regime", "smc", "institutional_flow"):
+            if isinstance(dumped.get(key), dict):
+                dumped[key].pop("evidence_ids", None)
+        for key in (
+            "nearest_supply_zones",
+            "nearest_demand_zones",
+            "nearest_liquidity_levels",
+        ):
+            for item in dumped.get(key, ()):
+                if isinstance(item, dict):
+                    item.pop("evidence_id", None)
+        dumped["evidence_catalog"] = [
+            {
+                "evidence_id": item["evidence_id"],
+                "fact": item["fact"],
+                "kind": item["kind"],
+            }
+            for item in dumped["evidence_catalog"]
+        ]
+    payload = {key: dumped[key] for key in included}
+    omitted = tuple(
+        key for key in _OPTIONAL_PROVIDER_CONTEXT_FIELDS if key not in included
+    )
+    return payload, tuple(included), omitted
 
 
 def _walk(value: Any) -> Iterable[dict[str, Any]]:
@@ -246,6 +322,78 @@ def _evidence_items(request: AIReasoningRequest, *field_names: str) -> tuple[dic
         if isinstance(value, tuple):
             items.extend(item for item in value if isinstance(item, dict))
     return tuple(items)
+
+
+def _evidence_catalog(request: AIReasoningRequest) -> tuple[EvidenceCatalogItem, ...]:
+    catalog: list[EvidenceCatalogItem] = []
+    sources = (
+        ("trend", request.trend_evidence),
+        ("smc", request.smc_evidence),
+        ("liquidity", request.liquidity_pools),
+        ("volume_profile", request.volume_profile_evidence),
+        ("institutional_flow", request.institutional_flow_evidence),
+        ("market_regime", request.market_regime),
+    )
+    for source_type, values in sources:
+        for index, item in enumerate(values):
+            if not isinstance(item, dict):
+                continue
+            facts = _facts(item.get("raw"), maximum=2)
+            reasons = tuple(str(value) for value in item.get("reason_codes", ()))
+            fact = (facts or reasons or (f"{source_type} evidence available",))[0]
+            source_reference = str(
+                item.get("evidence_id") or f"{source_type}:{index}"
+            )
+            availability = str(item.get("availability", "available"))
+            kind = (
+                "uncertainty"
+                if availability in {"unavailable", "degraded", "stale"}
+                else "calculated_feature"
+            )
+            catalog.append(
+                EvidenceCatalogItem(
+                    evidence_id=f"E{len(catalog) + 1}",
+                    fact=fact[:140],
+                    kind=kind,
+                    source_type=source_type,
+                    source_reference=source_reference[:128],
+                    timeframe=(
+                        str(item.get("timeframe"))[:8]
+                        if item.get("timeframe")
+                        else None
+                    ),
+                    observed_value=fact[:96],
+                )
+            )
+            if len(catalog) >= 18:
+                return tuple(catalog)
+    deterministic = (
+        (
+            "quant",
+            "quant_direction="
+            f"{max(request.quantitative_probabilities, key=lambda key: float(request.quantitative_probabilities[key] or 0))}"
+            if request.quantitative_probabilities
+            else "quant_direction=NEUTRAL",
+        ),
+        (
+            "data_quality",
+            f"evidence_completeness={request.data_quality_summary.get('evidence_completeness', 0)}",
+        ),
+    )
+    for source_type, fact in deterministic:
+        if len(catalog) >= 20:
+            break
+        catalog.append(
+            EvidenceCatalogItem(
+                evidence_id=f"E{len(catalog) + 1}",
+                fact=fact,
+                kind="calculated_feature",
+                source_type=source_type,
+                source_reference=source_type,
+                observed_value=fact.split("=", 1)[-1],
+            )
+        )
+    return tuple(catalog)
 
 
 def _engine_summary(items: tuple[dict[str, Any], ...], *, fallback: str) -> CompactEngineSummary:
@@ -618,6 +766,7 @@ def build_llm_analysis_context(request: AIReasoningRequest) -> LLMAnalysisContex
         active_position=_position(request),
         previous_final_decision=_previous_decision(request),
         material_changes=tuple(memory_changes[-5:]),
+        evidence_catalog=_evidence_catalog(request),
         prompt_version=request.prompt_version,
         reasoning_policy_version=request.reasoning_policy_version,
         setup_family_registry_version=request.setup_family_registry_version,

@@ -9,7 +9,18 @@ prompt_version_existing_signal: "existing_position_market_analysis_v2"
 maximum_memory_entries: 20
 maximum_retries: 1
 temperature: 0.0
-max_tokens: 1000
+max_tokens: 1400
+output_profile: "compact"
+target_output_tokens: 900
+input_token_budget: 3500
+token_safety_margin: 256
+model_context_limit: 8192
+truncation_degraded_threshold: 0.05
+truncation_unhealthy_threshold: 0.20
+zero_completion_cycle_threshold: 3
+provider_calls_per_analysis_degraded_threshold: 1.5
+schema_correction_degraded_threshold: 0.10
+tokens_per_analysis_degraded_threshold: 6000
 # Each provider client is configured five seconds below this orchestration deadline.
 request_timeout_seconds: 60.0
 llm_concurrency_limit: 1
@@ -18,7 +29,7 @@ provider_backoff_max_seconds: 300.0
 target_input_tokens: 4000
 warning_input_tokens: 8000
 hard_input_tokens: 16000
-absolute_max_output_tokens: 2000
+absolute_max_output_tokens: 3200
 maximum_request_cost_usd: 0.05
 input_cost_per_million_usd: 1.04
 output_cost_per_million_usd: 2.25

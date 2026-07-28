@@ -155,6 +155,22 @@ class AIAnalysisOutput(StrictAnalysisModel):
     alternative_scenarios: tuple[AlternativeAnalysisScenario, ...]
     analysis_confidence: float = Field(ge=0, le=1)
     executive_summary: str = Field(min_length=1, max_length=1500)
+    invalidation_conditions: tuple[str, ...] = Field(default=(), max_length=2)
+    data_quality_warnings: tuple[str, ...] = Field(default=(), max_length=3)
+
+    @field_validator("invalidation_conditions")
+    @classmethod
+    def bounded_invalidations(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not value or len(value) > 160 for value in values):
+            raise ValueError("invalidation conditions must contain 1-160 characters")
+        return values
+
+    @field_validator("data_quality_warnings")
+    @classmethod
+    def bounded_quality_warnings(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not value or len(value) > 120 for value in values):
+            raise ValueError("data-quality warnings must contain 1-120 characters")
+        return values
 
 
 class AIProviderMetadata(StrictAnalysisModel):

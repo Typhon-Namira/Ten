@@ -374,7 +374,11 @@ class AIReasoningService:
                     self.clock(),
                 )
                 return None
-            self.metrics["provider_failures"] += 1
+            if exc.details.reason_code not in {
+                "output_budget_exceeded",
+                "schema_validation_error",
+            }:
+                self.metrics["provider_failures"] += 1
             self.last_latency_ms = exc.details.elapsed_ms
             failure_state = exc.details.reason_code
             failure_errors = tuple(
@@ -670,7 +674,12 @@ class AIReasoningService:
                 **(provider_metrics or {}),
                 "provider_failure": int(
                     failure_state is not None
-                    and failure_state != "structured_output_invalid"
+                    and failure_state
+                    not in {
+                        "structured_output_invalid",
+                        "output_budget_exceeded",
+                        "schema_validation_error",
+                    }
                     and (provider_metrics or {}).get("provider_http_calls", 0) > 0
                 ),
                 "validation_failure": int(
@@ -823,6 +832,14 @@ class AIReasoningService:
             "initial_schema_validation_failures",
             "schema_corrections_succeeded",
             "schema_corrections_failed",
+            "truncated_outputs",
+            "compact_retries",
+            "request_policy_failures",
+            "provider_http_successes",
+            "schema_valid_analyses",
+            "provider_input_tokens",
+            "provider_output_tokens",
+            "provider_total_tokens",
         ):
             self.metrics[key] += delta.get(key, 0)
         self.requests = self.metrics["provider_http_calls"]
@@ -845,11 +862,61 @@ class AIReasoningService:
             self.last_eligible_cycle_at is not None
             and now - self.last_eligible_cycle_at <= timedelta(minutes=10)
         )
+        analysis_requests = self.metrics["analysis_requests"]
+        truncation_rate = (
+            self.metrics["truncated_outputs"] / analysis_requests
+            if analysis_requests
+            else 0.0
+        )
+        consecutive_without_completion = max(
+            0,
+            self.metrics["eligible_five_minute_cycles"]
+            - self.metrics["analyses_successfully_completed"],
+        )
+        completed_analyses = self.metrics["analyses_successfully_completed"]
+        provider_calls_per_analysis = (
+            self.metrics["provider_http_calls"] / completed_analyses
+            if completed_analyses
+            else None
+        )
+        schema_correction_rate = (
+            self.metrics["schema_correction_requests"] / analysis_requests
+            if analysis_requests
+            else 0.0
+        )
+        tokens_per_analysis = (
+            self.metrics["provider_total_tokens"] / completed_analyses
+            if completed_analyses
+            else None
+        )
+        efficiency_degraded = (
+            provider_calls_per_analysis is not None
+            and provider_calls_per_analysis
+            > self.config.provider_calls_per_analysis_degraded_threshold
+        ) or (
+            schema_correction_rate
+            > self.config.schema_correction_degraded_threshold
+        ) or (
+            tokens_per_analysis is not None
+            and tokens_per_analysis
+            > self.config.tokens_per_analysis_degraded_threshold
+        )
         if not recent_eligible_cycle:
             operations_status = "idle"
+        elif (
+            truncation_rate >= self.config.truncation_unhealthy_threshold
+            or consecutive_without_completion
+            >= self.config.zero_completion_cycle_threshold
+        ):
+            operations_status = "unhealthy"
         elif self.last_cycle_outcome == "pool_success":
             operations_status = (
-                "healthy"
+                "degraded"
+                if (
+                    truncation_rate >= self.config.truncation_degraded_threshold
+                    or efficiency_degraded
+                )
+                else "healthy"
                 if configured_account_count > 0
                 and available_account_count == configured_account_count
                 else "degraded"
@@ -925,6 +992,29 @@ class AIReasoningService:
                     "schema_corrections_failed"
                 ],
                 "http_429_responses": self.metrics["http_429_responses"],
+                "provider_http_successes": self.metrics[
+                    "provider_http_successes"
+                ],
+                "schema_valid_analyses": self.metrics[
+                    "schema_valid_analyses"
+                ],
+                "truncated_outputs": self.metrics["truncated_outputs"],
+                "compact_retries": self.metrics["compact_retries"],
+                "request_policy_failures": self.metrics[
+                    "request_policy_failures"
+                ],
+                "truncation_rate": round(truncation_rate, 4),
+                "schema_correction_rate": round(schema_correction_rate, 4),
+                "provider_calls_per_completed_analysis": (
+                    round(provider_calls_per_analysis, 4)
+                    if provider_calls_per_analysis is not None
+                    else None
+                ),
+                "tokens_per_completed_analysis": (
+                    round(tokens_per_analysis, 2)
+                    if tokens_per_analysis is not None
+                    else None
+                ),
                 "skipped_before_provider_call": self.metrics[
                     "skipped_before_provider_call"
                 ],
