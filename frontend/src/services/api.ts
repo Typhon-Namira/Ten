@@ -11,6 +11,9 @@ const LARGE_PAYLOAD_TIMEOUT_MS = 45_000
 
 async function timedFetch(path: string, init: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController()
+  const cancelledByCaller = () => controller.abort()
+  if (init.signal?.aborted) controller.abort()
+  else init.signal?.addEventListener('abort', cancelledByCaller, { once: true })
   const timer = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(`${API_BASE_URL}${path}`, {
@@ -21,11 +24,15 @@ async function timedFetch(path: string, init: RequestInit = {}, timeoutMs = DEFA
     })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
+      if (init.signal?.aborted) {
+        throw new ApiError('network', `Request to ${path} was cancelled`)
+      }
       throw new ApiError('timeout', `Request to ${path} did not complete within ${timeoutMs / 1000}s`)
     }
     throw new ApiError('network', error instanceof Error ? error.message : 'Network request failed')
   } finally {
     window.clearTimeout(timer)
+    init.signal?.removeEventListener('abort', cancelledByCaller)
   }
 }
 
@@ -48,8 +55,8 @@ async function parseJson<T>(response: Response, path: string): Promise<T> {
   }
 }
 
-async function request<T>(path: string, timeoutMs?: number): Promise<T> {
-  const response = await timedFetch(path, {}, timeoutMs)
+async function request<T>(path: string, timeoutMs?: number, init: RequestInit = {}): Promise<T> {
+  const response = await timedFetch(path, init, timeoutMs)
   if (!response.ok) throw new ApiError('http', await errorDetail(response), response.status)
   return parseJson<T>(response, path)
 }
@@ -119,7 +126,12 @@ export const tenApi = {
   replays: () => request<ReplaySessionOverview[]>('/replays?limit=5'),
   pipelineStages: (instrument: string, timeframe: string) => request<PipelineStagesResponse>(`/api/v1/pipeline/stages/latest?${scoped(instrument, timeframe)}`),
   rejections: (instrument: string, timeframe: string) => request<RejectionsResponse>(`/signal-decisions/rejections/recent?${scoped(instrument, timeframe)}&limit=10`),
-  marketIntelligence: (instrument: string, timeframe: string) => request<MarketIntelligence>(`/api/v1/system/market-intelligence?${scoped(instrument, timeframe)}`),
+  marketIntelligence: (instrument: string, timeframe: string, signal?: AbortSignal) =>
+    request<MarketIntelligence>(
+      `/api/v1/system/market-intelligence?${scoped(instrument, timeframe)}`,
+      undefined,
+      { signal },
+    ),
   performance: (instrument: string, timeframe: string) => request<PerformanceMetrics>(`/api/v1/system/performance?${scoped(instrument, timeframe)}`),
   aiScoreHistory: (instrument: string, timeframe: string, limit = 40) => request<AIScoreSnapshot[]>(`/ai-scoring/history?${scoped(instrument, timeframe)}&limit=${limit}`),
   chartOverlays: (instrument: string, timeframe: string, limit = 300) => request<ChartOverlays>(`/api/v1/chart/overlays?${scoped(instrument, timeframe)}&limit=${limit}`),
@@ -139,16 +151,32 @@ export const tenApi = {
     }
     return value
   },
-  dashboardSystemStatus: (instrument: string) =>
-    request<DashboardSystemStatus>(`/api/dashboard/system-status?instrument=${encodeURIComponent(instrument)}`),
+  dashboardSystemStatus: (instrument: string, signal?: AbortSignal) =>
+    request<DashboardSystemStatus>(
+      `/api/dashboard/system-status?instrument=${encodeURIComponent(instrument)}`,
+      undefined,
+      { signal },
+    ),
   // AI analysis has its own configured cadence/timeframe (currently M5). The chart timeframe is
   // presentation state and must never filter the authoritative analytical-cycle selector.
-  dashboardLatestCycle: (instrument: string) =>
-    request<LatestCompletedCycle>(`/api/dashboard/latest-cycle?symbol=${encodeURIComponent(instrument)}`),
-  dashboardSignals: (instrument: string, cursor = 0, limit = 50) =>
-    request<AnalysisSignalPage>(`/api/dashboard/signals?symbol=${encodeURIComponent(instrument)}&cursor=${cursor}&limit=${limit}`),
-  dashboardAnalyses: (instrument: string, cursor = 0, limit = 50) =>
-    request<AnalysisHistoryPage>(`/api/dashboard/analyses?symbol=${encodeURIComponent(instrument)}&cursor=${cursor}&limit=${limit}`),
+  dashboardLatestCycle: (instrument: string, signal?: AbortSignal) =>
+    request<LatestCompletedCycle>(
+      `/api/dashboard/latest-cycle?symbol=${encodeURIComponent(instrument)}`,
+      undefined,
+      { signal },
+    ),
+  dashboardSignals: (instrument: string, cursor = 0, limit = 50, signal?: AbortSignal) =>
+    request<AnalysisSignalPage>(
+      `/api/dashboard/signals?symbol=${encodeURIComponent(instrument)}&cursor=${cursor}&limit=${limit}`,
+      undefined,
+      { signal },
+    ),
+  dashboardAnalyses: (instrument: string, cursor = 0, limit = 50, signal?: AbortSignal) =>
+    request<AnalysisHistoryPage>(
+      `/api/dashboard/analyses?symbol=${encodeURIComponent(instrument)}&cursor=${cursor}&limit=${limit}`,
+      undefined,
+      { signal },
+    ),
   // Explainability: every AI-authored answer here is prose over a context TEN itself assembled —
   // the AI never fetches its own data, so a chat answer can never disagree with these same panels.
   explainCurrent: (instrument: string, timeframe: string) => request<ExplainResponse>(`/api/v1/explain/current?${scoped(instrument, timeframe)}`),

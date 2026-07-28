@@ -27,8 +27,8 @@ export function DashboardHeader({
   reasoning,
   latestCycle,
   stale,
-  lastUpdated,
-  loading,
+  lastChecked,
+  refreshing,
   onRefresh,
 }: {
   instrument: string
@@ -36,8 +36,8 @@ export function DashboardHeader({
   reasoning: AIReasoningDashboard | null
   latestCycle?: LatestCompletedCycle | null
   stale: boolean
-  lastUpdated: Date | null
-  loading: boolean
+  lastChecked: Date | null
+  refreshing: boolean
   onRefresh: () => Promise<void>
 }) {
   const profile = reasoning?.runtime.operating_profile ?? (latestCycle?.status === 'completed' ? 'analytical_live' : 'safe_test')
@@ -71,9 +71,9 @@ export function DashboardHeader({
       <StatusBadge tone={aiTone} pulse={aiState === 'online'}>{aiLabel}</StatusBadge>
       <FreshnessIndicator stale={stale} timestamp={intelligence?.latest_candle_timestamp ?? null} />
       <StatusBadge tone={healthy ? 'positive' : 'warning'}><ShieldCheck size={12} />System {healthy ? 'healthy' : 'limited'}</StatusBadge>
-      <span className="ai-updated">Updated {lastUpdated ? lastUpdated.toLocaleTimeString() : '—'}</span>
-      <button className="ai-icon-button" type="button" aria-label="Refresh dashboard" onClick={() => void onRefresh()} disabled={loading}>
-        <RefreshCw size={16} className={loading ? 'spin' : ''} />
+      <span className="ai-updated">{refreshing ? 'Refreshing · ' : ''}Last checked {lastChecked ? lastChecked.toLocaleTimeString() : '—'}</span>
+      <button className="ai-icon-button" type="button" aria-label="Refresh dashboard" onClick={() => void onRefresh()} disabled={refreshing}>
+        <RefreshCw size={16} className={refreshing ? 'spin' : ''} />
       </button>
     </div>
     <div className="ai-statusbar__boundary"><strong>Analytical Intelligence Only</strong><span>No Broker Execution</span></div>

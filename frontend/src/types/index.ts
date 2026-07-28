@@ -795,15 +795,23 @@ export interface LatestCompletedCycle {
   analysis_id?: string
   signal_id?: string
   decision_id?: string | null
+  analysis_timestamp?: string | null
+  signal_generated_at?: string | null
+  decision_timestamp?: string | null
+  action?: 'BUY' | 'SELL' | 'HOLD' | null
+  publication_eligible?: boolean
+  lifecycle_status?: AIAnalysisSignal['lifecycle_status'] | 'CURRENT' | null
+  cycle_version?: string | null
   market_time: string | null
   completed_at: string | null
   dashboard_refreshed_at: string
+  updated_at?: string | null
   state?: Record<string, unknown> | null
   quant_forecast?: QuantForecastResult | null
   analysis: AIMarketAnalysis | null
   analytical_signal: AIAnalysisSignal | null
   signal_lifecycle?: {
-    status: AIAnalysisSignal['lifecycle_status']
+    status: AIAnalysisSignal['lifecycle_status'] | 'CURRENT'
     signal_age_seconds: number
     remaining_validity_seconds: number | null
     valid_from: string | null

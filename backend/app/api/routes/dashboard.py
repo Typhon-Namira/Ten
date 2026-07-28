@@ -63,22 +63,84 @@ async def _decision_for_analysis_signal(
     request: Request,
     signal: Any,
 ) -> Any | None:
-    decisions = await request.app.state.signal_decision_service.repository.list_decisions(
+    return await request.app.state.signal_decision_service.repository.find_by_analysis_lineage(
         signal.instrument,
         signal.timeframe,
-        limit=10_000,
+        signal.snapshot_id,
+        signal.analysis_id,
+        signal.signal_id,
     )
-    return next(
-        (
-            item
-            for item in decisions
-            if item.source_lineage is not None
-            and item.source_lineage.current_ai_signal_id == signal.signal_id
-            and item.source_lineage.current_ai_analysis_id == signal.analysis_id
-            and item.source_lineage.market_snapshot_id == signal.snapshot_id
-        ),
-        None,
+
+
+async def _latest_complete_cycle_lineage(
+    request: Request,
+    instrument: str,
+) -> tuple[Any, Any, Any, Any, Any, str | None] | None:
+    """Select the newest cycle whose complete persisted lineage is readable.
+
+    A newer analysis or signal that is still awaiting its deterministic decision must not
+    temporarily replace the previous completed cycle. Conversely, HOLD and publication-
+    ineligible decisions are complete and are deliberately not filtered out.
+    """
+
+    repository = request.app.state.ai_reasoning_repository
+    completed: list[tuple[Any, Any, Any, Any, Any]] = []
+    offset = 0
+    batch_size = 100
+    while len(completed) < 2:
+        candidates = await repository.list_analysis_signals(
+            instrument,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            offset,
+            batch_size,
+        )
+        if not candidates:
+            break
+        for signal in candidates:
+            analysis = await repository.get_analysis(signal.analysis_id)
+            if (
+                analysis is None
+                or getattr(analysis.status, "value", analysis.status) != "available"
+                or not analysis.validation_passed
+                or analysis.cycle_id != signal.cycle_id
+                or analysis.market_snapshot_id != signal.snapshot_id
+            ):
+                continue
+            decision = await _decision_for_analysis_signal(request, signal)
+            if decision is None:
+                continue
+            state = await request.app.state.unified_market_state_repository.get_state(
+                signal.snapshot_id
+            )
+            quant = await request.app.state.quant_forecast_repository.result_for_state(
+                signal.snapshot_id
+            )
+            if (
+                state is None
+                or quant is None
+                or getattr(state, "state_id", None) != signal.snapshot_id
+                or getattr(quant, "result_id", None)
+                != analysis.quantitative_forecast_id
+            ):
+                continue
+            completed.append((analysis, signal, decision, state, quant))
+            if len(completed) == 2:
+                break
+        if len(candidates) < batch_size:
+            break
+        offset += len(candidates)
+    if not completed:
+        return None
+    analysis, signal, decision, state, quant = completed[0]
+    previous_cycle_id = (
+        str(completed[1][1].cycle_id) if len(completed) > 1 else None
     )
+    return analysis, signal, decision, state, quant, previous_cycle_id
 
 
 def _publication_projection(decision: Any | None) -> dict[str, Any]:
@@ -181,6 +243,9 @@ async def _completed_cycle_projection(
                 "ai_market_analyses.symbol = :instrument",
                 "ai_market_analyses.status = 'available'",
                 "ai_market_analyses.validation_passed IS TRUE",
+                "unified_market_states.state_id = ai_analysis_signals.snapshot_id",
+                "quantitative_forecasts.result_id = ai_market_analyses.quantitative_forecast_id",
+                "signal_decisions source lineage matches snapshot, analysis, and signal",
                 "no timeframe predicate (AI cadence is independent of chart timeframe)",
             ],
             "ordering": [
@@ -190,20 +255,10 @@ async def _completed_cycle_projection(
             ],
         },
     )
-    pair = await request.app.state.ai_reasoning_repository.latest_completed_analysis_cycle(
-        instrument,
-        None,
-    )
-    if pair is None:
+    selected = await _latest_complete_cycle_lineage(request, instrument)
+    if selected is None:
         return None
-    analysis, signal = pair
-    state = await request.app.state.unified_market_state_repository.get_state(
-        signal.snapshot_id
-    )
-    quant = await request.app.state.quant_forecast_repository.result_for_state(
-        signal.snapshot_id
-    )
-    decision = await _decision_for_analysis_signal(request, signal)
+    analysis, signal, decision, state, quant, previous_cycle_id = selected
     publication = _publication_projection(decision)
     generated_signal_count = (
         await request.app.state.ai_reasoning_repository.count_analysis_signals(
@@ -224,6 +279,38 @@ async def _completed_cycle_projection(
         signal,
         now=now,
     )
+    authoritative_lifecycle_status = (
+        "CURRENT" if lifecycle["status"] == "ACTIVE" else lifecycle["status"]
+    )
+    authoritative_lifecycle = {
+        **lifecycle,
+        "status": authoritative_lifecycle_status,
+    }
+    outcome_updated_at = (
+        lifecycle["outcome"].get("evaluated_at")
+        if lifecycle["outcome"] is not None
+        else None
+    )
+    if isinstance(outcome_updated_at, str):
+        outcome_updated_at = datetime.fromisoformat(
+            outcome_updated_at.replace("Z", "+00:00")
+        )
+    updated_at = max(
+        item
+        for item in (
+            analysis.created_at,
+            signal.generated_at,
+            decision.decided_at,
+            outcome_updated_at,
+        )
+        if item is not None
+    )
+    cycle_version = hashlib.sha256(
+        (
+            f"{signal.cycle_id}:{analysis.analysis_id}:{signal.signal_id}:"
+            f"{decision.decision_id}:{updated_at.isoformat()}"
+        ).encode()
+    ).hexdigest()
     outcome_count, completed_outcome_count = (
         await request.app.state.ai_reasoning_repository.count_analysis_signal_outcomes(
             instrument
@@ -232,15 +319,28 @@ async def _completed_cycle_projection(
     logger.info(
         "dashboard.latest_cycle.selected",
         extra={
-            "instrument": instrument,
-            "requested_timeframe": timeframe,
+            "requested_instrument": instrument,
+            "requested_chart_timeframe": timeframe,
+            "cycle_id": str(signal.cycle_id),
+            "analysis_id": str(analysis.analysis_id),
+            "signal_id": str(signal.signal_id),
+            "decision_id": str(decision.decision_id),
+            "action": signal.signal.value,
+            "publication_eligible": publication["eligible"],
+            "lifecycle_status": authoritative_lifecycle_status,
+            "analysis_timestamp": analysis.analysis_timestamp,
+            "selected_at": now,
+            "cycle_age_seconds": max(
+                0.0,
+                (now - analysis.analysis_timestamp).total_seconds(),
+            ),
+            "replaced_previous_cycle": previous_cycle_id is not None,
+            "previous_cycle_id": previous_cycle_id,
             "unified_market_state_id": str(signal.snapshot_id),
             "quantitative_forecast_id": str(analysis.quantitative_forecast_id),
             "ai_market_analysis_id": str(analysis.analysis_id),
             "ai_analysis_signal_id": str(signal.signal_id),
-            "signal_decision_id": (
-                str(decision.decision_id) if decision is not None else None
-            ),
+            "signal_decision_id": str(decision.decision_id),
         },
     )
     market_time = (
@@ -248,21 +348,13 @@ async def _completed_cycle_projection(
     )
     stage_statuses = {
         "unified_market_state": {
-            "status": "healthy" if state is not None else "degraded",
-            "reason": (
-                "same_cycle_market_state_persisted"
-                if state is not None
-                else "referenced_market_state_not_readable"
-            ),
+            "status": "healthy",
+            "reason": "same_cycle_market_state_persisted",
             "record_id": str(signal.snapshot_id),
         },
         "quant_forecast": {
-            "status": "healthy" if quant is not None else "degraded",
-            "reason": (
-                "same_cycle_quant_forecast_persisted"
-                if quant is not None
-                else "referenced_quant_forecast_not_readable"
-            ),
+            "status": "healthy",
+            "reason": "same_cycle_quant_forecast_persisted",
             "record_id": str(analysis.quantitative_forecast_id),
         },
         "ai_reasoning": {
@@ -276,27 +368,19 @@ async def _completed_cycle_projection(
             "record_id": str(signal.signal_id),
         },
         "guardrails": {
-            "status": "healthy" if decision is not None else "running",
-            "reason": (
-                "deterministic_guardrails_completed"
-                if decision is not None
-                else "deterministic_decision_pending"
-            ),
-            "record_id": str(decision.decision_id) if decision is not None else None,
+            "status": "healthy",
+            "reason": "deterministic_guardrails_completed",
+            "record_id": str(decision.decision_id),
         },
         "final_decision": {
-            "status": "healthy" if decision is not None else "running",
-            "reason": (
-                "deterministic_final_decision_persisted"
-                if decision is not None
-                else "deterministic_decision_pending"
-            ),
-            "record_id": str(decision.decision_id) if decision is not None else None,
+            "status": "healthy",
+            "reason": "deterministic_final_decision_persisted",
+            "record_id": str(decision.decision_id),
         },
         "publication": {
             "status": "healthy" if publication["eligible"] else "blocked",
             "reason": publication["reason"],
-            "record_id": str(decision.decision_id) if decision is not None else None,
+            "record_id": str(decision.decision_id),
         },
     }
     serialized_state = state.model_dump(mode="json") if state is not None else None
@@ -322,17 +406,24 @@ async def _completed_cycle_projection(
         "analysis_id": str(analysis.analysis_id),
         "signal_id": str(signal.signal_id),
         "decision_id": str(decision.decision_id) if decision is not None else None,
+        "analysis_timestamp": analysis.analysis_timestamp,
+        "signal_generated_at": signal.generated_at,
+        "decision_timestamp": decision.decided_at,
+        "action": signal.signal.value,
+        "publication_eligible": publication["eligible"],
+        "lifecycle_status": authoritative_lifecycle_status,
+        "cycle_version": cycle_version,
         "market_time": market_time,
-        "completed_at": signal.generated_at,
+        "completed_at": decision.decided_at,
         "dashboard_refreshed_at": now,
-        "updated_at": now,
+        "updated_at": updated_at,
         "state": serialized_state,
         "market_state": serialized_state,
         "quant_forecast": serialized_quant,
         "analysis": serialized_analysis,
         "ai_analysis": serialized_analysis,
         "analytical_signal": serialized_signal,
-        "signal_lifecycle": lifecycle,
+        "signal_lifecycle": authoritative_lifecycle,
         "guardrail_decision": (
             {
                 "state": decision.state.value,
@@ -699,7 +790,13 @@ async def dashboard_latest_cycle(
 ) -> dict[str, Any]:
     """Return the latest fully persisted analytical cycle through one lineage."""
 
-    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Cache-Control"] = (
+        "private, no-store, no-cache, max-age=0, must-revalidate"
+    )
+    response.headers["CDN-Cache-Control"] = "no-store"
+    response.headers["Surrogate-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     instrument = canonical_symbol(symbol)
     cycle = await _completed_cycle_projection(request, instrument, timeframe)
     if cycle is not None:
@@ -715,6 +812,16 @@ async def dashboard_latest_cycle(
         "instrument": instrument,
         "timeframe": timeframe,
         "cycle_id": None,
+        "analysis_id": None,
+        "signal_id": None,
+        "decision_id": None,
+        "analysis_timestamp": None,
+        "signal_generated_at": None,
+        "decision_timestamp": None,
+        "action": None,
+        "publication_eligible": False,
+        "lifecycle_status": None,
+        "cycle_version": None,
         "market_time": None,
         "completed_at": None,
         "dashboard_refreshed_at": datetime.now(UTC),
