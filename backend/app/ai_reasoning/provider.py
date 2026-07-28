@@ -31,9 +31,11 @@ from .compact_output import (
     CompactAIAnalysisOutput,
     CompactOutputValidationError,
     CompactRetryAIAnalysisOutput,
+    MARKET_REGIME_EVIDENCE_REF_LIMIT,
     normalize_descriptive_overflow,
     normalize_reference_syntax,
     resolve_compact_output,
+    truncate_market_regime_evidence_refs,
     validate_evidence_references,
     validate_zone_references,
 )
@@ -281,6 +283,20 @@ def _combined_usage(*values: dict[str, int] | None) -> dict[str, int] | None:
     return combined or None
 
 
+def _required_object_fields(
+    shape: object,
+    path: str = "$",
+) -> dict[str, tuple[str, ...]]:
+    """Describe required object membership without repeating the full contract."""
+
+    if not isinstance(shape, dict):
+        return {}
+    required = {path: tuple(shape)}
+    for key, value in shape.items():
+        required.update(_required_object_fields(value, f"{path}.{key}"))
+    return required
+
+
 class _OpenAICompatibleReasoningProvider:
     provider_name: str
     supports_strict_json_schema = True
@@ -366,6 +382,8 @@ class _OpenAICompatibleReasoningProvider:
         if correction_instruction:
             system_prompt = (
                 "Return exactly one compact JSON object and nothing else. "
+                "Return the complete response contract with every required field; "
+                "never return a partial patch or omit an unchanged object. "
                 "Correct the supplied response according to validation_error. "
                 "Do not invent market facts or emit trading actions."
             )
@@ -395,6 +413,11 @@ class _OpenAICompatibleReasoningProvider:
                     "Return one listed ID or null exactly; never return a price, "
                     "object, array, empty string, sentinel, or invented ID."
                 ),
+                "required_object_fields": _required_object_fields(
+                    contract.get("shape")
+                ),
+                "response_contract_rules": contract.get("rules", ()),
+                "complete_object_required": True,
                 "previous_response": previous_response,
             }
         else:
@@ -662,6 +685,11 @@ class _OpenAICompatibleReasoningProvider:
             "one JSON object; exact schema; no markdown or prose",
             "use only supplied evidence IDs",
             (
+                "market_regime.evidence_refs must contain at most "
+                f"{MARKET_REGIME_EVIDENCE_REF_LIMIT} catalog IDs ordered "
+                "strongest to weakest"
+            ),
+            (
                 "nearest_supply_ref must be exactly one valid supply ID"
                 if supply_ids
                 else "supply catalog empty; nearest_supply_ref must be null"
@@ -687,7 +715,10 @@ class _OpenAICompatibleReasoningProvider:
                     "classification": "bullish|bearish|ranging|transitional|uncertain",
                     "strength": "0..100",
                     "confidence": "0..1",
-                    "evidence_refs": "array<=2",
+                    "evidence_refs": (
+                        f"array<={MARKET_REGIME_EVIDENCE_REF_LIMIT};"
+                        "strongest-to-weakest"
+                    ),
                 },
                 "higher_timeframe_context": {
                     "bias": "bullish|bearish|neutral|mixed|uncertain",
@@ -1318,7 +1349,15 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 schema_valid=False,
                 schema_error_code=correction_reason,
             )
-            raise
+            raise AIProviderRequestError(
+                replace(
+                    exc.details,
+                    phase=f"schema_correction_{exc.details.phase}",
+                    schema_error_code=(
+                        exc.details.schema_error_code or correction_reason
+                    ),
+                )
+            ) from exc
         corrected_raw, _ = _normalized_contract_output(corrected.raw_output)
         corrected = replace(corrected, raw_output=corrected_raw)
         try:
@@ -1397,9 +1436,16 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         request: AIReasoningRequest,
         profile: OutputProfile,
     ) -> AIProviderResponse:
-        normalized, reference_changes = normalize_reference_syntax(
-            response.raw_output
+        context = build_llm_analysis_context(request)
+        normalized, evidence_ref_truncations = (
+            truncate_market_regime_evidence_refs(
+                response.raw_output,
+                frozenset(
+                    item.evidence_id for item in context.evidence_catalog
+                ),
+            )
         )
+        normalized, reference_changes = normalize_reference_syntax(normalized)
         normalized, descriptive_changes = normalize_descriptive_overflow(
             normalized
         )
@@ -1415,7 +1461,6 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 raw_output=standard.model_dump(mode="json"),
                 operational_metadata=metadata,
             )
-        context = build_llm_analysis_context(request)
         wire: CompactAIAnalysisOutput | CompactRetryAIAnalysisOutput
         if profile == OutputProfile.COMPACT_RETRY:
             wire = CompactRetryAIAnalysisOutput.model_validate(normalized)
@@ -1436,6 +1481,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         metadata = dict(response.operational_metadata or {})
         metadata["local_descriptive_normalizations"] = descriptive_changes
         metadata["local_reference_normalizations"] = reference_changes
+        metadata["local_evidence_ref_truncations"] = evidence_ref_truncations
         metadata["supply_catalog_count"] = len(context.supply_zone_catalog)
         metadata["demand_catalog_count"] = len(context.demand_zone_catalog)
         metadata["evidence_catalog_count"] = len(context.evidence_catalog)
@@ -2134,6 +2180,8 @@ class GroqProviderPool:
 
     @staticmethod
     def _failover_allowed(details: AIProviderFailureDetails) -> bool:
+        if details.phase.startswith("schema_correction_"):
+            return False
         if details.phase in {"request_validation", "response_decoding", "domain_parsing"}:
             return False
         return details.reason_code in {

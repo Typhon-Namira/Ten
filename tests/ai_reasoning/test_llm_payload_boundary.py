@@ -404,9 +404,16 @@ async def test_groq_missing_executive_summary_gets_one_explicit_schema_correctio
     correction_payload = json.loads(bodies[1]["messages"][1]["content"])
     assert "provider_response.executive_summary" in correction_payload["validation_error"]
     assert "analysis_context" not in correction_payload
-    assert len(bodies[1]["messages"][1]["content"]) < len(
-        bodies[0]["messages"][1]["content"]
-    )
+    assert correction_payload["complete_object_required"] is True
+    assert "market_regime" in correction_payload["required_object_fields"]["$"]
+    assert correction_payload["required_object_fields"]["$.market_regime"] == [
+        "classification",
+        "strength",
+        "confidence",
+        "evidence_refs",
+    ]
+    assert correction_payload["previous_response"]["market_regime"]
+    assert "executive_summary" not in correction_payload["previous_response"]
     assert response.raw_output["executive_summary"] == "Validated analysis summary."
     attempts = provider.attempts_for(request.request_id)
     assert [item["request_kind"] for item in attempts] == [
@@ -420,6 +427,43 @@ async def test_groq_missing_executive_summary_gets_one_explicit_schema_correctio
         "total_tokens": 30,
     }
     assert validated.executive_summary == "Validated analysis summary."
+
+
+@pytest.mark.asyncio
+async def test_groq_stops_after_one_invalid_schema_correction() -> None:
+    _, _, config, request = await _request()
+    bodies: list[dict[str, Any]] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(http_request.content))
+        output = analysis_output().model_dump(mode="python")
+        output.pop("market_regime")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(output)}}]},
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq_1",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    selected_provider = _groq_provider(client, config)
+
+    with pytest.raises(AIProviderRequestError) as captured:
+        await selected_provider.reason(
+            request,
+            prompt_version=request.prompt_version,
+        )
+
+    assert captured.value.details.reason_code == "schema_validation_error"
+    assert len(bodies) == 2
+    assert selected_provider.correction_attempts == 1
+    correction_payload = json.loads(bodies[1]["messages"][1]["content"])
+    assert correction_payload["complete_object_required"] is True
+    assert "market_regime" in correction_payload["required_object_fields"]["$"]
 
 
 @pytest.mark.asyncio
