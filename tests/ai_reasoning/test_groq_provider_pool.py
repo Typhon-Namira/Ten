@@ -240,6 +240,32 @@ async def test_schema_invalid_http_200_is_latest_attempt_not_provider_outage() -
 
 
 @pytest.mark.asyncio
+async def test_schema_correction_rate_limit_does_not_repeat_analysis_on_next_account() -> None:
+    correction_failure = AIProviderRequestError(
+        AIProviderFailureDetails(
+            provider="groq_1",
+            reason_code="rate_limited",
+            phase="schema_correction_http_request",
+            endpoint="https://api.groq.test/openai/v1/chat/completions",
+            model="llama-3.1-8b-instant",
+            request_id="request-1",
+            cycle_id="cycle-1",
+            http_status=429,
+            schema_error_code="too_many_items",
+            schema_error_path="provider_response.market_regime.evidence_refs",
+        )
+    )
+    providers = four({1: [correction_failure]})
+    router = pool(providers)
+
+    with pytest.raises(AIProviderRequestError) as captured:
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert captured.value.details.reason_code == "rate_limited"
+    assert [provider.calls for provider in providers] == [1, 0, 0, 0]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failed_accounts", (1, 2, 3))
 async def test_quota_exhaustion_advances_to_next_account(
     failed_accounts: int,

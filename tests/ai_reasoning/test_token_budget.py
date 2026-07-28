@@ -13,9 +13,11 @@ from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.ai_reasoning.compact_output import (
     CompactAIAnalysisOutput,
     CompactOutputValidationError,
+    MARKET_REGIME_EVIDENCE_REF_LIMIT,
     normalize_descriptive_overflow,
     normalize_reference_syntax,
     resolve_compact_output,
+    truncate_market_regime_evidence_refs,
     validate_evidence_references,
     validate_zone_references,
 )
@@ -400,6 +402,107 @@ async def test_max_items_and_non_allowlisted_reference_lengths_are_strict() -> N
             wire,
             build_llm_analysis_context(request).evidence_catalog,
         )
+
+
+@pytest.mark.asyncio
+async def test_market_regime_evidence_limit_matches_prompt_contract() -> None:
+    _, _, config, request = await _request()
+    selected_provider = provider(
+        CompactClient(compact_output(request)),
+        config,
+    )
+
+    contract = selected_provider._response_contract(  # noqa: SLF001
+        OutputProfile.COMPACT,
+        build_llm_analysis_context(request),
+    )
+
+    assert MARKET_REGIME_EVIDENCE_REF_LIMIT == 2
+    assert contract["shape"]["market_regime"]["evidence_refs"] == (
+        "array<=2;strongest-to-weakest"
+    )
+    assert any(
+        "market_regime.evidence_refs must contain at most 2" in rule
+        and "strongest to weakest" in rule
+        for rule in contract["rules"]
+    )
+    raw = compact_output(request)
+    valid_refs = [
+        item.evidence_id
+        for item in build_llm_analysis_context(request).evidence_catalog[:2]
+    ]
+    raw["market_regime"]["evidence_refs"] = valid_refs
+    unchanged, changes = truncate_market_regime_evidence_refs(
+        raw,
+        frozenset(valid_refs),
+    )
+    assert unchanged["market_regime"]["evidence_refs"] == valid_refs
+    assert changes == ()
+
+
+@pytest.mark.asyncio
+async def test_too_many_valid_regime_refs_are_truncated_without_correction() -> None:
+    _, _, config, request = await _request()
+    context = build_llm_analysis_context(request)
+    refs = [item.evidence_id for item in context.evidence_catalog[:3]]
+    assert len(refs) == 3
+    raw = compact_output(request)
+    raw["market_regime"]["evidence_refs"] = refs
+    client = CompactClient(raw)
+    selected_provider = provider(client, config)
+
+    response = await selected_provider.reason(
+        request,
+        prompt_version=request.prompt_version,
+    )
+
+    assert len(client.calls) == 1
+    assert selected_provider.correction_attempts == 0
+    assert selected_provider.attempts_for(request.request_id)[0][
+        "schema_correction_triggered"
+    ] is False
+    assert [
+        item["claim"]
+        for item in response.raw_output["market_regime"]["evidence"]
+    ] == [
+        context.evidence_catalog[0].fact,
+        context.evidence_catalog[1].fact,
+    ]
+    assert response.operational_metadata[
+        "local_evidence_ref_truncations"
+    ] == ("market_regime.evidence_refs",)
+
+
+@pytest.mark.asyncio
+async def test_unknown_overflow_regime_refs_remain_invalid() -> None:
+    _, _, _, request = await _request()
+    raw = compact_output(request)
+    raw["market_regime"]["evidence_refs"] = ["E1", "E2", "E99"]
+
+    normalized, changes = truncate_market_regime_evidence_refs(
+        raw,
+        frozenset({"E1", "E2"}),
+    )
+
+    assert normalized["market_regime"]["evidence_refs"] == [
+        "E1",
+        "E2",
+        "E99",
+    ]
+    assert changes == ()
+    with pytest.raises(ValidationError):
+        CompactAIAnalysisOutput.model_validate(normalized)
+
+    wrongly_typed = compact_output(request)
+    wrongly_typed["market_regime"]["evidence_refs"] = ["E1", "E2", 3]
+    untouched, type_changes = truncate_market_regime_evidence_refs(
+        wrongly_typed,
+        frozenset({"E1", "E2", "E3"}),
+    )
+    assert untouched["market_regime"]["evidence_refs"] == ["E1", "E2", 3]
+    assert type_changes == ()
+    with pytest.raises(ValidationError):
+        CompactAIAnalysisOutput.model_validate(untouched)
 
 
 @pytest.mark.asyncio

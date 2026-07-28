@@ -41,13 +41,16 @@ class EvidenceCatalogItem(CompactStrictModel):
 
 
 EvidenceRefs = tuple[str, ...]
+MARKET_REGIME_EVIDENCE_REF_LIMIT = 2
 
 
 class CompactRegime(CompactStrictModel):
     classification: RegimeClassification
     strength: float = Field(ge=0, le=100)
     confidence: float = Field(ge=0, le=1)
-    evidence_refs: EvidenceRefs = Field(max_length=2)
+    evidence_refs: EvidenceRefs = Field(
+        max_length=MARKET_REGIME_EVIDENCE_REF_LIMIT
+    )
 
 
 class CompactHigherTimeframe(CompactStrictModel):
@@ -252,6 +255,35 @@ def normalize_reference_syntax(
             supply_demand[key] = candidate
             changes.append(f"supply_demand_analysis.{key}")
     return normalized, tuple(changes)
+
+
+def truncate_market_regime_evidence_refs(
+    raw: dict[str, Any],
+    allowed_evidence_ids: frozenset[str],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Bound an ordered regime list only when every item is a valid catalog ID."""
+
+    market_regime = raw.get("market_regime")
+    if not isinstance(market_regime, dict):
+        return raw, ()
+    references = market_regime.get("evidence_refs")
+    if (
+        not isinstance(references, list)
+        or len(references) <= MARKET_REGIME_EVIDENCE_REF_LIMIT
+        or not all(
+            isinstance(reference, str) and reference in allowed_evidence_ids
+            for reference in references
+        )
+    ):
+        return raw, ()
+
+    normalized = dict(raw)
+    normalized_regime = dict(market_regime)
+    normalized_regime["evidence_refs"] = references[
+        :MARKET_REGIME_EVIDENCE_REF_LIMIT
+    ]
+    normalized["market_regime"] = normalized_regime
+    return normalized, ("market_regime.evidence_refs",)
 
 
 def validate_evidence_references(
