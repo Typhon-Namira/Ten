@@ -79,8 +79,12 @@ class CompactLiquidity(CompactStrictModel):
 
 class CompactSupplyDemand(CompactStrictModel):
     summary: str = Field(min_length=1, max_length=160)
-    nearest_supply: float | None = Field(gt=0)
-    nearest_demand: float | None = Field(gt=0)
+    nearest_supply_ref: str | None = Field(
+        pattern=r"^SZ[1-3]$",
+    )
+    nearest_demand_ref: str | None = Field(
+        pattern=r"^DZ[1-3]$",
+    )
     evidence_refs: EvidenceRefs = Field(max_length=2)
 
 
@@ -105,7 +109,7 @@ class CompactScenario(CompactStrictModel):
 
 
 class CompactAIAnalysisOutput(CompactStrictModel):
-    analysis_schema_version: Literal["compact-1.0"]
+    analysis_schema_version: Literal["compact-1.1"]
     output_profile: Literal["compact"]
     market_regime: CompactRegime
     higher_timeframe_context: CompactHigherTimeframe
@@ -140,7 +144,7 @@ class CompactAIAnalysisOutput(CompactStrictModel):
 
 
 class CompactRetryAIAnalysisOutput(CompactStrictModel):
-    analysis_schema_version: Literal["compact-retry-1.0"]
+    analysis_schema_version: Literal["compact-retry-1.1"]
     output_profile: Literal["compact_retry"]
     market_regime: CompactRegime
     higher_timeframe_context: CompactHigherTimeframe
@@ -215,6 +219,41 @@ def normalize_descriptive_overflow(raw: dict[str, Any]) -> tuple[dict[str, Any],
     return visit(raw, ""), tuple(changes)
 
 
+def normalize_reference_syntax(
+    raw: dict[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Normalize only whitespace/case for syntactically valid catalog IDs."""
+
+    normalized = {
+        key: (
+            dict(value)
+            if isinstance(value, dict)
+            else value
+        )
+        for key, value in raw.items()
+    }
+    changes: list[str] = []
+    supply_demand = normalized.get("supply_demand_analysis")
+    if not isinstance(supply_demand, dict):
+        return normalized, ()
+    for key, prefix in (
+        ("nearest_supply_ref", "SZ"),
+        ("nearest_demand_ref", "DZ"),
+    ):
+        value = supply_demand.get(key)
+        if not isinstance(value, str):
+            continue
+        candidate = value.strip().upper()
+        if (
+            candidate.startswith(prefix)
+            and candidate[len(prefix) :].isdigit()
+            and candidate != value
+        ):
+            supply_demand[key] = candidate
+            changes.append(f"supply_demand_analysis.{key}")
+    return normalized, tuple(changes)
+
+
 def validate_evidence_references(
     output: CompactWireOutput,
     catalog: tuple[EvidenceCatalogItem, ...],
@@ -244,9 +283,53 @@ def validate_evidence_references(
     walk(output)
 
 
+def validate_zone_references(
+    output: CompactWireOutput,
+    supply_catalog: tuple[Any, ...],
+    demand_catalog: tuple[Any, ...],
+) -> None:
+    selections = (
+        (
+            "supply",
+            output.supply_demand_analysis.nearest_supply_ref,
+            {str(item.zone_id) for item in supply_catalog},
+        ),
+        (
+            "demand",
+            output.supply_demand_analysis.nearest_demand_ref,
+            {str(item.zone_id) for item in demand_catalog},
+        ),
+    )
+    for kind, reference, allowed in selections:
+        path = (
+            "provider_response.supply_demand_analysis."
+            f"nearest_{kind}_ref"
+        )
+        if not allowed and reference is not None:
+            raise CompactOutputValidationError(
+                "reference_must_be_null_when_catalog_empty",
+                path,
+                f"allowed values: null; {kind} catalog is empty",
+            )
+        if allowed and reference is None:
+            raise CompactOutputValidationError(
+                "reference_required_but_missing",
+                path,
+                f"allowed values: {', '.join(sorted(allowed))}",
+            )
+        if reference is not None and reference not in allowed:
+            raise CompactOutputValidationError(
+                f"unknown_{kind}_zone_ref",
+                path,
+                f"allowed values: {', '.join(sorted(allowed)) or 'null'}",
+            )
+
+
 def resolve_compact_output(
     output: CompactWireOutput,
     catalog: tuple[EvidenceCatalogItem, ...],
+    supply_catalog: tuple[Any, ...] = (),
+    demand_catalog: tuple[Any, ...] = (),
 ) -> AIAnalysisOutput:
     by_id = {item.evidence_id: item for item in catalog}
 
@@ -262,6 +345,11 @@ def resolve_compact_output(
             )
             for reference in refs
         )
+
+    supply_by_id = {str(item.zone_id): item for item in supply_catalog}
+    demand_by_id = {str(item.zone_id): item for item in demand_catalog}
+    supply_ref = output.supply_demand_analysis.nearest_supply_ref
+    demand_ref = output.supply_demand_analysis.nearest_demand_ref
 
     scenarios = (
         tuple(
@@ -311,8 +399,16 @@ def resolve_compact_output(
         ),
         supply_demand_analysis=SupplyDemandAnalysis(
             summary=output.supply_demand_analysis.summary,
-            nearest_supply=output.supply_demand_analysis.nearest_supply,
-            nearest_demand=output.supply_demand_analysis.nearest_demand,
+            nearest_supply=(
+                float(supply_by_id[supply_ref].midpoint)
+                if supply_ref is not None
+                else None
+            ),
+            nearest_demand=(
+                float(demand_by_id[demand_ref].midpoint)
+                if demand_ref is not None
+                else None
+            ),
             evidence=evidence(output.supply_demand_analysis.evidence_refs),
         ),
         momentum_analysis=MomentumAnalysis(

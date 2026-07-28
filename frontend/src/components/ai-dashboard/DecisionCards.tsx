@@ -164,6 +164,8 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
       <Metric label="Average input tokens" value={usage?.average_input_tokens?.toFixed(0) ?? 'Unavailable'} />
       <Metric label="Average output tokens" value={usage?.average_output_tokens?.toFixed(0) ?? 'Unavailable'} detail={`P95 ${usage?.p95_output_tokens ?? 'Unavailable'}`} />
       <Metric label="Completion rate" value={usage?.completion_rate == null ? 'Unavailable' : `${(usage.completion_rate * 100).toFixed(1)}%`} />
+      <Metric label="Operational scope" value={usage?.telemetry_scope?.window ?? 'Unavailable'} detail={`${usage?.telemetry_scope?.schema_versions.join(', ') ?? 'unknown schema'} · deployment ${usage?.telemetry_scope?.deployment_id ?? 'unknown'}`} />
+      <Metric label="Historical provider calls" value={usage?.historical_total?.provider_http_calls ?? 'Unavailable'} detail="All schema versions, separately scoped" />
       <Metric label="Skipped before provider" value={health?.call_control.skipped_before_provider_call ?? 'Unavailable'} />
       <Metric label="Deduplicated before provider" value={health?.call_control.deduplicated_before_provider_call ?? 'Unavailable'} />
       <Metric label="Provider failures" value={usage?.provider_failures ?? 'Unavailable'} />
@@ -180,7 +182,7 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
           key={accountId}
           label={`Groq ${index + 1}`}
           value={account?.status ?? 'DISABLED'}
-          detail={`${account?.eligible_now ? 'eligible' : 'not eligible'} · ${account?.circuit_state ?? 'CLOSED'} · HTTP ${account?.last_http_status ?? 'none'} · result ${account?.last_request_result ?? 'none'} · policy ${account?.request_policy_health ?? 'healthy'} · analysis requests ${account?.analysis_requests ?? 0} · corrections ${account?.schema_correction_requests ?? 0} · 429s ${account?.http_429_responses ?? 0} · tokens ${account?.token_usage.total_tokens ?? 0} · persisted analyses ${account?.successful_analyses ?? 0} · reset ${account?.cooldown_until ?? 'none'}`}
+          detail={`${account?.eligible_now ? 'eligible' : 'not eligible'} · ${account?.circuit_state ?? 'CLOSED'} · HTTP ${account?.last_http_status ?? 'none'} · latest ${account?.latest_attempt_result ?? 'none'}${account?.latest_attempt_schema_error ? ` (${account.latest_attempt_schema_error})` : ''} · latest success ${account?.latest_success_schema_version ?? 'none'} at ${account?.latest_successful_attempt_at ?? 'none'} · policy ${account?.request_policy_health ?? 'healthy'} · current requests ${account?.analysis_requests ?? 0} · corrections ${account?.schema_correction_requests ?? 0} · recent/historical 429s ${account?.recent_429_count ?? 0}/${account?.historical_429_count ?? 0} · current tokens ${account?.token_usage.total_tokens ?? 0} · persisted analyses ${account?.successful_analyses ?? 0} · reset ${account?.cooldown_until ?? 'none'}`}
         />
       })}
     </div>

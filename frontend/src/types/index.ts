@@ -812,7 +812,17 @@ export interface AIReasoningDashboard {
       schema_error_code: string | null
       schema_error_path: string | null
       schema_correction_triggered: boolean
+      compact_retry_triggered: boolean
       limit_classification: string | null
+      supply_catalog_count: number
+      demand_catalog_count: number
+      liquidity_catalog_count: number
+      evidence_catalog_count: number
+      valid_supply_refs: string[]
+      valid_demand_refs: string[]
+      selected_supply_ref: string | null
+      selected_demand_ref: string | null
+      reference_validation_result: string | null
     }>
     provider_failures: number
     validation_failures: number
@@ -826,6 +836,25 @@ export interface AIReasoningDashboard {
       failed_requests: number
     }
     five_minute_policy: {
+      provider_http_calls: number
+      total_tokens: number | null
+      successful_requests: number
+      failed_requests: number
+    }
+    telemetry_scope: {
+      deployment_id: string
+      prompt_version: string
+      schema_versions: string[]
+      output_profiles: string[]
+      window: string
+    }
+    historical_total: {
+      provider_http_calls: number
+      total_tokens: number | null
+      successful_requests: number
+      failed_requests: number
+    }
+    historical_five_minute_policy: {
       provider_http_calls: number
       total_tokens: number | null
       successful_requests: number
@@ -894,8 +923,13 @@ export interface AIReasoningDashboard {
       quota_state: 'EXHAUSTED' | 'AVAILABLE'
       last_request_status: number | null
       last_request_result: string | null
+      latest_attempt_result: string | null
+      latest_attempt_schema_error: string | null
+      latest_successful_attempt_at: string | null
+      latest_success_schema_version: string | null
       request_policy_health: 'healthy' | 'degraded'
       calls_today: number
+      calls_current_window: number
       successful_analyses: number
       provider_failures: number
       rate_limit_failures: number
@@ -903,6 +937,8 @@ export interface AIReasoningDashboard {
       analysis_requests: number
       schema_correction_requests: number
       http_429_responses: number
+      recent_429_count: number
+      historical_429_count: number
       provider_http_successes: number
       schema_valid_analyses: number
       truncated_outputs: number

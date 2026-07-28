@@ -68,6 +68,24 @@ class CompactZone(_ImmutableDTO):
         return self
 
 
+class ZoneCatalogItem(_ImmutableDTO):
+    zone_id: str = Field(pattern=r"^(?:SZ|DZ)[1-3]$")
+    low: float = Field(gt=0)
+    high: float = Field(gt=0)
+    midpoint: float = Field(gt=0)
+    distance_pct: float = Field(ge=0)
+    timeframe: str | None = Field(default=None, max_length=8)
+    evidence_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def deterministic_geometry(self) -> ZoneCatalogItem:
+        if self.low > self.high:
+            raise ValueError("zone catalog bounds must be ordered")
+        if abs(self.midpoint - ((self.low + self.high) / 2)) > 1e-8:
+            raise ValueError("zone catalog midpoint must be backend-derived")
+        return self
+
+
 class CompactVolumeProfile(_ImmutableDTO):
     status: str = Field(max_length=48)
     poc: float | None = Field(default=None, gt=0)
@@ -166,6 +184,8 @@ class LLMAnalysisContext(_ImmutableDTO):
     smc: CompactEngineSummary
     nearest_supply_zones: tuple[CompactZone, ...] = Field(default=(), max_length=3)
     nearest_demand_zones: tuple[CompactZone, ...] = Field(default=(), max_length=3)
+    supply_zone_catalog: tuple[ZoneCatalogItem, ...] = Field(default=(), max_length=3)
+    demand_zone_catalog: tuple[ZoneCatalogItem, ...] = Field(default=(), max_length=3)
     relevant_order_blocks: tuple[CompactZone, ...] = Field(default=(), max_length=3)
     relevant_fair_value_gaps: tuple[CompactZone, ...] = Field(default=(), max_length=3)
     nearest_liquidity_levels: tuple[CompactPriceLevel, ...] = Field(default=(), max_length=5)
@@ -204,8 +224,8 @@ _REQUIRED_PROVIDER_CONTEXT_FIELDS = (
     "market_regime",
     "timeframe_trends",
     "smc",
-    "nearest_supply_zones",
-    "nearest_demand_zones",
+    "supply_zone_catalog",
+    "demand_zone_catalog",
     "nearest_liquidity_levels",
     "volume_profile",
     "institutional_flow",
@@ -217,6 +237,8 @@ _OPTIONAL_PROVIDER_CONTEXT_FIELDS = (
     "active_position",
     "previous_final_decision",
     "material_changes",
+    "nearest_supply_zones",
+    "nearest_demand_zones",
     "relevant_order_blocks",
     "relevant_fair_value_gaps",
 )
@@ -234,7 +256,14 @@ def provider_context_payload(
     if context.active_position is not None:
         included.append("active_position")
     if selected in {OutputProfile.STANDARD, OutputProfile.EXPANDED}:
-        included.extend(("relevant_order_blocks", "relevant_fair_value_gaps"))
+        included.extend(
+            (
+                "nearest_supply_zones",
+                "nearest_demand_zones",
+                "relevant_order_blocks",
+                "relevant_fair_value_gaps",
+            )
+        )
         if context.previous_final_decision is not None:
             included.append("previous_final_decision")
         if context.material_changes:
@@ -246,11 +275,7 @@ def provider_context_payload(
         for key in ("market_regime", "smc", "institutional_flow"):
             if isinstance(dumped.get(key), dict):
                 dumped[key].pop("evidence_ids", None)
-        for key in (
-            "nearest_supply_zones",
-            "nearest_demand_zones",
-            "nearest_liquidity_levels",
-        ):
+        for key in ("nearest_liquidity_levels",):
             for item in dumped.get(key, ()):
                 if isinstance(item, dict):
                     item.pop("evidence_id", None)
@@ -513,6 +538,28 @@ def _candidate_levels(items: tuple[dict[str, Any], ...], current_price: float) -
     return tuple(sorted(candidates, key=lambda level: abs(level.price - current_price)))
 
 
+def _zone_catalog(
+    zones: tuple[CompactZone, ...],
+    *,
+    prefix: Literal["SZ", "DZ"],
+    current_price: float,
+) -> tuple[ZoneCatalogItem, ...]:
+    return tuple(
+        ZoneCatalogItem(
+            zone_id=f"{prefix}{index}",
+            low=zone.lower,
+            high=zone.upper,
+            midpoint=(zone.lower + zone.upper) / 2,
+            distance_pct=abs(((zone.lower + zone.upper) / 2) - current_price)
+            / current_price
+            * 100,
+            timeframe=zone.timeframe,
+            evidence_id=zone.evidence_id,
+        )
+        for index, zone in enumerate(zones, start=1)
+    )
+
+
 def _number_for_keys(value: Any, keys: tuple[str, ...]) -> float | None:
     for mapping in _walk(value):
         for key in keys:
@@ -722,6 +769,16 @@ def build_llm_analysis_context(request: AIReasoningRequest) -> LLMAnalysisContex
         smc=_engine_summary(smc_items, fallback="SMC summary unavailable"),
         nearest_supply_zones=supply,
         nearest_demand_zones=demand,
+        supply_zone_catalog=_zone_catalog(
+            supply,
+            prefix="SZ",
+            current_price=reference_price,
+        ),
+        demand_zone_catalog=_zone_catalog(
+            demand,
+            prefix="DZ",
+            current_price=reference_price,
+        ),
         relevant_order_blocks=order_blocks,
         relevant_fair_value_gaps=fair_value_gaps,
         nearest_liquidity_levels=levels[:5],
