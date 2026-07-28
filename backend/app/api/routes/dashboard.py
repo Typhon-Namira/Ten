@@ -26,6 +26,11 @@ from backend.app.api.dashboard_status import (
     derive_outcome_stage,
     derive_publication_stage,
 )
+from backend.app.ai_reasoning.telemetry import (
+    current_operational_usage,
+    provider_attempts,
+    usage_parameter as scoped_usage_parameter,
+)
 from backend.app.core.feature_flags import FeatureFlag
 from backend.app.engines.market_data_engine.models import canonical_symbol
 
@@ -448,13 +453,22 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
     )
 
     usage_rows = await request.app.state.final_decision_repository.usage_for_date(now.date().isoformat())
-    policy_usage_rows = tuple(
+    ai_service = request.app.state.ai_reasoning_service
+    historical_policy_usage_rows = tuple(
         item
         for item in usage_rows
         if item.generation_parameters.get("telemetry_policy") == "five_minute_v1"
     )
+    policy_usage_rows = current_operational_usage(
+        usage_rows,
+        deployment_id=ai_service.deployment_id,
+        prompt_version=ai_service.config.prompt_version_new_market,
+        now=now,
+    )
     legacy_usage_rows = tuple(
-        item for item in usage_rows if item not in policy_usage_rows
+        item
+        for item in usage_rows
+        if item not in historical_policy_usage_rows
     )
 
     def usage_summary(rows: tuple[Any, ...]) -> dict[str, int | None]:
@@ -469,29 +483,18 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             "failed_requests": sum(not item.success for item in rows),
         }
 
-    def usage_parameter(name: str) -> int:
-        return sum(
-            int(item.generation_parameters.get(name, 0))
-            for item in usage_rows
-            if isinstance(item.generation_parameters.get(name, 0), (int, float))
-        )
+    def usage_parameter(
+        name: str,
+        rows: tuple[Any, ...] = policy_usage_rows,
+    ) -> int:
+        return scoped_usage_parameter(rows, name)
 
     recent_provider_attempts = sorted(
-        (
-            attempt
-            for item in usage_rows
-            for attempt in item.generation_parameters.get("provider_attempts", ())
-            if isinstance(attempt, dict)
-        ),
+        provider_attempts(policy_usage_rows),
         key=lambda item: str(item.get("recorded_at") or ""),
         reverse=True,
     )[:20]
-    all_provider_attempts = tuple(
-        attempt
-        for item in usage_rows
-        for attempt in item.generation_parameters.get("provider_attempts", ())
-        if isinstance(attempt, dict)
-    )
+    all_provider_attempts = provider_attempts(policy_usage_rows)
     output_token_samples = sorted(
         int(value)
         for attempt in all_provider_attempts
@@ -503,8 +506,12 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
     truncated_outputs = usage_parameter("truncated_outputs")
     analysis_requests = usage_parameter("analysis_requests")
     usage = {
-        "request_count": sum(item.request_count for item in usage_rows),
-        "provider_http_calls": sum(item.request_count for item in usage_rows),
+        "request_count": sum(
+            item.request_count for item in policy_usage_rows
+        ),
+        "provider_http_calls": sum(
+            item.request_count for item in policy_usage_rows
+        ),
         "groq_calls": usage_parameter("groq_calls"),
         "retries": usage_parameter("retry_attempts"),
         "schema_corrections": usage_parameter("schema_corrections"),
@@ -586,14 +593,32 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         "provider_failures": usage_parameter("provider_failure"),
         "validation_failures": usage_parameter("validation_failure"),
         "total_tokens": (
-            sum(item.total_tokens or 0 for item in usage_rows)
-            if any(item.total_tokens is not None for item in usage_rows)
+            sum(item.total_tokens or 0 for item in policy_usage_rows)
+            if any(
+                item.total_tokens is not None
+                for item in policy_usage_rows
+            )
             else None
         ),
-        "successful_requests": sum(item.success for item in usage_rows),
-        "failed_requests": sum(not item.success for item in usage_rows),
+        "successful_requests": sum(
+            item.success for item in policy_usage_rows
+        ),
+        "failed_requests": sum(
+            not item.success for item in policy_usage_rows
+        ),
         "legacy_cumulative_daily": usage_summary(legacy_usage_rows),
         "five_minute_policy": usage_summary(policy_usage_rows),
+        "telemetry_scope": {
+            "deployment_id": ai_service.deployment_id,
+            "prompt_version": ai_service.config.prompt_version_new_market,
+            "schema_versions": ["compact-1.1", "compact-retry-1.1"],
+            "output_profiles": ["compact", "compact_retry"],
+            "window": "last_24_hours",
+        },
+        "historical_total": usage_summary(tuple(usage_rows)),
+        "historical_five_minute_policy": usage_summary(
+            historical_policy_usage_rows
+        ),
     }
     calibration = await request.app.state.quant_forecast_repository.latest_calibration(
         request.app.state.quant_forecast_service.config.model_name
@@ -607,10 +632,12 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         for account_id, provider_state in provider_states.items():
             if not isinstance(account_id, str) or not isinstance(provider_state, dict):
                 continue
-            provider_state["calls_today"] = usage_parameter(f"{account_id}_calls")
+            provider_state["calls_current_window"] = usage_parameter(
+                f"{account_id}_calls"
+            )
             provider_state["successful_analyses"] = sum(
                 int(item.success)
-                for item in usage_rows
+                for item in policy_usage_rows
                 if item.generation_parameters.get("provider") == account_id
             )
             provider_state["provider_failures"] = usage_parameter(
@@ -630,6 +657,13 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
             )
             provider_state["http_429_responses"] = usage_parameter(
                 f"{account_id}_http_429_responses"
+            )
+            provider_state["recent_429_count"] = provider_state[
+                "http_429_responses"
+            ]
+            provider_state["historical_429_count"] = usage_parameter(
+                f"{account_id}_http_429_responses",
+                tuple(usage_rows),
             )
             provider_state["token_usage"] = {
                 "input_tokens": usage_parameter(f"{account_id}_input_tokens"),

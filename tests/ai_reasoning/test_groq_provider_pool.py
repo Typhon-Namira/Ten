@@ -204,6 +204,42 @@ async def test_output_budget_failure_does_not_poison_account_or_fail_over() -> N
 
 
 @pytest.mark.asyncio
+async def test_schema_invalid_http_200_is_latest_attempt_not_provider_outage() -> None:
+    schema_failure = AIProviderRequestError(
+        AIProviderFailureDetails(
+            provider="groq_1",
+            reason_code="schema_validation_error",
+            phase="structured_output_validation",
+            endpoint="https://api.groq.test/openai/v1/chat/completions",
+            model="llama-3.1-8b-instant",
+            request_id="request-1",
+            cycle_id="cycle-1",
+            http_status=200,
+            schema_error_code="unknown_supply_zone_ref",
+            schema_error_path=(
+                "provider_response.supply_demand_analysis."
+                "nearest_supply_ref"
+            ),
+        )
+    )
+    providers = four({1: [schema_failure]})
+    router = pool(providers)
+
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    state = router.states["groq_1"]
+    snapshot = state.snapshot()
+    assert [provider.calls for provider in providers] == [1, 0, 0, 0]
+    assert state.status == ProviderStatus.AVAILABLE
+    assert state.circuit_open_until is None
+    assert state.provider_failures == 0
+    assert snapshot["latest_attempt_result"] == "SCHEMA_VALIDATION_ERROR"
+    assert snapshot["latest_attempt_schema_error"] == "unknown_supply_zone_ref"
+    assert snapshot["latest_successful_attempt_at"] is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failed_accounts", (1, 2, 3))
 async def test_quota_exhaustion_advances_to_next_account(
     failed_accounts: int,

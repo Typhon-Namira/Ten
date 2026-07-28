@@ -46,6 +46,14 @@ Five-minute production analysis uses the compact output profile. A provider
 account. Output-budget failures never open an account circuit and never trigger
 four-account failover.
 
+Compact schema `compact-1.1` exposes deterministic supply and demand zones to
+the model as request-scoped `SZ*` and `DZ*` catalogs. The provider returns only
+catalog references; TEN resolves accepted references to the original zone
+midpoints. Prices, objects, empty strings, sentinels, and unknown IDs fail
+closed. Operational dashboard metrics default to the current deployment,
+current prompt/schema/profile, and the last 24 hours; historical totals are
+reported separately.
+
 `TEN_GROQ_API_KEY` is temporarily accepted only when
 `TEN_GROQ_API_KEY_1` is absent. It maps to `groq_1`, emits a deprecation warning,
 and never creates a fifth account.

@@ -11,6 +11,7 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 import logging
+import os
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
@@ -121,6 +122,18 @@ class AIReasoningService:
         self.last_eligible_cycle_at: datetime | None = None
         self.metrics: Counter[str] = Counter()
         self.skip_reasons: Counter[str] = Counter()
+        self.deployment_id = (
+            os.getenv("RAILWAY_DEPLOYMENT_ID")
+            or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or os.getenv("GIT_SHA")
+            or "local"
+        )
+        self.boot_session_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"ten:ai-boot:{self.deployment_id}:{id(self)}",
+            )
+        )
 
     @property
     def enabled(self) -> bool:
@@ -658,6 +671,11 @@ class AIReasoningService:
         payload = build_llm_analysis_context(request).model_dump(mode="json")
         request_hash = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
         total = token_usage.get("total_tokens") if token_usage else None
+        latest_attempt = provider_attempts[-1] if provider_attempts else {}
+        analysis_schema_version = latest_attempt.get(
+            "analysis_schema_version"
+        )
+        output_profile = latest_attempt.get("output_profile")
         usage = LLMUsageMetric(
             metric_id=uuid5(NAMESPACE_URL, f"ten:llm-usage:{request.request_id}:{success}:{failure_state}"),
             usage_date=self.clock().date().isoformat(),
@@ -670,6 +688,10 @@ class AIReasoningService:
                 "max_tokens": self.config.max_tokens,
                 "provider": provider,
                 "telemetry_policy": "five_minute_v1",
+                "deployment_id": self.deployment_id,
+                "boot_session_id": self.boot_session_id,
+                "analysis_schema_version": analysis_schema_version,
+                "output_profile": output_profile,
                 "provider_attempts": list(provider_attempts),
                 **(provider_metrics or {}),
                 "provider_failure": int(

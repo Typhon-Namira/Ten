@@ -14,8 +14,10 @@ from backend.app.ai_reasoning.compact_output import (
     CompactAIAnalysisOutput,
     CompactOutputValidationError,
     normalize_descriptive_overflow,
+    normalize_reference_syntax,
     resolve_compact_output,
     validate_evidence_references,
+    validate_zone_references,
 )
 from backend.app.ai_reasoning.llm_context import (
     build_llm_analysis_context,
@@ -33,11 +35,12 @@ from tests.ai_reasoning.test_ai_reasoning_lifecycle import (
 
 
 def compact_output(request: Any, *, retry: bool = False) -> dict[str, Any]:
-    catalog = build_llm_analysis_context(request).evidence_catalog
+    context = build_llm_analysis_context(request)
+    catalog = context.evidence_catalog
     refs = [catalog[0].evidence_id] if catalog else []
     output: dict[str, Any] = {
         "analysis_schema_version": (
-            "compact-retry-1.0" if retry else "compact-1.0"
+            "compact-retry-1.1" if retry else "compact-1.1"
         ),
         "output_profile": "compact_retry" if retry else "compact",
         "market_regime": {
@@ -65,8 +68,16 @@ def compact_output(request: Any, *, retry: bool = False) -> dict[str, Any]:
         },
         "supply_demand_analysis": {
             "summary": "Price remains between mapped supply and demand.",
-            "nearest_supply": None,
-            "nearest_demand": None,
+            "nearest_supply_ref": (
+                context.supply_zone_catalog[0].zone_id
+                if context.supply_zone_catalog
+                else None
+            ),
+            "nearest_demand_ref": (
+                context.demand_zone_catalog[0].zone_id
+                if context.demand_zone_catalog
+                else None
+            ),
             "evidence_refs": refs,
         },
         "momentum_analysis": {
@@ -99,6 +110,29 @@ def compact_output(request: Any, *, retry: bool = False) -> dict[str, Any]:
             }
         )
     return output
+
+
+def request_with_zones(request: Any) -> Any:
+    evidence = [dict(item) for item in request.smc_evidence]
+    evidence[0] = {
+        **evidence[0],
+        "raw": {
+            **dict(evidence[0]["raw"]),
+            "zones": [
+                {
+                    "zone_type": "supply",
+                    "lower_price": 3340.0,
+                    "upper_price": 3350.0,
+                },
+                {
+                    "zone_type": "demand",
+                    "lower_price": 3290.0,
+                    "upper_price": 3300.0,
+                },
+            ],
+        },
+    }
+    return request.model_copy(update={"smc_evidence": tuple(evidence)})
 
 
 class CompactClient:
@@ -253,6 +287,86 @@ async def test_unknown_evidence_reference_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_zone_references_resolve_only_from_deterministic_catalog() -> None:
+    _, _, _, request = await _request()
+    request = request_with_zones(request)
+    context = build_llm_analysis_context(request)
+    raw = compact_output(request)
+    wire = CompactAIAnalysisOutput.model_validate(raw)
+
+    validate_zone_references(
+        wire,
+        context.supply_zone_catalog,
+        context.demand_zone_catalog,
+    )
+    resolved = resolve_compact_output(
+        wire,
+        context.evidence_catalog,
+        context.supply_zone_catalog,
+        context.demand_zone_catalog,
+    )
+
+    assert raw["supply_demand_analysis"]["nearest_supply_ref"] == "SZ1"
+    assert raw["supply_demand_analysis"]["nearest_demand_ref"] == "DZ1"
+    assert resolved.supply_demand_analysis.nearest_supply == 3345.0
+    assert resolved.supply_demand_analysis.nearest_demand == 3295.0
+
+
+@pytest.mark.asyncio
+async def test_unknown_and_non_reference_zone_values_fail_closed() -> None:
+    _, _, _, request = await _request()
+    request = request_with_zones(request)
+    context = build_llm_analysis_context(request)
+
+    raw = compact_output(request)
+    raw["supply_demand_analysis"]["nearest_supply_ref"] = "SZ3"
+    wire = CompactAIAnalysisOutput.model_validate(raw)
+    with pytest.raises(CompactOutputValidationError) as unknown:
+        validate_zone_references(
+            wire,
+            context.supply_zone_catalog,
+            context.demand_zone_catalog,
+        )
+    assert unknown.value.code == "unknown_supply_zone_ref"
+
+    for invalid in (3345.0, {"price": 3345.0}, 0, ""):
+        raw = compact_output(request)
+        raw["supply_demand_analysis"]["nearest_supply_ref"] = invalid
+        with pytest.raises(ValidationError):
+            CompactAIAnalysisOutput.model_validate(raw)
+
+
+@pytest.mark.asyncio
+async def test_empty_zone_catalog_requires_null_and_only_safe_syntax_normalizes() -> None:
+    _, _, _, request = await _request()
+    context = build_llm_analysis_context(request)
+    raw = compact_output(request)
+    raw["supply_demand_analysis"]["nearest_supply_ref"] = "SZ1"
+    wire = CompactAIAnalysisOutput.model_validate(raw)
+    with pytest.raises(CompactOutputValidationError) as empty:
+        validate_zone_references(
+            wire,
+            context.supply_zone_catalog,
+            context.demand_zone_catalog,
+        )
+    assert empty.value.code == "reference_must_be_null_when_catalog_empty"
+
+    normalized, changes = normalize_reference_syntax(
+        {
+            "supply_demand_analysis": {
+                "nearest_supply_ref": " sz1 ",
+                "nearest_demand_ref": {"price": 3300},
+            }
+        }
+    )
+    assert normalized["supply_demand_analysis"]["nearest_supply_ref"] == "SZ1"
+    assert normalized["supply_demand_analysis"]["nearest_demand_ref"] == {
+        "price": 3300
+    }
+    assert changes == ("supply_demand_analysis.nearest_supply_ref",)
+
+
+@pytest.mark.asyncio
 async def test_descriptive_overflow_only_truncates_allowlisted_prose() -> None:
     _, _, _, request = await _request()
     raw = compact_output(request)
@@ -309,6 +423,62 @@ async def test_valid_compact_response_is_one_call_and_persists_exact_usage_shape
     attempts = selected_provider.attempts_for(request.request_id)
     assert len(attempts) == 1
     assert attempts[0]["output_profile"] == "compact"
+
+
+@pytest.mark.asyncio
+async def test_reference_correction_lists_allowed_ids_and_never_maps_price_locally() -> None:
+    _, _, config, request = await _request()
+    request = request_with_zones(request)
+    bodies: list[dict[str, Any]] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        body = json.loads(http_request.content)
+        bodies.append(body)
+        output = compact_output(request)
+        if len(bodies) == 1:
+            output["supply_demand_analysis"]["nearest_supply_ref"] = 9999.0
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": json.dumps(output)},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 500,
+                    "completion_tokens": 450,
+                    "total_tokens": 950,
+                },
+            },
+            request=http_request,
+        )
+
+    client = HttpAIProviderClient(
+        "groq_1",
+        "safe-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    response = await provider(client, config).reason(  # type: ignore[arg-type]
+        request,
+        prompt_version=request.prompt_version,
+    )
+    initial = json.loads(bodies[0]["messages"][1]["content"])
+    correction = json.loads(bodies[1]["messages"][1]["content"])
+
+    assert initial["response_contract"]["shape"]["supply_demand_analysis"][
+        "nearest_supply_ref"
+    ] == ["SZ1"]
+    assert correction["allowed_reference_values"]["nearest_supply_ref"] == [
+        "SZ1"
+    ]
+    assert correction["previous_response"]["supply_demand_analysis"][
+        "nearest_supply_ref"
+    ] == 9999.0
+    assert response.raw_output["supply_demand_analysis"]["nearest_supply"] == 3345.0
+    assert len(bodies) == 2
 
 
 @pytest.mark.asyncio

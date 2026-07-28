@@ -9,6 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from backend.app.ai_reasoning.analysis import AIMarketAnalysis, AnalysisStatus
 from backend.app.ai_reasoning.repository import AIReasoningRepository
 from backend.app.ai_reasoning.service import AIReasoningService
+from backend.app.ai_reasoning.telemetry import (
+    current_operational_usage,
+    provider_attempts,
+    usage_parameter as scoped_usage_parameter,
+)
 from backend.app.final_decision.repository import FinalDecisionRepository
 from backend.app.final_decision.service import FinalDecisionService
 
@@ -96,12 +101,20 @@ async def latest(
         for signal in signals
     }
     usage = await final_repository.usage_for_date(service.clock().date().isoformat())
-    policy_usage = tuple(
+    historical_policy_usage = tuple(
         item
         for item in usage
         if item.generation_parameters.get("telemetry_policy") == "five_minute_v1"
     )
-    legacy_usage = tuple(item for item in usage if item not in policy_usage)
+    policy_usage = current_operational_usage(
+        usage,
+        deployment_id=service.deployment_id,
+        prompt_version=service.config.prompt_version_new_market,
+        now=service.clock(),
+    )
+    legacy_usage = tuple(
+        item for item in usage if item not in historical_policy_usage
+    )
 
     def usage_summary(rows: tuple[Any, ...]) -> dict[str, int | None]:
         return {
@@ -115,29 +128,18 @@ async def latest(
             "failed_requests": sum(not item.success for item in rows),
         }
 
-    def usage_parameter(name: str) -> int:
-        return sum(
-            int(item.generation_parameters.get(name, 0))
-            for item in usage
-            if isinstance(item.generation_parameters.get(name, 0), (int, float))
-        )
+    def usage_parameter(
+        name: str,
+        rows: tuple[Any, ...] = policy_usage,
+    ) -> int:
+        return scoped_usage_parameter(rows, name)
 
     recent_provider_attempts = sorted(
-        (
-            attempt
-            for item in usage
-            for attempt in item.generation_parameters.get("provider_attempts", ())
-            if isinstance(attempt, dict)
-        ),
+        provider_attempts(policy_usage),
         key=lambda item: str(item.get("recorded_at") or ""),
         reverse=True,
     )[:20]
-    all_provider_attempts = tuple(
-        attempt
-        for item in usage
-        for attempt in item.generation_parameters.get("provider_attempts", ())
-        if isinstance(attempt, dict)
-    )
+    all_provider_attempts = provider_attempts(policy_usage)
     output_token_samples = sorted(
         int(value)
         for attempt in all_provider_attempts
@@ -161,10 +163,12 @@ async def latest(
         for account_id, provider_state in provider_states.items():
             if not isinstance(account_id, str) or not isinstance(provider_state, dict):
                 continue
-            provider_state["calls_today"] = usage_parameter(f"{account_id}_calls")
+            provider_state["calls_current_window"] = usage_parameter(
+                f"{account_id}_calls"
+            )
             provider_state["successful_analyses"] = sum(
                 int(item.success)
-                for item in usage
+                for item in policy_usage
                 if item.generation_parameters.get("provider") == account_id
             )
             provider_state["provider_failures"] = usage_parameter(
@@ -185,6 +189,13 @@ async def latest(
             provider_state["http_429_responses"] = usage_parameter(
                 f"{account_id}_http_429_responses"
             )
+            provider_state["recent_429_count"] = provider_state[
+                "http_429_responses"
+            ]
+            provider_state["historical_429_count"] = usage_parameter(
+                f"{account_id}_http_429_responses",
+                tuple(usage),
+            )
             provider_state["token_usage"] = {
                 "input_tokens": usage_parameter(f"{account_id}_input_tokens"),
                 "output_tokens": usage_parameter(f"{account_id}_output_tokens"),
@@ -199,8 +210,10 @@ async def latest(
         "final_actions": final_actions,
         "publications": publications,
         "llm_usage": {
-            "request_count": sum(item.request_count for item in usage),
-            "provider_http_calls": sum(item.request_count for item in usage),
+            "request_count": sum(item.request_count for item in policy_usage),
+            "provider_http_calls": sum(
+                item.request_count for item in policy_usage
+            ),
             "groq_calls": usage_parameter("groq_calls"),
             "retries": usage_parameter("retry_attempts"),
             "schema_corrections": usage_parameter("schema_corrections"),
@@ -269,14 +282,29 @@ async def latest(
             "provider_failures": usage_parameter("provider_failure"),
             "validation_failures": usage_parameter("validation_failure"),
             "total_tokens": (
-                sum(item.total_tokens or 0 for item in usage)
-                if any(item.total_tokens is not None for item in usage)
+                sum(item.total_tokens or 0 for item in policy_usage)
+                if any(
+                    item.total_tokens is not None for item in policy_usage
+                )
                 else None
             ),
-            "successful_requests": sum(item.success for item in usage),
-            "failed_requests": sum(not item.success for item in usage),
+            "successful_requests": sum(item.success for item in policy_usage),
+            "failed_requests": sum(
+                not item.success for item in policy_usage
+            ),
             "legacy_cumulative_daily": usage_summary(legacy_usage),
             "five_minute_policy": usage_summary(policy_usage),
+            "telemetry_scope": {
+                "deployment_id": service.deployment_id,
+                "prompt_version": service.config.prompt_version_new_market,
+                "schema_versions": ["compact-1.1", "compact-retry-1.1"],
+                "output_profiles": ["compact", "compact_retry"],
+                "window": "last_24_hours",
+            },
+            "historical_total": usage_summary(tuple(usage)),
+            "historical_five_minute_policy": usage_summary(
+                historical_policy_usage
+            ),
         },
         "performance": performance.model_dump(mode="json") if performance else None,
         "production_readiness": readiness.model_dump(mode="json") if readiness else None,
