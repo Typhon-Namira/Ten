@@ -52,6 +52,8 @@ test('dashboard uses one authoritative AI aggregate with bounded visibility-awar
   assert.match(api, /dashboardLatestCycle/)
   assert.match(api, /\/api\/dashboard\/latest-cycle/)
   assert.match(hook, /tenApi\.dashboardLatestCycle/)
+  assert.match(hook, /tenApi\.dashboardLatestCycle\(instrument\)/)
+  assert.doesNotMatch(api, /latest-cycle\?symbol=.*timeframe=/)
   assert.doesNotMatch(hook, /tenApi\.dashboardLatest\(/)
   assert.doesNotMatch(hook, /tenApi\.latestQuantForecast/)
   assert.doesNotMatch(hook, /tenApi\.latestQuantCalibration/)

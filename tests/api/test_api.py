@@ -170,9 +170,14 @@ def test_authoritative_cycle_and_history_reads_never_invoke_ai_provider() -> Non
 
     with TestClient(app) as client:
         app.state.ai_reasoning_service.provider.reason = provider_call
+        repository = app.state.ai_reasoning_repository
+        completed_cycle_selector = AsyncMock(
+            wraps=repository.latest_completed_analysis_cycle
+        )
+        repository.latest_completed_analysis_cycle = completed_cycle_selector
         latest = client.get(
             "/api/dashboard/latest-cycle",
-            params={"symbol": "XAUUSD", "timeframe": "M5"},
+            params={"symbol": "XAUUSD", "timeframe": "M15"},
         )
         signals = client.get(
             "/api/dashboard/signals",
@@ -184,7 +189,13 @@ def test_authoritative_cycle_and_history_reads_never_invoke_ai_provider() -> Non
         )
 
     assert latest.status_code == 200
-    assert latest.json()["status"] == "no_data"
+    latest_body = latest.json()
+    assert latest_body["status"] == "no_data"
+    assert latest_body["selection_diagnostics"]["eliminated_by"] == (
+        "ai_market_analyses.symbol = :instrument"
+    )
+    assert latest_body["selection_diagnostics"]["latest_ai_market_analysis_id"] is None
+    completed_cycle_selector.assert_awaited_once_with("XAUUSD", None)
     assert signals.status_code == 200
     assert signals.json()["items"] == []
     assert analyses.status_code == 200
