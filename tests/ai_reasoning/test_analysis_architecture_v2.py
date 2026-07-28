@@ -7,10 +7,13 @@ import pytest
 from pydantic import ValidationError
 
 from backend.app.ai_reasoning.analysis import (
+    AIAnalysisSignal,
     AIMarketAnalysis,
     AIAnalysisOutput,
     AIAnalysisTemporalContext,
     AIProviderMetadata,
+    AnalysisSignalAction,
+    AnalysisSignalStrength,
     AnalysisStatus,
     ConsistencyClassification,
     TemporalContextAnalyzer,
@@ -19,7 +22,10 @@ from backend.app.ai_reasoning.analysis import (
 )
 from backend.app.ai_reasoning.provider import reasoning_response_schema
 from backend.app.ai_reasoning.provider import AIProviderResponse
-from backend.app.ai_reasoning.repository import InMemoryAIReasoningRepository
+from backend.app.ai_reasoning.repository import (
+    AIArtifactConflictError,
+    InMemoryAIReasoningRepository,
+)
 from backend.app.engines.signal_decision_engine import ConservativeSignalDecisionPolicy
 from backend.app.engines.signal_decision_engine.models import FinalSignalAction
 from tests.engines.ai_scoring_engine.test_ai_scoring import NOW
@@ -215,6 +221,23 @@ async def test_analysis_persistence_is_idempotent_and_point_in_time_bounded() ->
     assert await repository.analyses_before("XAUUSD", "M15", value.analysis_timestamp, 10) == ()
 
 
+@pytest.mark.asyncio
+async def test_analysis_persistence_rejects_conflicting_logical_duplicate() -> None:
+    repository = InMemoryAIReasoningRepository()
+    value = analysis(2)
+    assert value.output is not None
+    conflicting_output = value.output.model_copy(
+        update={"executive_summary": "Conflicting analytical content."}
+    )
+
+    await repository.save_analysis(value)
+    with pytest.raises(AIArtifactConflictError):
+        await repository.save_analysis(
+            value.model_copy(update={"output": conflicting_output})
+        )
+    assert len(repository.analyses) == 1
+
+
 def test_signal_engine_is_only_action_authority_and_confidence_is_independent() -> None:
     history = [analysis(index) for index in range(5)]
     current = analysis(5)
@@ -224,6 +247,24 @@ def test_signal_engine_is_only_action_authority_and_confidence_is_independent() 
     value = base.model_copy(
         update={
             "current_ai_analysis": current,
+            "current_ai_signal": AIAnalysisSignal(
+                signal_id=uuid5(NAMESPACE_URL, f"signal:{current.analysis_id}"),
+                cycle_id=current.cycle_id,
+                snapshot_id=current.market_snapshot_id,
+                analysis_id=current.analysis_id,
+                instrument=current.symbol,
+                timeframe=current.timeframe,
+                signal=AnalysisSignalAction.BUY,
+                confidence=80,
+                strength=AnalysisSignalStrength.STRONG,
+                entry=3320.0,
+                stop_loss=3310.0,
+                take_profit=3340.0,
+                risk_reward_ratio=2.0,
+                reasoning_summary="Validated deterministic bullish synthesis.",
+                scoring_components={"structure": 80.0},
+                generated_at=current.created_at,
+            ),
             "temporal_context": context,
             "temporal_metrics": metrics,
             "market_snapshot_id": current.market_snapshot_id,

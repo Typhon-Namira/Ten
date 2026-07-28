@@ -10,6 +10,7 @@ from uuid import UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.app.ai_reasoning.analysis import (
+    AIAnalysisSignal,
     AIMarketAnalysis,
     AIAnalysisTemporalContext,
     TemporalAnalysisMetrics,
@@ -76,6 +77,7 @@ class SignalSourceLineage(DecisionModel):
     market_snapshot_id: UUID | None = None
     feature_snapshot_id: UUID | None = None
     current_ai_analysis_id: UUID | None = None
+    current_ai_signal_id: UUID | None = None
     historical_ai_analysis_ids: tuple[UUID, ...] = ()
     quantitative_forecast_id: UUID | None = None
     strategy_evaluation_ids: tuple[str, ...] = ()
@@ -229,6 +231,7 @@ class SignalDecisionInput(DecisionModel):
     dependency_health: tuple[DependencyHealth, ...] = ()
     history: DecisionHistory = DecisionHistory()
     current_ai_analysis: AIMarketAnalysis | None = None
+    current_ai_signal: AIAnalysisSignal | None = None
     temporal_context: AIAnalysisTemporalContext | None = None
     temporal_metrics: TemporalAnalysisMetrics | None = None
     market_snapshot_id: UUID | None = None
@@ -261,6 +264,13 @@ class SignalDecisionInput(DecisionModel):
                 raise ValueError("future AI analysis is prohibited")
             if not self.current_ai_analysis.validation_passed:
                 raise ValueError("invalid AI analysis is prohibited")
+        if self.current_ai_signal is not None:
+            if self.current_ai_analysis is None:
+                raise ValueError("AI signal requires its current AI analysis")
+            if self.current_ai_signal.analysis_id != self.current_ai_analysis.analysis_id:
+                raise ValueError("AI signal does not belong to current AI analysis")
+            if self.current_ai_signal.snapshot_id != self.market_snapshot_id:
+                raise ValueError("AI signal does not belong to current snapshot")
         if self.temporal_context is not None and self.temporal_context.as_of > self.as_of:
             raise ValueError("future temporal context is prohibited")
         return self
@@ -453,6 +463,7 @@ class DecisionRequest(BaseModel):
     persist: bool = True
     publish_events: bool = True
     current_ai_analysis: AIMarketAnalysis | None = None
+    current_ai_signal: AIAnalysisSignal | None = None
     temporal_context: AIAnalysisTemporalContext | None = None
     temporal_metrics: TemporalAnalysisMetrics | None = None
     market_snapshot_id: UUID | None = None

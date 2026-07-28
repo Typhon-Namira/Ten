@@ -6,6 +6,7 @@ from hashlib import sha256
 import math
 
 from backend.app.engines.ai_scoring_engine import ScoreMode, ScoreStatus
+from backend.app.ai_reasoning.analysis import AnalysisSignalAction
 
 from .config import SignalDecisionConfig
 from .models import (
@@ -77,6 +78,7 @@ class ConservativeSignalDecisionPolicy:
         rule("source.point_in_time", RuleOutcome.PASSED if point_in_time else RuleOutcome.FAILED, RuleSeverity.HARD_BLOCK, "point_in_time_valid" if point_in_time else "future_snapshot", score.as_of.isoformat(), decision_input.as_of.isoformat())
 
         analysis = decision_input.current_ai_analysis
+        analysis_signal = decision_input.current_ai_signal
         analysis_valid = bool(
             analysis is not None
             and analysis.validation_passed
@@ -112,6 +114,40 @@ class ConservativeSignalDecisionPolicy:
                 RuleOutcome.NOT_EVALUATED,
                 RuleSeverity.INFORMATIONAL,
                 "ai_analysis_unavailable",
+            )
+        if analysis_signal is None:
+            rule(
+                "ai.signal_authority",
+                RuleOutcome.NOT_EVALUATED,
+                RuleSeverity.INFORMATIONAL,
+                "ai_signal_unavailable",
+            )
+        elif analysis_signal.signal == AnalysisSignalAction.HOLD:
+            rule(
+                "ai.signal_authority",
+                RuleOutcome.PASSED,
+                RuleSeverity.INFORMATIONAL,
+                "ai_signal_hold_preserved",
+                str(analysis_signal.signal_id),
+            )
+        else:
+            signal_aligned = (
+                analysis_signal.signal == AnalysisSignalAction.BUY
+                and direction == DecisionDirection.BULLISH
+                or analysis_signal.signal == AnalysisSignalAction.SELL
+                and direction == DecisionDirection.BEARISH
+            )
+            rule(
+                "ai.signal_authority",
+                RuleOutcome.PASSED if signal_aligned else RuleOutcome.WARNING,
+                RuleSeverity.INFORMATIONAL,
+                (
+                    "ai_signal_accepted"
+                    if signal_aligned
+                    else "ai_signal_rejected_direction_mismatch"
+                ),
+                analysis_signal.signal.value,
+                direction.value,
             )
         temporal = decision_input.temporal_metrics
         if temporal is None:
@@ -245,8 +281,8 @@ class ConservativeSignalDecisionPolicy:
             state = DecisionState.ELIGIBLE
 
         ai_confidence = (
-            analysis.output.analysis_confidence * 100
-            if analysis_valid and analysis is not None and analysis.output is not None
+            float(analysis_signal.confidence)
+            if analysis_signal is not None
             else 0.0
         )
         temporal_confidence = (
@@ -289,6 +325,15 @@ class ConservativeSignalDecisionPolicy:
             state == DecisionState.ELIGIBLE
             and direction != DecisionDirection.NEUTRAL
             and analysis_valid
+            and analysis_signal is not None
+            and analysis_signal.signal
+            in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
+            and (
+                analysis_signal.signal == AnalysisSignalAction.BUY
+                and direction == DecisionDirection.BULLISH
+                or analysis_signal.signal == AnalysisSignalAction.SELL
+                and direction == DecisionDirection.BEARISH
+            )
             and decision_input.current_price is not None
             and decision_input.expected_move is not None
         )
@@ -436,6 +481,11 @@ class ConservativeSignalDecisionPolicy:
                 market_snapshot_id=decision_input.market_snapshot_id,
                 feature_snapshot_id=score.snapshot_id,
                 current_ai_analysis_id=analysis.analysis_id if analysis is not None else None,
+                current_ai_signal_id=(
+                    analysis_signal.signal_id
+                    if analysis_signal is not None
+                    else None
+                ),
                 historical_ai_analysis_ids=historical_ids,
                 quantitative_forecast_id=decision_input.quantitative_forecast_id,
                 strategy_evaluation_ids=tuple(item.rule_id for item in evaluations),

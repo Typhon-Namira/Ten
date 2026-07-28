@@ -320,10 +320,32 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         await request.app.state.ai_reasoning_repository.analysis_for_state(state.state_id)
         if state is not None else None
     )
+    analysis_signal = (
+        await request.app.state.ai_reasoning_repository.signal_for_analysis(
+            analysis.analysis_id
+        )
+        if analysis is not None
+        else None
+    )
     signal_decision = await request.app.state.signal_decision_service.repository.get_latest_decision(
         symbol,
-        request.app.state.settings.market_data_timeframes[0],
+        getattr(state, "trigger_timeframe", None)
+        or request.app.state.settings.market_data_timeframes[0],
     )
+    if (
+        state is not None
+        and signal_decision is not None
+        and (
+            signal_decision.source_lineage is None
+            or signal_decision.source_lineage.market_snapshot_id != state.state_id
+            or (
+                analysis_signal is not None
+                and signal_decision.source_lineage.current_ai_signal_id
+                != analysis_signal.signal_id
+            )
+        )
+    ):
+        signal_decision = None
     stages["quant_forecast"] = _system_stage(
         "quant_forecast", "Quant Forecast",
         "blocked" if state is None else "running" if quant is None else "failed" if str(getattr(quant, "status", "")).endswith("failed") else "healthy",
@@ -333,9 +355,15 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
     reasoning_enabled = flags.is_enabled(FeatureFlag.AI_CENTRIC_SHADOW_MODE)
     stages["ai_reasoning"] = _system_stage(
         "ai_reasoning", "AI Market Analysis",
-        "disabled" if not reasoning_enabled else "blocked" if quant is None else "running" if analysis is None else "failed" if not analysis.validation_passed else "healthy",
-        "ai_centric_shadow_mode_disabled" if not reasoning_enabled else "awaiting_quant_forecast" if quant is None else "analysis_in_progress" if analysis is None else "ai_market_analysis_persisted",
+        "disabled" if not reasoning_enabled else "blocked" if quant is None else "running" if analysis is None else "failed" if not analysis.validation_passed or analysis_signal is None else "healthy",
+        "ai_centric_shadow_mode_disabled" if not reasoning_enabled else "awaiting_quant_forecast" if quant is None else "analysis_in_progress" if analysis is None else "structured_output_invalid" if not analysis.validation_passed else "analysis_signal_persistence_missing" if analysis_signal is None else "analysis_and_signal_persisted",
         timestamp=getattr(analysis, "analysis_timestamp", None), record_id=getattr(analysis, "analysis_id", None),
+        details={
+            "signal_id": getattr(analysis_signal, "signal_id", None),
+            "signal": getattr(getattr(analysis_signal, "signal", None), "value", None),
+            "confidence": getattr(analysis_signal, "confidence", None),
+            "strength": getattr(getattr(analysis_signal, "strength", None), "value", None),
+        },
     )
     stages["proposal"] = _system_stage(
         "proposal", "AI Proposal (retired)",
@@ -370,6 +398,11 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         "cycle_id": str(state.cycle_id) if state is not None else None,
         "stages": stage_list,
         "current_decision": signal_decision.model_dump(mode="json") if signal_decision is not None else None,
+        "current_analysis_signal": (
+            analysis_signal.model_dump(mode="json")
+            if analysis_signal is not None
+            else None
+        ),
         "storage": storage,
         "failure_history": persisted_failures or [
             {
@@ -777,6 +810,13 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
 
     quant = await request.app.state.quant_forecast_repository.result_for_state(state.state_id)
     analysis = await request.app.state.ai_reasoning_repository.analysis_for_state(state.state_id)
+    analysis_signal = (
+        await request.app.state.ai_reasoning_repository.signal_for_analysis(
+            analysis.analysis_id
+        )
+        if analysis is not None
+        else None
+    )
     forecast = await request.app.state.ai_reasoning_repository.forecast_for_state(state.state_id)
     ai_request = await request.app.state.ai_reasoning_repository.request_for_state(
         state.state_id
@@ -986,6 +1026,11 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
         ),
         "reasoning": {
             "analysis": analysis.model_dump(mode="json") if analysis else None,
+            "analysis_signal": (
+                analysis_signal.model_dump(mode="json")
+                if analysis_signal
+                else None
+            ),
             "forecast": forecast.model_dump(mode="json") if forecast else None,
             "proposal": proposal.model_dump(mode="json") if proposal else None,
             "managed_signals": [signal.model_dump(mode="json")] if signal else [],

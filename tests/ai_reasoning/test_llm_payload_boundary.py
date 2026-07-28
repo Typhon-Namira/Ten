@@ -406,6 +406,8 @@ async def test_groq_missing_executive_summary_gets_one_explicit_schema_correctio
     assert "analysis_context" not in correction_payload
     assert correction_payload["complete_object_required"] is True
     assert "market_regime" in correction_payload["required_object_fields"]["$"]
+    assert correction_payload["response_contract"]["shape"]["market_regime"]
+    assert correction_payload["allowed_reference_values"]["evidence_refs"]
     assert correction_payload["required_object_fields"]["$.market_regime"] == [
         "classification",
         "strength",

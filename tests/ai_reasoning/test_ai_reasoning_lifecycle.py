@@ -356,14 +356,19 @@ async def test_disabled_analysis_flag_makes_no_provider_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_valid_analysis_is_persisted_without_forecast_proposal_or_signal() -> None:
+async def test_valid_analysis_persists_one_deterministic_analysis_signal() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
     result = await build_service(repository, provider).process(state, quant)
     assert result is not None
     assert result.analysis.validation_passed is True
+    assert result.signal is not None
+    assert result.signal.analysis_id == result.analysis.analysis_id
+    assert result.signal.signal.value in {"BUY", "SELL", "HOLD"}
+    assert 0 <= result.signal.confidence <= 100
     assert provider.calls == 1
     assert len(repository.analyses) == 1
+    assert len(repository.analysis_signals) == 1
     assert repository.forecasts == {}
     assert repository.proposals == {}
     assert repository.signals == {}
@@ -454,7 +459,9 @@ async def test_same_cycle_is_idempotent_and_reuses_one_analysis() -> None:
     second = await service.process(state, quant)
     assert first is not None and second is not None
     assert first.analysis.analysis_id == second.analysis.analysis_id
+    assert first.signal == second.signal
     assert provider.calls == 1
+    assert len(repository.analysis_signals) == 1
 
 
 @pytest.mark.asyncio
@@ -561,7 +568,10 @@ async def test_controlled_twenty_minute_simulation_has_four_provider_calls() -> 
 
 
 @pytest.mark.asyncio
-async def test_stale_market_data_is_rejected_before_provider_call() -> None:
+async def test_stale_market_data_is_rejected_before_provider_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="backend.app.ai_reasoning.service")
     state, quant = await state_and_quant()
     stale_frames = tuple(
         item.model_copy(update={"stale": True})
@@ -576,6 +586,15 @@ async def test_stale_market_data_is_rejected_before_provider_call() -> None:
     assert await service.process(state, quant) is None
     assert provider.calls == 0
     assert service.health()["call_control"]["skip_reasons"]["market_data_stale"] == 1
+    record = next(
+        item
+        for item in caplog.records
+        if item.getMessage() == "ai_reasoning.gate.skipped"
+    )
+    assert record.reason_code == "stale_data"
+    assert record.snapshot_id == str(state.state_id)
+    assert record.cycle_id == str(state.cycle_id)
+    assert record.details == {"skip_reason": "market_data_stale"}
 
 
 @pytest.mark.asyncio

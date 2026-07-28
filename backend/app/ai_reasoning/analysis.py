@@ -25,6 +25,20 @@ class AnalysisStatus(StrEnum):
     FAILED = "failed"
 
 
+class AnalysisSignalAction(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
+
+
+class AnalysisSignalStrength(StrEnum):
+    VERY_WEAK = "VERY_WEAK"
+    WEAK = "WEAK"
+    MODERATE = "MODERATE"
+    STRONG = "STRONG"
+    VERY_STRONG = "VERY_STRONG"
+
+
 class EvidenceKind(StrEnum):
     OBSERVED_FACT = "observed_fact"
     CALCULATED_FEATURE = "calculated_feature"
@@ -221,6 +235,76 @@ class AIMarketAnalysis(StrictAnalysisModel):
         return self
 
 
+class AIAnalysisSignal(StrictAnalysisModel):
+    """Deterministic signal derived from a validated analysis, never from LLM fields."""
+
+    schema_version: str = "1.0"
+    signal_id: UUID
+    cycle_id: UUID
+    snapshot_id: UUID
+    analysis_id: UUID
+    instrument: str
+    timeframe: str
+    signal: AnalysisSignalAction
+    confidence: int = Field(ge=0, le=100)
+    strength: AnalysisSignalStrength
+    entry: float | None = Field(default=None, gt=0)
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
+    risk_reward_ratio: float | None = Field(default=None, gt=0)
+    evidence_refs: tuple[str, ...] = ()
+    reasoning_summary: str
+    risk_flags: tuple[str, ...] = ()
+    scoring_components: dict[str, float]
+    fallback: bool = False
+    source: str = "deterministic_analysis_signal"
+    generated_at: datetime
+
+    @field_validator("generated_at")
+    @classmethod
+    def signal_time_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("analysis-signal timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def geometry_and_strength_are_consistent(self) -> AIAnalysisSignal:
+        expected_strength = signal_strength(self.confidence)
+        if self.strength != expected_strength:
+            raise ValueError("analysis-signal strength does not match confidence")
+        geometry = (self.entry, self.stop_loss, self.take_profit, self.risk_reward_ratio)
+        if self.signal == AnalysisSignalAction.HOLD:
+            if any(value is not None for value in geometry):
+                raise ValueError("HOLD analysis signal cannot contain execution geometry")
+            return self
+        if any(value is None for value in geometry):
+            raise ValueError("directional analysis signal requires complete geometry")
+        assert self.entry is not None
+        assert self.stop_loss is not None
+        assert self.take_profit is not None
+        if self.signal == AnalysisSignalAction.BUY and not (
+            self.stop_loss < self.entry < self.take_profit
+        ):
+            raise ValueError("BUY analysis-signal geometry is invalid")
+        if self.signal == AnalysisSignalAction.SELL and not (
+            self.take_profit < self.entry < self.stop_loss
+        ):
+            raise ValueError("SELL analysis-signal geometry is invalid")
+        return self
+
+
+def signal_strength(confidence: int) -> AnalysisSignalStrength:
+    if confidence < 40:
+        return AnalysisSignalStrength.VERY_WEAK
+    if confidence < 55:
+        return AnalysisSignalStrength.WEAK
+    if confidence < 70:
+        return AnalysisSignalStrength.MODERATE
+    if confidence < 85:
+        return AnalysisSignalStrength.STRONG
+    return AnalysisSignalStrength.VERY_STRONG
+
+
 class AnalysisReference(StrictAnalysisModel):
     analysis_id: UUID
     analysis_timestamp: datetime
@@ -325,6 +409,7 @@ class ValidatedAIAnalysis(StrictAnalysisModel):
     analysis: AIMarketAnalysis
     temporal_context: AIAnalysisTemporalContext
     temporal_metrics: TemporalAnalysisMetrics
+    signal: AIAnalysisSignal | None = None
 
 
 def analysis_reference(value: AIMarketAnalysis) -> AnalysisReference:

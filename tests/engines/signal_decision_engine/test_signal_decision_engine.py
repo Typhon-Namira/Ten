@@ -290,7 +290,7 @@ def test_configuration_and_registries_fail_closed() -> None:
         rules.register(definition)
     with pytest.raises(SignalDecisionConfigurationError, match="unknown"):
         rules.get("missing")
-    assert len(production_rule_registry().definitions()) == 17
+    assert len(production_rule_registry().definitions()) == 18
 
     policies = DecisionPolicyRegistry()
     policy = ConservativeSignalDecisionPolicy()

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from hashlib import sha256
+import json
 import logging
 from typing import Protocol
 
+from pydantic import BaseModel
 from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import (
     AIMarketAnalysisRecord,
+    AIAnalysisSignalRecord,
     AIMarketForecastRecord,
     AIReasoningRequestRecord,
     AIReasoningCycleLockRecord,
@@ -29,7 +33,7 @@ from backend.app.storage.models import (
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .llm_context import build_llm_analysis_context
-from .analysis import AIMarketAnalysis, AnalysisStatus
+from .analysis import AIAnalysisSignal, AIMarketAnalysis, AnalysisStatus
 from .models import (
     AIMarketForecast,
     AIReasoningRequest,
@@ -51,6 +55,44 @@ from .request_persistence import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class AIArtifactConflictError(RuntimeError):
+    """The same logical identity was presented with conflicting canonical data."""
+
+
+def _canonical_hash(value: object, *, excluded: frozenset[str] = frozenset()) -> str:
+    payload: object
+    if isinstance(value, BaseModel):
+        payload = value.model_dump(mode="json", exclude=set(excluded))
+    else:
+        payload = value
+    return sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+
+
+def analysis_payload_hash(value: AIMarketAnalysis) -> str:
+    """Exclude transport timing while preserving all analytical semantics."""
+
+    payload = value.model_dump(
+        mode="json",
+        exclude={"created_at"},
+    )
+    metadata = dict(payload["provider_metadata"])
+    metadata.pop("latency_ms", None)
+    metadata.pop("token_usage", None)
+    payload["provider_metadata"] = metadata
+    return _canonical_hash(payload)
+
+
+def analysis_signal_payload_hash(value: AIAnalysisSignal) -> str:
+    return _canonical_hash(value, excluded=frozenset({"generated_at"}))
 
 
 class AIReasoningRepository(Protocol):
@@ -96,6 +138,13 @@ class AIReasoningRepository(Protocol):
         analysis_contract_version: str,
     ) -> AIMarketAnalysis | None: ...
     async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis: ...
+    async def save_analysis_signal(self, value: AIAnalysisSignal) -> AIAnalysisSignal: ...
+    async def signal_for_analysis(self, analysis_id: object) -> AIAnalysisSignal | None: ...
+    async def latest_analysis_signal(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> AIAnalysisSignal | None: ...
     async def latest_analysis(self, instrument: str, timeframe: str | None = None) -> AIMarketAnalysis | None: ...
     async def analyses_before(
         self,
@@ -144,6 +193,7 @@ class InMemoryAIReasoningRepository:
         self.failures: dict[object, LLMStructuredOutputFailure] = {}
         self.forecasts: dict[object, AIMarketForecast] = {}
         self.analyses: dict[object, AIMarketAnalysis] = {}
+        self.analysis_signals: dict[object, AIAnalysisSignal] = {}
         self.proposals: dict[object, AISignalProposal] = {}
         self.signals: dict[object, ManagedSignal] = {}
         self.transitions: dict[object, SignalStateTransition] = {}
@@ -230,7 +280,15 @@ class InMemoryAIReasoningRepository:
     ) -> tuple[AIMarketForecast, AISignalProposal | None] | None:
         async with self._lock:
             cycle = self.reasoning_cycles.get(idempotency_key)
-            if cycle is None or cycle.get("status") not in {"completed", "failed"}:
+            if cycle is None or cycle.get("status") not in {
+                "completed",
+                "failed",
+                "COMPLETED",
+                "FAILED_PROVIDER",
+                "FAILED_SCHEMA",
+                "FAILED_PERSISTENCE",
+                "TIMED_OUT",
+            }:
                 return None
             request_id = cycle.get("request_id")
             forecast = self.forecasts.get(request_id)
@@ -249,7 +307,15 @@ class InMemoryAIReasoningRepository:
     async def analysis_for_reasoning_cycle(self, idempotency_key: str) -> AIMarketAnalysis | None:
         async with self._lock:
             cycle = self.reasoning_cycles.get(idempotency_key)
-            if cycle is None or cycle.get("status") not in {"completed", "failed"}:
+            if cycle is None or cycle.get("status") not in {
+                "completed",
+                "failed",
+                "COMPLETED",
+                "FAILED_PROVIDER",
+                "FAILED_SCHEMA",
+                "FAILED_PERSISTENCE",
+                "TIMED_OUT",
+            }:
                 return None
             return self.analyses.get(cycle.get("analysis_id"))
 
@@ -310,9 +376,63 @@ class InMemoryAIReasoningRepository:
                 None,
             )
             if existing is not None:
+                if analysis_payload_hash(existing) != analysis_payload_hash(value):
+                    raise AIArtifactConflictError(
+                        "conflicting AI analysis payload for stable logical identity"
+                    )
                 return existing
             self.analyses[value.analysis_id] = value
         return value
+
+    async def save_analysis_signal(self, value: AIAnalysisSignal) -> AIAnalysisSignal:
+        async with self._lock:
+            existing = next(
+                (
+                    item
+                    for item in self.analysis_signals.values()
+                    if item.analysis_id == value.analysis_id
+                    or (
+                        item.instrument == value.instrument
+                        and item.timeframe == value.timeframe
+                        and item.cycle_id == value.cycle_id
+                        and item.schema_version == value.schema_version
+                    )
+                ),
+                None,
+            )
+            if existing is not None:
+                if analysis_signal_payload_hash(existing) != analysis_signal_payload_hash(value):
+                    raise AIArtifactConflictError(
+                        "conflicting analysis signal for stable logical identity"
+                    )
+                return existing
+            self.analysis_signals[value.signal_id] = value
+            return value
+
+    async def signal_for_analysis(self, analysis_id: object) -> AIAnalysisSignal | None:
+        async with self._lock:
+            return next(
+                (
+                    item
+                    for item in self.analysis_signals.values()
+                    if item.analysis_id == analysis_id
+                ),
+                None,
+            )
+
+    async def latest_analysis_signal(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> AIAnalysisSignal | None:
+        async with self._lock:
+            values = [
+                item
+                for item in self.analysis_signals.values()
+                if item.instrument == instrument
+                and (timeframe is None or item.timeframe == timeframe)
+            ]
+        return max(values, key=lambda item: item.generated_at, default=None)
 
     async def latest_analysis(
         self,
@@ -564,7 +684,17 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 select(AIReasoningCycleLockRecord)
                 .where(
                     AIReasoningCycleLockRecord.idempotency_key == idempotency_key,
-                    AIReasoningCycleLockRecord.status.in_(("completed", "failed")),
+                    AIReasoningCycleLockRecord.status.in_(
+                        (
+                            "completed",
+                            "failed",
+                            "COMPLETED",
+                            "FAILED_PROVIDER",
+                            "FAILED_SCHEMA",
+                            "FAILED_PERSISTENCE",
+                            "TIMED_OUT",
+                        )
+                    ),
                 )
                 .limit(1)
             )
@@ -602,7 +732,17 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 select(AIReasoningCycleLockRecord)
                 .where(
                     AIReasoningCycleLockRecord.idempotency_key == idempotency_key,
-                    AIReasoningCycleLockRecord.status.in_(("completed", "failed")),
+                    AIReasoningCycleLockRecord.status.in_(
+                        (
+                            "completed",
+                            "failed",
+                            "COMPLETED",
+                            "FAILED_PROVIDER",
+                            "FAILED_SCHEMA",
+                            "FAILED_PERSISTENCE",
+                            "TIMED_OUT",
+                        )
+                    ),
                 )
                 .limit(1)
             )
@@ -707,10 +847,129 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             if record is None:
                 await self.session.rollback()
                 raise RuntimeError("AI analysis conflict did not resolve to a persisted row")
+            existing = AIMarketAnalysis.model_validate(record.payload)
+            existing_hash = analysis_payload_hash(existing)
+            incoming_hash = analysis_payload_hash(value)
+            if existing_hash != incoming_hash:
+                logger.error(
+                    "analytical.persistence.non_deterministic_duplicate",
+                    extra={
+                        "artifact_type": "ai_market_analysis",
+                        "analysis_id": str(value.analysis_id),
+                        "cycle_id": str(value.cycle_id),
+                        "snapshot_id": str(value.market_snapshot_id),
+                        "existing_payload_hash": existing_hash,
+                        "incoming_payload_hash": incoming_hash,
+                    },
+                )
+                await self.session.rollback()
+                raise AIArtifactConflictError(
+                    "conflicting AI analysis payload for stable logical identity"
+                )
             await self.session.commit()
-            return AIMarketAnalysis.model_validate(record.payload)
+            return existing
         await self.session.commit()
         return value
+
+    @scoped_session
+    async def save_analysis_signal(self, value: AIAnalysisSignal) -> AIAnalysisSignal:
+        payload_hash = analysis_signal_payload_hash(value)
+        identifier = (
+            await self.session.execute(
+                insert(AIAnalysisSignalRecord)
+                .values(
+                    signal_id=value.signal_id,
+                    analysis_id=value.analysis_id,
+                    cycle_id=value.cycle_id,
+                    snapshot_id=value.snapshot_id,
+                    instrument=value.instrument,
+                    timeframe=value.timeframe,
+                    signal=value.signal.value,
+                    confidence=value.confidence,
+                    strength=value.strength.value,
+                    schema_version=value.schema_version,
+                    payload_hash=payload_hash,
+                    payload=value.model_dump(mode="json"),
+                    generated_at=value.generated_at,
+                )
+                .on_conflict_do_nothing()
+                .returning(AIAnalysisSignalRecord.signal_id)
+            )
+        ).scalar_one_or_none()
+        if identifier is None:
+            record = (
+                await self.session.scalars(
+                    select(AIAnalysisSignalRecord)
+                    .where(
+                        or_(
+                            AIAnalysisSignalRecord.analysis_id == value.analysis_id,
+                            (
+                                (AIAnalysisSignalRecord.instrument == value.instrument)
+                                & (AIAnalysisSignalRecord.timeframe == value.timeframe)
+                                & (AIAnalysisSignalRecord.cycle_id == value.cycle_id)
+                                & (AIAnalysisSignalRecord.schema_version == value.schema_version)
+                            ),
+                        )
+                    )
+                    .limit(1)
+                )
+            ).first()
+            if record is None:
+                await self.session.rollback()
+                raise RuntimeError("analysis-signal conflict did not resolve")
+            if record.payload_hash != payload_hash:
+                logger.error(
+                    "analytical.persistence.non_deterministic_duplicate",
+                    extra={
+                        "artifact_type": "ai_analysis_signal",
+                        "analysis_id": str(value.analysis_id),
+                        "signal_id": str(value.signal_id),
+                        "cycle_id": str(value.cycle_id),
+                        "snapshot_id": str(value.snapshot_id),
+                        "existing_payload_hash": record.payload_hash,
+                        "incoming_payload_hash": payload_hash,
+                    },
+                )
+                await self.session.rollback()
+                raise AIArtifactConflictError(
+                    "conflicting analysis signal for stable logical identity"
+                )
+            await self.session.commit()
+            return AIAnalysisSignal.model_validate(record.payload)
+        await self.session.commit()
+        return value
+
+    @scoped_session
+    async def signal_for_analysis(self, analysis_id: object) -> AIAnalysisSignal | None:
+        record = (
+            await self.session.scalars(
+                select(AIAnalysisSignalRecord)
+                .where(AIAnalysisSignalRecord.analysis_id == analysis_id)
+                .limit(1)
+            )
+        ).first()
+        return AIAnalysisSignal.model_validate(record.payload) if record else None
+
+    @scoped_session
+    async def latest_analysis_signal(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> AIAnalysisSignal | None:
+        query = select(AIAnalysisSignalRecord).where(
+            AIAnalysisSignalRecord.instrument == instrument
+        )
+        if timeframe is not None:
+            query = query.where(AIAnalysisSignalRecord.timeframe == timeframe)
+        record = (
+            await self.session.scalars(
+                query.order_by(
+                    AIAnalysisSignalRecord.generated_at.desc(),
+                    AIAnalysisSignalRecord.signal_id.desc(),
+                ).limit(1)
+            )
+        ).first()
+        return AIAnalysisSignal.model_validate(record.payload) if record else None
 
     @scoped_session
     async def latest_analysis(

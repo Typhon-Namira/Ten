@@ -266,10 +266,8 @@ async def test_schema_correction_rate_limit_does_not_repeat_analysis_on_next_acc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failed_accounts", (1, 2, 3))
-async def test_quota_exhaustion_advances_to_next_account(
-    failed_accounts: int,
-) -> None:
+async def test_quota_exhaustion_allows_one_provider_failover() -> None:
+    failed_accounts = 1
     outcomes = {
         index: [failure(f"groq_{index}", "quota_exhausted", status=429)]
         for index in range(1, failed_accounts + 1)
@@ -325,7 +323,7 @@ async def test_rate_limited_account_becomes_available_only_after_cooldown() -> N
 
 
 @pytest.mark.asyncio
-async def test_pool_is_temporarily_unavailable_when_all_accounts_are_rate_limited() -> None:
+async def test_provider_failover_is_bounded_to_one_alternate_account() -> None:
     providers = four(
         {
             index: [failure(f"groq_{index}", "rate_limited", status=429)]
@@ -337,9 +335,9 @@ async def test_pool_is_temporarily_unavailable_when_all_accounts_are_rate_limite
     with pytest.raises(AIProviderRequestError):
         await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
 
+    assert [provider.calls for provider in providers] == [1, 1, 0, 0]
     metadata = router.metadata()
-    assert metadata["available_account_count"] == 0
-    assert metadata["aggregate_reason"] == "temporarily_rate_limited"
+    assert metadata["available_account_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -389,11 +387,15 @@ async def test_all_accounts_failing_returns_no_successful_provider() -> None:
     with pytest.raises(AIProviderRequestError) as captured:
         await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
 
-    assert captured.value.details.provider == "groq_4"
+    assert captured.value.details.provider == "groq_2"
     assert router.active_provider is None
     assert all(
         state.status == ProviderStatus.QUOTA_EXHAUSTED
-        for state in router.states.values()
+        for state in tuple(router.states.values())[:2]
+    )
+    assert all(
+        state.status == ProviderStatus.AVAILABLE
+        for state in tuple(router.states.values())[2:]
     )
 
 

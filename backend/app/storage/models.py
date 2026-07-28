@@ -1220,6 +1220,54 @@ class AIMarketAnalysisRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class AIAnalysisSignalRecord(Base):
+    """One deterministic signal for one successfully validated AI analysis."""
+
+    __tablename__ = "ai_analysis_signals"
+    __table_args__ = (
+        Index(
+            "ux_ai_analysis_signal_cycle",
+            "instrument",
+            "timeframe",
+            "cycle_id",
+            "schema_version",
+            unique=True,
+        ),
+        Index(
+            "ix_ai_analysis_signal_latest",
+            "instrument",
+            "timeframe",
+            "generated_at",
+        ),
+    )
+
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    analysis_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_analyses.analysis_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    snapshot_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    signal: Mapped[str] = mapped_column(String(16), index=True)
+    confidence: Mapped[int] = mapped_column(Integer)
+    strength: Mapped[str] = mapped_column(String(24), index=True)
+    schema_version: Mapped[str] = mapped_column(String(32))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+
+
 class AIForecastScenarioRecord(Base):
     __tablename__ = "ai_forecast_scenarios"
 

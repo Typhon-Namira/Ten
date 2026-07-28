@@ -44,6 +44,7 @@ def production_rule_registry() -> RuleRegistry:
         ("risk.maximum", RuleCategory.RISK),
         ("quality.minimum", RuleCategory.DATA_QUALITY),
         ("alignment.minimum", RuleCategory.ALIGNMENT),
+        ("ai.signal_authority", RuleCategory.ALIGNMENT),
         ("conflict.maximum", RuleCategory.CONFLICT),
         ("economic_event.window", RuleCategory.ECONOMIC_EVENT),
         ("regime.allowed", RuleCategory.MARKET_REGIME),
