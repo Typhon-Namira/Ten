@@ -69,8 +69,10 @@ async def test_cache_memory_persistent_and_invalidation(tmp_path: Path) -> None:
     candles = series(1)
     await cache.set("history:XAUUSD:M1", candles, 60)
     assert await cache.get("history:XAUUSD:M1") == candles
+    assert cache.statistics.last_read_at is not None
     second = MarketDataCache(tmp_path)
     assert await second.get("history:XAUUSD:M1") == candles
+    assert second.statistics.last_read_at is not None
     await second.invalidate("history")
     assert await second.get("history:XAUUSD:M1") is None
     assert cache.statistics.hit_ratio == 1

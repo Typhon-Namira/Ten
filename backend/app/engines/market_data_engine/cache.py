@@ -17,6 +17,7 @@ class CacheStatistics(BaseModel):
     writes: int = 0
     evictions: int = 0
     invalidations: int = 0
+    last_read_at: datetime | None = None
     last_write_at: datetime | None = None
 
     @property
@@ -36,6 +37,7 @@ class MarketDataCache:
 
     async def get(self, key: str) -> list[Candle] | None:
         async with self._lock:
+            self.statistics.last_read_at = datetime.now(UTC)
             entry = self._memory.get(key)
             if entry and entry[0] > datetime.now(UTC):
                 self._memory.move_to_end(key)
