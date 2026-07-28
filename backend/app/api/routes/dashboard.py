@@ -1251,11 +1251,17 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         if completed_signal is not None
         else await request.app.state.unified_market_state_repository.latest_state(symbol)
     )
+    latest_live_state = (
+        await request.app.state.unified_market_state_repository.latest_state(symbol)
+    )
     stages: dict[str, dict[str, Any]] = {}
     evidence_by_engine = {
         item.source_engine: item for item in (state.evidence if state is not None else ())
     }
     market_timestamp = getattr(state, "market_data_boundary", None)
+    live_ums_market_timestamp = getattr(
+        latest_live_state, "market_data_boundary", None
+    )
     settings = request.app.state.settings
     freshness = await evaluate_market_data_freshness(
         request.app.state.market_data_service,
@@ -1263,7 +1269,14 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         timeframes=tuple(Timeframe(item) for item in REQUIRED_TIMEFRAMES),
         worker_utc_now=now,
         freshness_limit_seconds=settings.max_candle_staleness_seconds,
-        ums_market_timestamp=market_timestamp,
+        ums_market_timestamp=live_ums_market_timestamp,
+    )
+    freshness.update(
+        {
+            "ums_state_id": getattr(latest_live_state, "state_id", None),
+            "ums_cycle_id": getattr(latest_live_state, "cycle_id", None),
+            "completed_ai_cycle_market_timestamp": market_timestamp,
+        }
     )
     market_data_status = freshness["status"]
     stages["market_data"] = _system_stage(
