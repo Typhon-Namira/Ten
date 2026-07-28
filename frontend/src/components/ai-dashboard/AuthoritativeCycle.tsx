@@ -31,7 +31,12 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
       <div className="authoritative-signal__hero">
         <StatusBadge tone={signalTone(signal.signal)}>{signal.signal}</StatusBadge>
         <div><strong>{signal.signal_confidence.toFixed(0)}% signal confidence · {humanize(signal.strength)}</strong><small>{signal.reasoning_summary}</small></div>
-        <div className="authoritative-signal__time"><Clock3 size={14} /><span>Market {new Date(cycle.market_time!).toLocaleString()}</span><small>Refreshed {new Date(cycle.dashboard_refreshed_at).toLocaleTimeString()}</small></div>
+        <div className="authoritative-signal__time">
+          <Clock3 size={14} />
+          <span>Market time {new Date(cycle.market_time!).toLocaleString()}</span>
+          <small>Cycle completed {cycle.completed_at ? new Date(cycle.completed_at).toLocaleString() : 'Not available'}</small>
+          <small>Last checked {new Date(cycle.dashboard_refreshed_at).toLocaleTimeString()}</small>
+        </div>
       </div>
       <div className="health-grid">
         <Metric label="Entry" value={formatPrice(signal.entry)} />

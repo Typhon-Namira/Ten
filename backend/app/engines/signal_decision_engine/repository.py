@@ -34,6 +34,16 @@ class SignalDecisionRepository(ABC):
     async def get_latest_decision(self, instrument: str, timeframe: str, direction: DecisionDirection | None = None, state: DecisionState | None = None) -> SignalDecision | None: ...
 
     @abstractmethod
+    async def find_by_analysis_lineage(
+        self,
+        instrument: str,
+        timeframe: str,
+        market_snapshot_id: UUID,
+        analysis_id: UUID,
+        signal_id: UUID,
+    ) -> SignalDecision | None: ...
+
+    @abstractmethod
     async def list_decisions(
         self,
         instrument: str,
@@ -88,6 +98,31 @@ class InMemorySignalDecisionRepository(SignalDecisionRepository):
     async def get_latest_decision(self, instrument: str, timeframe: str, direction: DecisionDirection | None = None, state: DecisionState | None = None) -> SignalDecision | None:
         values = await self.list_decisions(instrument, timeframe, direction=direction, state=state, limit=1)
         return values[0] if values else None
+
+    async def find_by_analysis_lineage(
+        self,
+        instrument: str,
+        timeframe: str,
+        market_snapshot_id: UUID,
+        analysis_id: UUID,
+        signal_id: UUID,
+    ) -> SignalDecision | None:
+        async with self._lock:
+            matches = [
+                item
+                for item in self._decisions.values()
+                if item.instrument == instrument
+                and item.timeframe == timeframe
+                and item.source_lineage is not None
+                and item.source_lineage.market_snapshot_id == market_snapshot_id
+                and item.source_lineage.current_ai_analysis_id == analysis_id
+                and item.source_lineage.current_ai_signal_id == signal_id
+            ]
+        return max(
+            matches,
+            key=lambda item: (item.decided_at, str(item.decision_id)),
+            default=None,
+        )
 
     async def list_decisions(
         self,
@@ -239,6 +274,35 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
         if state:
             query = query.where(SignalDecisionRecord.state == state.value)
         record = (await self.session.scalars(query.order_by(SignalDecisionRecord.as_of.desc(), SignalDecisionRecord.id.desc()).limit(1))).first()
+        return SignalDecision.model_validate(record.payload) if record else None
+
+    @scoped_session
+    async def find_by_analysis_lineage(
+        self,
+        instrument: str,
+        timeframe: str,
+        market_snapshot_id: UUID,
+        analysis_id: UUID,
+        signal_id: UUID,
+    ) -> SignalDecision | None:
+        source_lineage = SignalDecisionRecord.payload["source_lineage"]
+        query = (
+            select(SignalDecisionRecord)
+            .where(
+                SignalDecisionRecord.instrument == instrument,
+                SignalDecisionRecord.timeframe == timeframe,
+                source_lineage["market_snapshot_id"].astext
+                == str(market_snapshot_id),
+                source_lineage["current_ai_analysis_id"].astext == str(analysis_id),
+                source_lineage["current_ai_signal_id"].astext == str(signal_id),
+            )
+            .order_by(
+                SignalDecisionRecord.as_of.desc(),
+                SignalDecisionRecord.id.desc(),
+            )
+            .limit(1)
+        )
+        record = (await self.session.scalars(query)).first()
         return SignalDecision.model_validate(record.payload) if record else None
 
     @scoped_session

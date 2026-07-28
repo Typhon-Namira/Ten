@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 
 from backend.app.core.config import Settings
 from backend.app.ai_reasoning.request_persistence import PersistedAIReasoningRequest
-from backend.app.api.routes.dashboard import _stage_fingerprint, _system_stage
+from backend.app.api.routes.dashboard import (
+    _latest_complete_cycle_lineage,
+    _stage_fingerprint,
+    _system_stage,
+)
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
 from backend.app.main import create_app
@@ -170,11 +174,6 @@ def test_authoritative_cycle_and_history_reads_never_invoke_ai_provider() -> Non
 
     with TestClient(app) as client:
         app.state.ai_reasoning_service.provider.reason = provider_call
-        repository = app.state.ai_reasoning_repository
-        completed_cycle_selector = AsyncMock(
-            wraps=repository.latest_completed_analysis_cycle
-        )
-        repository.latest_completed_analysis_cycle = completed_cycle_selector
         latest = client.get(
             "/api/dashboard/latest-cycle",
             params={"symbol": "XAUUSD", "timeframe": "M15"},
@@ -189,18 +188,191 @@ def test_authoritative_cycle_and_history_reads_never_invoke_ai_provider() -> Non
         )
 
     assert latest.status_code == 200
+    assert "no-store" in latest.headers["cache-control"]
+    assert latest.headers["cdn-cache-control"] == "no-store"
+    assert latest.headers["surrogate-control"] == "no-store"
     latest_body = latest.json()
     assert latest_body["status"] == "no_data"
     assert latest_body["selection_diagnostics"]["eliminated_by"] == (
         "ai_market_analyses.symbol = :instrument"
     )
     assert latest_body["selection_diagnostics"]["latest_ai_market_analysis_id"] is None
-    completed_cycle_selector.assert_awaited_once_with("XAUUSD", None)
     assert signals.status_code == 200
     assert signals.json()["items"] == []
     assert analyses.status_code == 200
     assert analyses.json()["items"] == []
     provider_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "publication_eligible"),
+    (("BUY", True), ("SELL", True), ("HOLD", False), ("BUY", False)),
+)
+async def test_latest_cycle_promotes_newest_complete_lineage_regardless_of_action_or_publication(
+    action: str,
+    publication_eligible: bool,
+) -> None:
+    old_cycle_id, new_cycle_id = uuid4(), uuid4()
+    old_snapshot_id, new_snapshot_id = uuid4(), uuid4()
+    old_analysis_id, new_analysis_id = uuid4(), uuid4()
+    old_signal_id, new_signal_id = uuid4(), uuid4()
+    old_quant_id, new_quant_id = uuid4(), uuid4()
+    old_signal = SimpleNamespace(
+        instrument="XAUUSD",
+        timeframe="M5",
+        cycle_id=old_cycle_id,
+        snapshot_id=old_snapshot_id,
+        analysis_id=old_analysis_id,
+        signal_id=old_signal_id,
+    )
+    new_signal = SimpleNamespace(
+        instrument="XAUUSD",
+        timeframe="M5",
+        cycle_id=new_cycle_id,
+        snapshot_id=new_snapshot_id,
+        analysis_id=new_analysis_id,
+        signal_id=new_signal_id,
+        signal=SimpleNamespace(value=action),
+    )
+    analyses = {
+        old_analysis_id: SimpleNamespace(
+            analysis_id=old_analysis_id,
+            cycle_id=old_cycle_id,
+            market_snapshot_id=old_snapshot_id,
+            quantitative_forecast_id=old_quant_id,
+            status=SimpleNamespace(value="available"),
+            validation_passed=True,
+        ),
+        new_analysis_id: SimpleNamespace(
+            analysis_id=new_analysis_id,
+            cycle_id=new_cycle_id,
+            market_snapshot_id=new_snapshot_id,
+            quantitative_forecast_id=new_quant_id,
+            status=SimpleNamespace(value="available"),
+            validation_passed=True,
+        ),
+    }
+    decisions = {
+        old_signal_id: SimpleNamespace(decision_id=uuid4(), publication_eligible=True),
+        new_signal_id: SimpleNamespace(
+            decision_id=uuid4(),
+            publication_eligible=publication_eligible,
+        ),
+    }
+    states = {
+        old_snapshot_id: SimpleNamespace(state_id=old_snapshot_id),
+        new_snapshot_id: SimpleNamespace(state_id=new_snapshot_id),
+    }
+    forecasts = {
+        old_snapshot_id: SimpleNamespace(result_id=old_quant_id),
+        new_snapshot_id: SimpleNamespace(result_id=new_quant_id),
+    }
+    ai_repository = SimpleNamespace(
+        list_analysis_signals=AsyncMock(return_value=(new_signal, old_signal)),
+        get_analysis=AsyncMock(side_effect=lambda identifier: analyses[identifier]),
+    )
+    decision_repository = SimpleNamespace(
+        find_by_analysis_lineage=AsyncMock(
+            side_effect=lambda _instrument, _timeframe, _snapshot, _analysis, signal: decisions[signal]
+        )
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                ai_reasoning_repository=ai_repository,
+                signal_decision_service=SimpleNamespace(repository=decision_repository),
+                unified_market_state_repository=SimpleNamespace(
+                    get_state=AsyncMock(side_effect=lambda identifier: states[identifier])
+                ),
+                quant_forecast_repository=SimpleNamespace(
+                    result_for_state=AsyncMock(
+                        side_effect=lambda identifier: forecasts[identifier]
+                    )
+                ),
+            )
+        )
+    )
+
+    selected = await _latest_complete_cycle_lineage(request, "XAUUSD")
+
+    assert selected is not None
+    assert selected[1] is new_signal
+    assert selected[2] is decisions[new_signal_id]
+    assert selected[3].state_id == new_signal.snapshot_id
+    assert selected[4].result_id == analyses[new_analysis_id].quantitative_forecast_id
+    assert selected[5] == str(old_cycle_id)
+
+
+@pytest.mark.asyncio
+async def test_latest_cycle_keeps_previous_complete_cycle_while_new_decision_is_pending() -> None:
+    old_cycle_id, new_cycle_id = uuid4(), uuid4()
+    old_snapshot_id, new_snapshot_id = uuid4(), uuid4()
+    old_analysis_id, new_analysis_id = uuid4(), uuid4()
+    old_signal_id, new_signal_id = uuid4(), uuid4()
+    old_quant_id, new_quant_id = uuid4(), uuid4()
+    signals = (
+        SimpleNamespace(
+            instrument="XAUUSD", timeframe="M5", cycle_id=new_cycle_id,
+            snapshot_id=new_snapshot_id, analysis_id=new_analysis_id,
+            signal_id=new_signal_id,
+        ),
+        SimpleNamespace(
+            instrument="XAUUSD", timeframe="M5", cycle_id=old_cycle_id,
+            snapshot_id=old_snapshot_id, analysis_id=old_analysis_id,
+            signal_id=old_signal_id,
+        ),
+    )
+    analyses = {
+        new_analysis_id: SimpleNamespace(
+            cycle_id=new_cycle_id, market_snapshot_id=new_snapshot_id,
+            quantitative_forecast_id=new_quant_id,
+            status=SimpleNamespace(value="available"), validation_passed=True,
+        ),
+        old_analysis_id: SimpleNamespace(
+            cycle_id=old_cycle_id, market_snapshot_id=old_snapshot_id,
+            quantitative_forecast_id=old_quant_id,
+            status=SimpleNamespace(value="available"), validation_passed=True,
+        ),
+    }
+    old_decision = SimpleNamespace(decision_id=uuid4())
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                ai_reasoning_repository=SimpleNamespace(
+                    list_analysis_signals=AsyncMock(return_value=signals),
+                    get_analysis=AsyncMock(
+                        side_effect=lambda identifier: analyses[identifier]
+                    ),
+                ),
+                signal_decision_service=SimpleNamespace(
+                    repository=SimpleNamespace(
+                        find_by_analysis_lineage=AsyncMock(
+                            side_effect=lambda _instrument, _timeframe, _snapshot, _analysis, signal: (
+                                None if signal == new_signal_id else old_decision
+                            )
+                        )
+                    )
+                ),
+                unified_market_state_repository=SimpleNamespace(
+                    get_state=AsyncMock(
+                        return_value=SimpleNamespace(state_id=old_snapshot_id)
+                    )
+                ),
+                quant_forecast_repository=SimpleNamespace(
+                    result_for_state=AsyncMock(
+                        return_value=SimpleNamespace(result_id=old_quant_id)
+                    )
+                ),
+            )
+        )
+    )
+
+    selected = await _latest_complete_cycle_lineage(request, "XAUUSD")
+
+    assert selected is not None
+    assert selected[1].cycle_id == old_cycle_id
+    assert selected[2] is old_decision
 
 
 def test_all_dashboard_read_endpoints_are_provider_and_persistence_side_effect_free() -> None:

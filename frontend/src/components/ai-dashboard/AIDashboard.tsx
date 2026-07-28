@@ -29,8 +29,8 @@ export function AIDashboard({ view = 'overview' }: { view?: DashboardView }) {
       reasoning={null}
       latestCycle={data.latestCycle}
       stale={data.stale}
-      lastUpdated={data.lastUpdated}
-      loading={data.loading}
+      lastChecked={data.lastChecked}
+      refreshing={data.refreshing}
       onRefresh={data.refresh}
     />
     <div className="ai-page__intro">
