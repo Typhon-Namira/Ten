@@ -62,6 +62,10 @@ class AIReasoningConfig(BaseModel):
         "4h": 60,
     }
     temporal_rolling_window: int = Field(default=60, ge=3, le=240)
+    signal_minimum_risk_reward: float = Field(default=2.0, ge=1, le=10)
+    signal_preferred_risk_reward: float = Field(default=2.5, ge=1, le=10)
+    signal_exceptional_risk_reward: float = Field(default=3.0, ge=1, le=20)
+    signal_quality_threshold: float = Field(default=65, ge=0, le=100)
 
     @model_validator(mode="after")
     def ordered_request_budgets(self) -> AIReasoningConfig:
@@ -82,4 +86,10 @@ class AIReasoningConfig(BaseModel):
             raise ValueError("AI truncation health thresholds must be ordered")
         if self.temporal_lookback_minutes != (5, 15, 30, 60, 240):
             raise ValueError("temporal lookback anchors must remain 5m, 15m, 30m, 1h, and 4h")
+        if not (
+            self.signal_minimum_risk_reward
+            <= self.signal_preferred_risk_reward
+            <= self.signal_exceptional_risk_reward
+        ):
+            raise ValueError("signal risk/reward thresholds must be ordered")
         return self

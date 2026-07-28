@@ -171,6 +171,7 @@ class SignalDecisionConfig(FrozenConfig):
     retention: RetentionConfig = RetentionConfig()
     future_clock_skew_seconds: int = Field(default=5, ge=0, le=300)
     output_precision: int = Field(default=4, ge=0, le=8)
+    minimum_risk_reward: float = Field(default=2.0, ge=1, le=10)
     persistence_required_in_production: bool = True
     publish_replay_events: bool = False
     publish_replay_features: bool = False

@@ -362,6 +362,8 @@ class SignalDecision(DecisionModel):
     eligibility_score: float = Field(ge=0, le=100)
     directional_strength: float = Field(ge=0, le=100)
     confidence_score: float = Field(ge=0, le=100)
+    guardrail_confidence: float = Field(default=0, ge=0, le=100)
+    overall_confidence: float = Field(default=0, ge=0, le=100)
     market_risk_score: float = Field(ge=0, le=100)
     data_quality_score: float = Field(ge=0, le=100)
     evidence_alignment_score: float = Field(ge=0, le=100)

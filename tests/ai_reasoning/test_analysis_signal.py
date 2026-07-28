@@ -59,9 +59,20 @@ async def test_weak_directional_evidence_produces_hold_without_levels() -> None:
 @pytest.mark.asyncio
 async def test_bearish_analysis_produces_directionally_valid_sell_levels() -> None:
     state, quant = await state_and_quant()
+    bearish = analysis(5, regime="bearish")
+    assert bearish.output is not None
+    structural_output = bearish.output.model_copy(
+        update={
+            "supply_demand_analysis": bearish.output.supply_demand_analysis.model_copy(
+                update={"nearest_supply": 3304, "nearest_demand": 3290}
+            )
+        }
+    )
 
-    signal = DeterministicAnalysisSignalGenerator().generate(
-        analysis(5, regime="bearish"),
+    generator = DeterministicAnalysisSignalGenerator()
+    generator.quality_threshold = 0
+    signal = generator.generate(
+        bearish.model_copy(update={"output": structural_output}),
         state,
         quant,
     )
@@ -71,6 +82,66 @@ async def test_bearish_analysis_produces_directionally_valid_sell_levels() -> No
     assert signal.entry is not None
     assert signal.stop_loss is not None
     assert signal.take_profit < signal.entry < signal.stop_loss
+    assert signal.risk_reward_ratio is not None
+    assert signal.risk_reward_ratio >= 2
+
+
+@pytest.mark.asyncio
+async def test_direction_without_minimum_structural_rr_produces_hold() -> None:
+    state, quant = await state_and_quant()
+
+    signal = DeterministicAnalysisSignalGenerator().generate(
+        analysis(5, regime="bearish"),
+        state,
+        quant,
+    )
+
+    assert signal.signal == AnalysisSignalAction.HOLD
+    assert signal.entry is None
+    assert "no_structural_geometry_meets_minimum_risk_reward" in signal.risk_flags
+
+
+@pytest.mark.asyncio
+async def test_geometry_uses_structure_not_tiny_expected_move() -> None:
+    state, quant = await state_and_quant()
+    prediction = quant.predictions[0].model_copy(
+        update={
+            "expected_base_movement": 0.001,
+            "expected_minimum_movement": 0.0005,
+            "expected_maximum_movement": 0.0015,
+            "expected_volatility": 0.001,
+            "expected_mfe": 0.001,
+            "expected_mae": 0.00075,
+        }
+    )
+    tiny_quant = quant.model_copy(update={"predictions": (prediction,)})
+
+    signal = DeterministicAnalysisSignalGenerator().generate(
+        analysis(5),
+        state,
+        tiny_quant,
+    )
+
+    assert signal.signal == AnalysisSignalAction.BUY
+    assert signal.entry == prediction.reference_price
+    assert signal.stop_loss == 3300
+    assert signal.take_profit == 3350
+    assert signal.risk_reward_ratio is not None
+    assert signal.risk_reward_ratio > 2
+    assert signal.analysis_confidence == 80
+    assert signal.confidence == round(signal.signal_confidence)
+
+
+@pytest.mark.asyncio
+async def test_replay_of_identical_point_in_time_inputs_is_byte_stable() -> None:
+    state, quant = await state_and_quant()
+    generator = DeterministicAnalysisSignalGenerator()
+
+    first = generator.generate(analysis(5), state, quant)
+    second = generator.generate(analysis(5), state, quant)
+
+    assert first == second
+    assert first.model_dump_json() == second.model_dump_json()
 
 
 @pytest.mark.asyncio

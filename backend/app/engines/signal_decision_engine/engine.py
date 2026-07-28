@@ -149,6 +149,49 @@ class ConservativeSignalDecisionPolicy:
                 analysis_signal.signal.value,
                 direction.value,
             )
+        geometry_valid = bool(
+            analysis_signal is not None
+            and analysis_signal.signal
+            in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
+            and analysis_signal.entry is not None
+            and analysis_signal.stop_loss is not None
+            and analysis_signal.take_profit is not None
+            and analysis_signal.risk_reward_ratio is not None
+            and analysis_signal.risk_reward_ratio
+            >= self.config.minimum_risk_reward
+        )
+        geometry_not_applicable = bool(
+            analysis_signal is None
+            or analysis_signal.signal == AnalysisSignalAction.HOLD
+        )
+        rule(
+            "geometry.minimum_risk_reward",
+            (
+                RuleOutcome.PASSED
+                if geometry_valid
+                else RuleOutcome.NOT_APPLICABLE
+                if geometry_not_applicable
+                else RuleOutcome.FAILED
+            ),
+            (
+                RuleSeverity.INFORMATIONAL
+                if geometry_valid or geometry_not_applicable
+                else RuleSeverity.HARD_BLOCK
+            ),
+            (
+                "structural_geometry_valid"
+                if geometry_valid
+                else "structural_geometry_not_applicable"
+                if geometry_not_applicable
+                else "structural_geometry_below_minimum_risk_reward"
+            ),
+            (
+                analysis_signal.risk_reward_ratio
+                if analysis_signal is not None
+                else None
+            ),
+            self.config.minimum_risk_reward,
+        )
         temporal = decision_input.temporal_metrics
         if temporal is None:
             rule(
@@ -334,8 +377,7 @@ class ConservativeSignalDecisionPolicy:
                 or analysis_signal.signal == AnalysisSignalAction.SELL
                 and direction == DecisionDirection.BEARISH
             )
-            and decision_input.current_price is not None
-            and decision_input.expected_move is not None
+            and geometry_valid
         )
         final_action = (
             FinalSignalAction.BUY
@@ -351,22 +393,27 @@ class ConservativeSignalDecisionPolicy:
         risk_reward: float | None = None
         invalidation: str | None = None
         if actionable:
-            assert decision_input.current_price is not None
-            assert decision_input.expected_move is not None
-            price = decision_input.current_price
-            movement = decision_input.expected_move
-            entry_low = price - movement * 0.05
-            entry_high = price + movement * 0.05
-            if final_action == FinalSignalAction.BUY:
-                stop_loss = entry_low - movement * 0.5
-                take_profit_targets = (entry_high + movement, entry_high + movement * 1.5)
-                invalidation = f"Price closes below {stop_loss:.5f}"
-            else:
-                stop_loss = entry_high + movement * 0.5
-                take_profit_targets = (entry_low - movement, entry_low - movement * 1.5)
-                invalidation = f"Price closes above {stop_loss:.5f}"
-            entry_mid = (entry_low + entry_high) / 2
-            risk_reward = abs(take_profit_targets[0] - entry_mid) / abs(entry_mid - stop_loss)
+            assert analysis_signal is not None
+            assert analysis_signal.entry is not None
+            assert analysis_signal.stop_loss is not None
+            assert analysis_signal.take_profit is not None
+            assert analysis_signal.risk_reward_ratio is not None
+            entry_low = analysis_signal.entry
+            entry_high = analysis_signal.entry
+            stop_loss = analysis_signal.stop_loss
+            take_profit_targets = (analysis_signal.take_profit,)
+            risk_reward = analysis_signal.risk_reward_ratio
+            invalidation = (
+                analysis.output.invalidation_conditions[0]
+                if analysis is not None
+                and analysis.output is not None
+                and analysis.output.invalidation_conditions
+                else (
+                    f"Price closes below structural invalidation {stop_loss:.5f}"
+                    if final_action == FinalSignalAction.BUY
+                    else f"Price closes above structural invalidation {stop_loss:.5f}"
+                )
+            )
         ai_evidence: tuple[SignalEvidence, ...] = ()
         contradictory_ai_evidence: tuple[SignalEvidence, ...] = ()
         if analysis_valid and analysis is not None and analysis.output is not None:
@@ -431,6 +478,18 @@ class ConservativeSignalDecisionPolicy:
             eligibility_score=eligibility,
             directional_strength=self._rounded(strength),
             confidence_score=self._rounded(independent_confidence),
+            guardrail_confidence=self._rounded(independent_confidence),
+            overall_confidence=self._rounded(
+                (
+                    independent_confidence
+                    + (
+                        analysis_signal.overall_confidence
+                        if analysis_signal is not None
+                        else independent_confidence
+                    )
+                )
+                / 2
+            ),
             market_risk_score=score.market_risk_score,
             data_quality_score=score.data_quality_score,
             evidence_alignment_score=score.evidence_alignment_score,
@@ -467,7 +526,8 @@ class ConservativeSignalDecisionPolicy:
             risk_reward=risk_reward,
             decision_reason=(
                 f"Deterministic synthesis produced {final_action.value} from market score, "
-                "validated AI interpretation, temporal consistency, and risk rules."
+                "validated AI interpretation, institutional geometry, temporal consistency, "
+                f"and risk rules. {analysis_signal.quant_ai_explanation if analysis_signal else ''}"
             ),
             opposite_direction_rejection=(
                 f"Opposite direction rejected because deterministic directional evidence is {direction.value}."
