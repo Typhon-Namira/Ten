@@ -14,8 +14,7 @@ from backend.app.engines.market_data_engine.events import NewCandle
 from backend.app.engines.signal_decision_engine import DecisionMode, DecisionRequest, DecisionState
 from backend.app.events import Event, EventBus
 from backend.app.ai_reasoning.cadence import (
-    AI_ANALYSIS_TIMEFRAME,
-    five_minute_window_start,
+    synchronized_cycle_eligibility,
 )
 
 from .config import IntegrationConfig
@@ -308,12 +307,26 @@ class FullSystemIntegrationService:
             if not self.ai_centric_shadow_mode:
                 logger.info(
                     "ai_reasoning.gate.skipped",
-                    extra={**gate_context, "skip_reason": "ai_centric_shadow_mode_disabled"},
+                    extra={
+                        **gate_context,
+                        "skip_reason": "ai_centric_shadow_mode_disabled",
+                        "reason_code": "disabled",
+                        "snapshot_id": None,
+                        "cycle_id": str(envelope.correlation_id),
+                        "details": {},
+                    },
                 )
             elif self.unified_market_state is None:
                 logger.info(
                     "ai_reasoning.gate.skipped",
-                    extra={**gate_context, "skip_reason": "unified_market_state_service_unavailable"},
+                    extra={
+                        **gate_context,
+                        "skip_reason": "unified_market_state_service_unavailable",
+                        "reason_code": "missing_prerequisite",
+                        "snapshot_id": None,
+                        "cycle_id": str(envelope.correlation_id),
+                        "details": {"prerequisite": "unified_market_state"},
+                    },
                 )
             else:
                 # Phase 1 is observational only.  A shadow-state capture failure is logged but can
@@ -324,12 +337,26 @@ class FullSystemIntegrationService:
                     if market_state is None:
                         logger.info(
                             "ai_reasoning.gate.skipped",
-                            extra={**gate_context, "skip_reason": "synchronized_market_state_not_ready"},
+                            extra={
+                                **gate_context,
+                                "skip_reason": "synchronized_market_state_not_ready",
+                                "reason_code": "missing_prerequisite",
+                                "snapshot_id": None,
+                                "cycle_id": str(envelope.correlation_id),
+                                "details": {"prerequisite": "synchronized_market_state"},
+                            },
                         )
                     elif self.quantitative_forecasting is None:
                         logger.info(
                             "ai_reasoning.gate.skipped",
-                            extra={**gate_context, "skip_reason": "quantitative_forecasting_service_unavailable"},
+                            extra={
+                                **gate_context,
+                                "skip_reason": "quantitative_forecasting_service_unavailable",
+                                "reason_code": "missing_prerequisite",
+                                "snapshot_id": str(market_state.state_id),
+                                "cycle_id": str(market_state.cycle_id),
+                                "details": {"prerequisite": "quantitative_forecasting"},
+                            },
                         )
                     else:
                         failure_stage = "quantitative_forecast"
@@ -341,15 +368,19 @@ class FullSystemIntegrationService:
                                     **gate_context,
                                     "market_state_id": str(getattr(market_state, "state_id", "unknown")),
                                     "skip_reason": "quantitative_forecast_not_ready",
+                                    "reason_code": "missing_prerequisite",
+                                    "snapshot_id": str(market_state.state_id),
+                                    "cycle_id": str(market_state.cycle_id),
+                                    "details": {"prerequisite": "quantitative_forecast"},
                                 },
                             )
                         elif (
-                            str(getattr(market_state, "trigger_timeframe", "")).upper()
-                            != AI_ANALYSIS_TIMEFRAME
-                            or market_state.market_data_boundary.astimezone(UTC)
-                            != five_minute_window_start(
-                                market_state.market_data_boundary
+                            hasattr(market_state, "timeframes")
+                            and (
+                                eligibility_reason
+                                := synchronized_cycle_eligibility(market_state)
                             )
+                            is not None
                         ):
                             logger.info(
                                 "ai_reasoning.gate.skipped",
@@ -358,7 +389,11 @@ class FullSystemIntegrationService:
                                     "market_state_id": str(
                                         getattr(market_state, "state_id", "unknown")
                                     ),
-                                    "skip_reason": "not_five_minute_boundary",
+                                    "skip_reason": eligibility_reason.value,
+                                    "reason_code": eligibility_reason.value,
+                                    "snapshot_id": str(market_state.state_id),
+                                    "cycle_id": str(market_state.cycle_id),
+                                    "details": {},
                                     "provider_call_made": False,
                                 },
                             )
@@ -372,6 +407,10 @@ class FullSystemIntegrationService:
                                         getattr(quantitative_forecast, "result_id", "unknown")
                                     ),
                                     "skip_reason": "ai_reasoning_service_unavailable",
+                                    "reason_code": "missing_prerequisite",
+                                    "snapshot_id": str(market_state.state_id),
+                                    "cycle_id": str(market_state.cycle_id),
+                                    "details": {"prerequisite": "ai_reasoning_service"},
                                 },
                             )
                         else:
@@ -436,6 +475,11 @@ class FullSystemIntegrationService:
                             if validated_analysis is not None
                             else None
                         ),
+                        current_ai_signal=(
+                            validated_analysis.signal
+                            if validated_analysis is not None
+                            else None
+                        ),
                         temporal_context=(
                             validated_analysis.temporal_context
                             if validated_analysis is not None
@@ -472,7 +516,53 @@ class FullSystemIntegrationService:
                 self.last_decision_persisted_at = self.clock()
                 logger.info(
                     "decision.persist.completed",
-                    extra={**log_context, "snapshot_id": str(snapshot.snapshot_id), "decision_id": str(decision.decision_id), "decision_status": decision.state.value},
+                    extra={
+                        **log_context,
+                        "snapshot_id": str(snapshot.snapshot_id),
+                        "analysis_id": (
+                            str(validated_analysis.analysis.analysis_id)
+                            if validated_analysis is not None
+                            else None
+                        ),
+                        "analysis_signal_id": (
+                            str(validated_analysis.signal.signal_id)
+                            if validated_analysis is not None
+                            and validated_analysis.signal is not None
+                            else None
+                        ),
+                        "decision_id": str(decision.decision_id),
+                        "decision_status": decision.state.value,
+                    },
+                )
+                logger.info(
+                    "final_decision.completed",
+                    extra={
+                        **log_context,
+                        "snapshot_id": str(snapshot.snapshot_id),
+                        "analysis_id": (
+                            str(validated_analysis.analysis.analysis_id)
+                            if validated_analysis is not None
+                            else None
+                        ),
+                        "signal_id": (
+                            str(validated_analysis.signal.signal_id)
+                            if validated_analysis is not None
+                            and validated_analysis.signal is not None
+                            else None
+                        ),
+                        "decision_id": str(decision.decision_id),
+                        "final_action": getattr(
+                            getattr(decision, "final_action", None),
+                            "value",
+                            None,
+                        ),
+                        "decision_status": decision.state.value,
+                        "publication_eligible": getattr(
+                            decision,
+                            "publication_eligible",
+                            None,
+                        ),
+                    },
                 )
                 if tracker is not None:
                     tracker.mark(symbol, timeframe.value, boundary, ("scenario_decision",), "success")

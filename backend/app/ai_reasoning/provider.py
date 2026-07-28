@@ -402,6 +402,10 @@ class _OpenAICompatibleReasoningProvider:
             payload = {
                 "validation_error": correction_instruction,
                 "allowed_reference_values": {
+                    "evidence_refs": [
+                        item.evidence_id
+                        for item in context.evidence_catalog
+                    ],
                     "nearest_supply_ref": (
                         allowed_supply_refs
                     ),
@@ -416,6 +420,7 @@ class _OpenAICompatibleReasoningProvider:
                 "required_object_fields": _required_object_fields(
                     contract.get("shape")
                 ),
+                "response_contract": contract,
                 "response_contract_rules": contract.get("rules", ()),
                 "complete_object_required": True,
                 "previous_response": previous_response,
@@ -1787,6 +1792,7 @@ class GroqProviderPool:
                 "account_order": tuple(self.providers_by_id),
             },
         )
+        attempted_accounts = 0
         for index, provider in enumerate(self.providers):
             account_id = provider.provider_name
             if not self._eligible(account_id, now):
@@ -1807,6 +1813,7 @@ class GroqProviderPool:
                     },
                 )
                 continue
+            attempted_accounts += 1
             logger.info(
                 "groq_pool.account.started",
                 extra={
@@ -1849,10 +1856,16 @@ class GroqProviderPool:
                         "ums_boundary": request.analysis_timestamp.isoformat(),
                         "status_code": exc.details.http_status,
                         "sanitized_error_code": exc.details.reason_code,
-                        "next_account_allowed": self._failover_allowed(exc.details),
+                        "next_account_allowed": (
+                            attempted_accounts < 2
+                            and self._failover_allowed(exc.details)
+                        ),
                     },
                 )
-                if not self._failover_allowed(exc.details):
+                if (
+                    attempted_accounts >= 2
+                    or not self._failover_allowed(exc.details)
+                ):
                     raise
         pool_metadata = self.metadata()
         unavailable_diagnostic = {

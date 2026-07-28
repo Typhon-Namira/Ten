@@ -35,7 +35,9 @@ from .analysis import (
 from .cadence import (
     AI_ANALYSIS_INTERVAL_MINUTES,
     AI_ANALYSIS_TIMEFRAME,
+    AIEligibilityReason,
     five_minute_window_start,
+    synchronized_cycle_eligibility,
 )
 from .config import AIReasoningConfig
 from .llm_context import LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION, build_llm_analysis_context
@@ -44,6 +46,7 @@ from .models import LLMStructuredOutputFailure
 from .provider import AIReasoningProvider
 from .repository import AIReasoningRepository
 from .request_builder import AIReasoningRequestBuilder
+from .signal import DeterministicAnalysisSignalGenerator
 from .validation import StructuredAIOutputError, StructuredAIOutputValidator
 
 logger = logging.getLogger(__name__)
@@ -112,6 +115,7 @@ class AIReasoningService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self._llm_semaphore = asyncio.Semaphore(config.llm_concurrency_limit)
         self.memory = MarketMemory(config.maximum_memory_entries)
+        self.signal_generator = DeterministicAnalysisSignalGenerator()
         self.requests = 0
         self.failed_requests = 0
         self.last_latency_ms: float | None = None
@@ -205,7 +209,7 @@ class AIReasoningService:
                     window_start=window_start,
                     idempotency_key=idempotency_key,
                 )
-                return await self._validated_analysis(cached)
+                return await self._validated_analysis(cached, state, quant)
             duplicate = await self.repository.analysis_for_market_state_hash(
                 state.instrument,
                 state.state_hash,
@@ -222,27 +226,54 @@ class AIReasoningService:
                 window_start=window_start,
                 idempotency_key=idempotency_key,
             )
-            return await self._validated_analysis(duplicate) if duplicate is not None else None
+            return (
+                await self._validated_analysis(duplicate, state, quant)
+                if duplicate is not None
+                else None
+            )
 
-        recent_memory = await self.repository.recent_memory(
-            state.instrument,
-            self.config.maximum_memory_entries,
-        )
-        request = self.builder.build(
-            state,
-            quant,
-            self.memory.summarize(recent_memory),
-            existing_signal=None,
-            previous_forecast=None,
-            previous_proposal=None,
-        )
-        request = request.model_copy(
-            update={
-                "idempotency_key": idempotency_key,
-                "analysis_time_bucket": window_start,
-            }
-        )
-        await self.repository.save_request(request)
+        try:
+            recent_memory = await self.repository.recent_memory(
+                state.instrument,
+                self.config.maximum_memory_entries,
+            )
+            request = self.builder.build(
+                state,
+                quant,
+                self.memory.summarize(recent_memory),
+                existing_signal=None,
+                previous_forecast=None,
+                previous_proposal=None,
+            )
+            request = request.model_copy(
+                update={
+                    "idempotency_key": idempotency_key,
+                    "analysis_time_bucket": window_start,
+                }
+            )
+            await self.repository.save_request(request)
+        except Exception:
+            await self.repository.complete_analysis_cycle(
+                idempotency_key,
+                None,
+                None,
+                "FAILED_PERSISTENCE",
+                self.clock(),
+            )
+            logger.exception(
+                "ai_reasoning.job.terminal",
+                extra={
+                    **worker_context,
+                    "request_id": (
+                        str(request.request_id)
+                        if "request" in locals()
+                        else None
+                    ),
+                    "job_state": "FAILED_PERSISTENCE",
+                    "failure_phase": "request_construction_or_persistence",
+                },
+            )
+            return None
         response = None
         provider_failure: dict[str, Any] | None = None
         provider_metrics_before = self._provider_metrics()
@@ -250,6 +281,7 @@ class AIReasoningService:
         provider_attempts: tuple[dict[str, Any], ...] = ()
         failure_state = "llm_unavailable"
         failure_errors: tuple[str, ...] = ()
+        terminal_status = "FAILED_PROVIDER"
         try:
             async with self._llm_semaphore:
                 logger.info(
@@ -337,6 +369,7 @@ class AIReasoningService:
                 },
             )
         except StructuredAIOutputError as exc:
+            terminal_status = "FAILED_SCHEMA"
             if not provider_delta:
                 provider_delta = self._metric_delta(
                     provider_metrics_before,
@@ -362,6 +395,25 @@ class AIReasoningService:
                 },
             )
             analysis = self._failed_analysis(request, failure_state, failure_errors)
+        except TimeoutError as exc:
+            provider_delta = self._metric_delta(
+                provider_metrics_before,
+                self._provider_metrics(),
+            )
+            self._consume_provider_metrics(provider_delta)
+            failure_state = "hard_terminal_timeout"
+            failure_errors = (type(exc).__name__,)
+            terminal_status = "TIMED_OUT"
+            analysis = self._failed_analysis(request, failure_state, failure_errors)
+            logger.error(
+                "ai_reasoning.job.terminal",
+                extra={
+                    **worker_context,
+                    "request_id": str(request.request_id),
+                    "job_state": terminal_status,
+                    "failure_phase": "provider_timeout",
+                },
+            )
         except AIProviderRequestError as exc:
             provider_failure = {
                 "terminal": asdict(exc.details),
@@ -383,7 +435,7 @@ class AIReasoningService:
                     idempotency_key,
                     request.request_id,
                     None,
-                    "skipped",
+                    "SKIPPED_WITH_REASON",
                     self.clock(),
                 )
                 return None
@@ -404,6 +456,12 @@ class AIReasoningService:
                 if item
             )
             analysis = self._failed_analysis(request, failure_state, failure_errors)
+            terminal_status = (
+                "FAILED_SCHEMA"
+                if exc.details.reason_code
+                in {"output_budget_exceeded", "schema_validation_error"}
+                else "FAILED_PROVIDER"
+            )
         except Exception as exc:
             provider_delta = self._metric_delta(
                 provider_metrics_before,
@@ -412,6 +470,7 @@ class AIReasoningService:
             self._consume_provider_metrics(provider_delta)
             failure_errors = (type(exc).__name__, str(exc)[:200])
             analysis = self._failed_analysis(request, failure_state, failure_errors)
+            terminal_status = "FAILED_PROVIDER"
             logger.exception(
                 "ai_reasoning.request.failed",
                 extra={
@@ -443,7 +502,7 @@ class AIReasoningService:
                 idempotency_key,
                 request.request_id,
                 None,
-                "failed",
+                terminal_status,
                 self.clock(),
             )
             self.failed_requests += 1
@@ -474,20 +533,34 @@ class AIReasoningService:
             )
             return None
 
-        analysis = await self.repository.save_analysis(analysis)
-        completed_status = (
-            "completed"
-            if analysis.status == AnalysisStatus.AVAILABLE
-            else "failed"
-        )
-        await self.repository.complete_analysis_cycle(
-            idempotency_key,
-            request.request_id,
-            analysis.analysis_id,
-            completed_status,
-            self.clock(),
-        )
+        try:
+            analysis = await self.repository.save_analysis(analysis)
+        except Exception:
+            await self.repository.complete_analysis_cycle(
+                idempotency_key,
+                request.request_id,
+                None,
+                "FAILED_PERSISTENCE",
+                self.clock(),
+            )
+            logger.exception(
+                "ai_reasoning.job.terminal",
+                extra={
+                    **worker_context,
+                    "request_id": str(request.request_id),
+                    "job_state": "FAILED_PERSISTENCE",
+                    "failure_phase": "analysis_persistence",
+                },
+            )
+            return None
         if analysis.status != AnalysisStatus.AVAILABLE:
+            await self.repository.complete_analysis_cycle(
+                idempotency_key,
+                request.request_id,
+                analysis.analysis_id,
+                terminal_status,
+                self.clock(),
+            )
             self.failed_requests += 1
             self.last_validation_passed = False
             self.last_failure_state = failure_state
@@ -533,8 +606,6 @@ class AIReasoningService:
         self.last_validation_passed = True
         self.last_failure_state = None
         assert response is not None
-        self.last_cycle_outcome = "pool_success"
-        self.metrics["analyses_successfully_completed"] += 1
         mark_persisted = getattr(self.provider, "mark_analysis_persisted", None)
         if callable(mark_persisted):
             mark_persisted(response.provider, analysis.created_at)
@@ -547,7 +618,59 @@ class AIReasoningService:
                 "status": analysis.status.value,
             },
         )
-        return await self._validated_analysis(analysis)
+        try:
+            validated = await self._validated_analysis(
+                analysis,
+                state,
+                quant,
+                persist_signal=True,
+            )
+        except Exception:
+            self.failed_requests += 1
+            self.last_cycle_outcome = "failed"
+            self.last_failure_state = "analysis_signal_persistence_failed"
+            await self.repository.complete_analysis_cycle(
+                idempotency_key,
+                request.request_id,
+                analysis.analysis_id,
+                "FAILED_PERSISTENCE",
+                self.clock(),
+            )
+            logger.exception(
+                "ai_reasoning.job.terminal",
+                extra={
+                    **worker_context,
+                    "request_id": str(request.request_id),
+                    "analysis_id": str(analysis.analysis_id),
+                    "job_state": "FAILED_PERSISTENCE",
+                    "failure_phase": "analysis_signal_persistence",
+                },
+            )
+            return None
+        self.last_cycle_outcome = "pool_success"
+        self.metrics["analyses_successfully_completed"] += 1
+        await self.repository.complete_analysis_cycle(
+            idempotency_key,
+            request.request_id,
+            analysis.analysis_id,
+            "COMPLETED",
+            self.clock(),
+        )
+        logger.info(
+            "ai_reasoning.job.terminal",
+            extra={
+                **worker_context,
+                "request_id": str(request.request_id),
+                "analysis_id": str(analysis.analysis_id),
+                "signal_id": (
+                    str(validated.signal.signal_id)
+                    if validated is not None and validated.signal is not None
+                    else None
+                ),
+                "job_state": "COMPLETED",
+            },
+        )
+        return validated
 
     def _failed_analysis(
         self,
@@ -589,6 +712,10 @@ class AIReasoningService:
     async def _validated_analysis(
         self,
         analysis: AIMarketAnalysis,
+        state: UnifiedMarketState | None = None,
+        quant: QuantForecastResult | None = None,
+        *,
+        persist_signal: bool = False,
     ) -> ValidatedAIAnalysis | None:
         if analysis.status != AnalysisStatus.AVAILABLE or analysis.output is None:
             return None
@@ -635,6 +762,32 @@ class AIReasoningService:
             ),
         )
         metrics = TemporalContextAnalyzer().analyze(context, analysis)
+        signal = await self.repository.signal_for_analysis(analysis.analysis_id)
+        if signal is None and state is not None and quant is not None:
+            signal = self.signal_generator.generate(analysis, state, quant)
+            logger.info(
+                "ai_reasoning.signal.generated",
+                extra={
+                    "analysis_id": str(analysis.analysis_id),
+                    "signal_id": str(signal.signal_id),
+                    "cycle_id": str(analysis.cycle_id),
+                    "snapshot_id": str(analysis.market_snapshot_id),
+                    "signal": signal.signal.value,
+                    "confidence": signal.confidence,
+                    "strength": signal.strength.value,
+                },
+            )
+            if persist_signal:
+                signal = await self.repository.save_analysis_signal(signal)
+                logger.info(
+                    "ai_reasoning.signal.persist.completed",
+                    extra={
+                        "analysis_id": str(analysis.analysis_id),
+                        "signal_id": str(signal.signal_id),
+                        "cycle_id": str(analysis.cycle_id),
+                        "snapshot_id": str(analysis.market_snapshot_id),
+                    },
+                )
         logger.info(
             "ai_analysis.temporal_context.completed",
             extra={
@@ -650,6 +803,7 @@ class AIReasoningService:
             analysis=analysis,
             temporal_context=context,
             temporal_metrics=metrics,
+            signal=signal,
         )
 
     async def _record_usage(
@@ -777,18 +931,18 @@ class AIReasoningService:
         boundary: datetime,
         window_start: datetime,
     ) -> AIAnalysisSkipReason | None:
-        if (
-            state.trigger_timeframe.upper() != AI_ANALYSIS_TIMEFRAME
-            or boundary != window_start
-        ):
+        del window_start
+        shared = synchronized_cycle_eligibility(state)
+        if shared == AIEligibilityReason.INTERVAL_NOT_DUE:
             return AIAnalysisSkipReason.NOT_FIVE_MINUTE_BOUNDARY
+        if shared == AIEligibilityReason.MISSING_PREREQUISITE:
+            return AIAnalysisSkipReason.MARKET_DATA_INCOMPLETE
+        if shared == AIEligibilityReason.STALE_DATA:
+            return AIAnalysisSkipReason.MARKET_DATA_STALE
+        if shared == AIEligibilityReason.INVALID_STATE:
+            return AIAnalysisSkipReason.CYCLE_NOT_COMPLETE
         if self.clock().astimezone(UTC) < boundary:
             return AIAnalysisSkipReason.CYCLE_NOT_COMPLETE
-        frames = {item.timeframe.upper(): item for item in state.timeframes}
-        if set(frames) != {"M1", "M5", "M15"}:
-            return AIAnalysisSkipReason.MARKET_DATA_INCOMPLETE
-        if any(item.stale for item in frames.values()):
-            return AIAnalysisSkipReason.MARKET_DATA_STALE
         return None
 
     def _skip(
@@ -812,11 +966,27 @@ class AIReasoningService:
             extra={
                 **context,
                 "skip_reason": reason.value,
+                "reason_code": {
+                    AIAnalysisSkipReason.NOT_FIVE_MINUTE_BOUNDARY: "interval_not_due",
+                    AIAnalysisSkipReason.CYCLE_NOT_COMPLETE: "invalid_state",
+                    AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS: "analysis_exists",
+                    AIAnalysisSkipReason.CYCLE_ALREADY_CLAIMED: "concurrency_limit",
+                    AIAnalysisSkipReason.DUPLICATE_MARKET_STATE: "duplicate_snapshot",
+                    AIAnalysisSkipReason.MARKET_DATA_INCOMPLETE: "missing_prerequisite",
+                    AIAnalysisSkipReason.MARKET_DATA_STALE: "stale_data",
+                    AIAnalysisSkipReason.AI_DISABLED: "disabled",
+                    AIAnalysisSkipReason.PROVIDER_UNAVAILABLE: "missing_prerequisite",
+                    AIAnalysisSkipReason.REQUEST_PREFLIGHT_FAILED: "invalid_state",
+                }[reason],
                 "five_minute_window_start": (
                     window_start.isoformat() if window_start else None
                 ),
                 "idempotency_key": idempotency_key,
                 "provider_call_made": False,
+                "snapshot_id": context.get("market_state_id"),
+                "details": {
+                    "skip_reason": reason.value,
+                },
             },
         )
 

@@ -195,6 +195,7 @@ class SignalDecisionService:
                 recent_opposite_eligible=opposite.history_reference() if opposite else None,
             ),
             current_ai_analysis=getattr(request, "current_ai_analysis", None),
+            current_ai_signal=getattr(request, "current_ai_signal", None),
             temporal_context=getattr(request, "temporal_context", None),
             temporal_metrics=getattr(request, "temporal_metrics", None),
             market_snapshot_id=getattr(request, "market_snapshot_id", None),

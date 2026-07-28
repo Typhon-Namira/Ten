@@ -75,6 +75,7 @@ async def latest(
     instrument: str = "XAUUSD",
 ) -> dict[str, Any]:
     analysis = await repository.latest_analysis(instrument)
+    analysis_signal = await repository.latest_analysis_signal(instrument)
     forecast = await repository.latest_forecast(instrument)
     proposal = await repository.latest_proposal()
     signals = await repository.active_signals(instrument)
@@ -203,6 +204,11 @@ async def latest(
             }
     return {
         "analysis": analysis.model_dump(mode="json") if analysis else None,
+        "analysis_signal": (
+            analysis_signal.model_dump(mode="json")
+            if analysis_signal
+            else None
+        ),
         "forecast": forecast.model_dump(mode="json") if forecast else None,
         "proposal": proposal.model_dump(mode="json") if proposal else None,
         "managed_signals": [signal.model_dump(mode="json") for signal in signals],
