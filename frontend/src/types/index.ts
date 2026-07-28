@@ -742,6 +742,105 @@ export interface AIMarketAnalysis {
   created_at: string
 }
 
+export interface AIAnalysisSignal {
+  schema_version: string
+  signal_id: string
+  cycle_id: string
+  snapshot_id: string
+  analysis_id: string
+  instrument: string
+  timeframe: string
+  signal: 'BUY' | 'SELL' | 'HOLD'
+  confidence: number
+  strength: 'VERY_WEAK' | 'WEAK' | 'MODERATE' | 'STRONG' | 'VERY_STRONG'
+  entry: number | null
+  stop_loss: number | null
+  take_profit: number | null
+  risk_reward_ratio: number | null
+  evidence_refs: string[]
+  reasoning_summary: string
+  risk_flags: string[]
+  scoring_components: Record<string, number>
+  fallback: boolean
+  source: string
+  generated_at: string
+}
+
+export interface AuthoritativeCycleStage {
+  status: SystemStageStatus
+  reason: string
+  record_id: string | null
+}
+
+export interface LatestCompletedCycle {
+  status: 'completed' | 'no_data'
+  instrument: string
+  timeframe: string | null
+  cycle_id: string | null
+  snapshot_id?: string
+  analysis_id?: string
+  signal_id?: string
+  decision_id?: string | null
+  market_time: string | null
+  completed_at: string | null
+  dashboard_refreshed_at: string
+  state?: Record<string, unknown> | null
+  quant_forecast?: QuantForecastResult | null
+  analysis: AIMarketAnalysis | null
+  analytical_signal: AIAnalysisSignal | null
+  guardrail_decision: {
+    state: string
+    readiness: string
+    blockers: Record<string, unknown>[]
+    warnings: Record<string, unknown>[]
+  } | null
+  final_decision: SignalDecisionSnapshot | null
+  publication: {
+    status: 'ELIGIBLE' | 'INELIGIBLE' | 'PENDING'
+    eligible: boolean
+    reason: string
+    blockers?: Record<string, unknown>[]
+  }
+  stages: Record<string, AuthoritativeCycleStage>
+  lineage: Record<string, string | null>
+  performance: {
+    signals_generated: number
+    signals_awaiting_outcome: number
+    signals_evaluated: number
+    minimum_required_sample: number
+    calibration_sample_size: number
+    state: 'no_signals' | 'signals_exist_outcomes_pending' | 'insufficient_sample' | 'available'
+  }
+}
+
+export interface AnalysisSignalPage {
+  items: Array<{
+    analytical_signal: AIAnalysisSignal
+    publication: {
+      status: 'ELIGIBLE' | 'INELIGIBLE' | 'PENDING'
+      eligible: boolean
+      reason: string
+    }
+    guardrail_outcome: string
+    final_action: string
+    outcome_status: string
+    decision_id: string | null
+  }>
+  cursor: number
+  next_cursor: number | null
+  total: number
+  filters_applied: Record<string, unknown>
+}
+
+export interface AnalysisHistoryPage {
+  items: Array<{
+    analysis: AIMarketAnalysis
+    analytical_signal: AIAnalysisSignal | null
+  }>
+  cursor: number
+  next_cursor: number | null
+}
+
 export interface AIReasoningDashboard {
   analysis: AIMarketAnalysis | null
   forecast: AIMarketForecast | null
@@ -1100,7 +1199,8 @@ export interface DashboardSystemStatus {
   generated_at: string
   cycle_id: string | null
   stages: SystemStageStatusItem[]
-  current_decision: FinalSystemAction | null
+  current_decision: SignalDecisionSnapshot | null
+  current_analysis_signal?: AIAnalysisSignal | null
   storage: {
     status: SystemStageStatus
     reason: string

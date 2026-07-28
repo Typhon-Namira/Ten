@@ -1,5 +1,5 @@
 import { ArrowDownRight, ArrowUpRight, RefreshCw, ShieldCheck } from 'lucide-react'
-import type { AIReasoningDashboard, DashboardAggregate, MarketIntelligence, QuantForecastResult } from '../../types'
+import type { AIReasoningDashboard, DashboardAggregate, LatestCompletedCycle, MarketIntelligence, QuantForecastResult } from '../../types'
 import {
   actionTone,
   activePublication,
@@ -25,6 +25,7 @@ export function DashboardHeader({
   instrument,
   intelligence,
   reasoning,
+  latestCycle,
   stale,
   lastUpdated,
   loading,
@@ -33,12 +34,13 @@ export function DashboardHeader({
   instrument: string
   intelligence: MarketIntelligence | null
   reasoning: AIReasoningDashboard | null
+  latestCycle?: LatestCompletedCycle | null
   stale: boolean
   lastUpdated: Date | null
   loading: boolean
   onRefresh: () => Promise<void>
 }) {
-  const profile = reasoning?.runtime.operating_profile ?? 'safe_test'
+  const profile = reasoning?.runtime.operating_profile ?? (latestCycle?.status === 'completed' ? 'analytical_live' : 'safe_test')
   // `provider_available` is false for any failure category where no usable response was ever
   // received (auth/rate-limit/timeout/unknown) and true only on success or a response that was
   // received but rejected by our own schema validation (`structured_output_invalid`) -- see
@@ -47,7 +49,7 @@ export function DashboardHeader({
   // validation caught a problem) below, instead of collapsing every failure into one bucket.
   const health = reasoning?.health
   const aiState: 'online' | 'degraded' | 'offline' | 'not_called' = !health
-    ? 'not_called'
+    ? latestCycle?.analysis?.validation_passed ? 'online' : 'not_called'
     : !health.provider_available
       ? 'offline'
       : health.failed_requests > 0 || health.failure_state != null
@@ -55,11 +57,14 @@ export function DashboardHeader({
         : 'online'
   const aiTone: Tone = aiState === 'online' ? 'positive' : aiState === 'degraded' ? 'warning' : aiState === 'offline' ? 'negative' : 'neutral'
   const aiLabel: string = aiState === 'not_called' ? 'AI not called' : aiState === 'degraded' ? `AI degraded — ${humanize(health?.failure_state ?? 'failing')}` : `AI ${aiState}`
-  const healthy = reasoning?.health.guardrails.status === 'healthy' && !stale
+  const healthy = Boolean(
+    (reasoning?.health.guardrails.status === 'healthy' || latestCycle?.final_decision)
+    && !stale,
+  )
   return <header className="ai-statusbar">
     <div className="ai-statusbar__identity">
       <span className="ai-wordmark">TEN</span>
-      <div><strong>{instrument}</strong><small>{intelligence?.latest_candle_timestamp ? formatTime(intelligence.latest_candle_timestamp) : 'Market timestamp unavailable'}</small></div>
+      <div><strong>{instrument}</strong><small>{formatTime(latestCycle?.market_time ?? intelligence?.latest_candle_timestamp)}</small></div>
     </div>
     <div className="ai-statusbar__badges" aria-label="System status">
       <StatusBadge tone="neutral">{humanize(profile)}</StatusBadge>

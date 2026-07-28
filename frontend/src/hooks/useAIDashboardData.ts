@@ -2,15 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { tenApi } from '../services/api'
 import { describeApiError, toApiError } from '../lib/apiError'
 import { recordFetchOutcome } from '../lib/diagnosticsFeed'
-import type { AIReasoningDashboard, DashboardAggregate, DashboardSystemStatus, MarketIntelligence, QuantCalibrationReport, QuantForecastResult } from '../types'
+import type { AnalysisHistoryPage, AnalysisSignalPage, DashboardSystemStatus, LatestCompletedCycle, MarketIntelligence, QuantForecastResult } from '../types'
 
 export interface AIDashboardData {
   intelligence: MarketIntelligence | null
   quant: QuantForecastResult | null
-  calibration: QuantCalibrationReport | null
-  reasoning: AIReasoningDashboard | null
-  aggregate: DashboardAggregate | null
   systemStatus: DashboardSystemStatus | null
+  latestCycle: LatestCompletedCycle | null
+  signalHistory: AnalysisSignalPage | null
+  analysisHistory: AnalysisHistoryPage | null
   loading: boolean
   stale: boolean
   errors: Record<string, string>
@@ -25,10 +25,10 @@ const MAX_BACKOFF_MS = 120_000
 export function useAIDashboardData(instrument: string, timeframe: string): AIDashboardData {
   const [intelligence, setIntelligence] = useState<MarketIntelligence | null>(null)
   const [quant, setQuant] = useState<QuantForecastResult | null>(null)
-  const [calibration, setCalibration] = useState<QuantCalibrationReport | null>(null)
-  const [reasoning, setReasoning] = useState<AIReasoningDashboard | null>(null)
-  const [aggregate, setAggregate] = useState<DashboardAggregate | null>(null)
   const [systemStatus, setSystemStatus] = useState<DashboardSystemStatus | null>(null)
+  const [latestCycle, setLatestCycle] = useState<LatestCompletedCycle | null>(null)
+  const [signalHistory, setSignalHistory] = useState<AnalysisSignalPage | null>(null)
+  const [analysisHistory, setAnalysisHistory] = useState<AnalysisHistoryPage | null>(null)
   const [loading, setLoading] = useState(true)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
@@ -39,11 +39,13 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
     const operation = (async () => {
       const results = await Promise.allSettled([
         tenApi.marketIntelligence(instrument, timeframe),
-        tenApi.dashboardLatest(instrument),
+        tenApi.dashboardLatestCycle(instrument, timeframe),
         tenApi.dashboardSystemStatus(instrument),
+        tenApi.dashboardSignals(instrument, timeframe),
+        tenApi.dashboardAnalyses(instrument, timeframe),
       ] as const)
       const nextErrors: Record<string, string> = {}
-      const sources = ['market-intelligence', 'dashboard', 'dashboard-system'] as const
+      const sources = ['market-intelligence', 'latest-cycle', 'dashboard-system', 'signal-history', 'analysis-history'] as const
       results.forEach((result, index) => {
         if (result.status === 'rejected') {
           const error = toApiError(result.reason)
@@ -56,12 +58,12 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
       if (results[0].status === 'fulfilled') setIntelligence(results[0].value)
       if (results[1].status === 'fulfilled') {
         const value = results[1].value
-        setAggregate(value)
-        setQuant(value.stages.quant_forecast.data)
-        setCalibration(value.calibration.data)
-        setReasoning(value.reasoning)
+        setLatestCycle(value)
+        setQuant(value.quant_forecast ?? null)
       }
       if (results[2].status === 'fulfilled') setSystemStatus(results[2].value)
+      if (results[3].status === 'fulfilled') setSignalHistory(results[3].value)
+      if (results[4].status === 'fulfilled') setAnalysisHistory(results[4].value)
       failureCount.current = Object.keys(nextErrors).length ? failureCount.current + 1 : 0
       setErrors(nextErrors)
       setLastUpdated(new Date())
@@ -96,5 +98,5 @@ export function useAIDashboardData(instrument: string, timeframe: string): AIDas
     intelligence?.diagnostics.some(item => item.freshness === 'stale')
     || intelligence?.latest_candle_timestamp == null,
   )
-  return { intelligence, quant, calibration, reasoning, aggregate, systemStatus, loading, stale, errors, lastUpdated, refresh }
+  return { intelligence, quant, systemStatus, latestCycle, signalHistory, analysisHistory, loading, stale, errors, lastUpdated, refresh }
 }

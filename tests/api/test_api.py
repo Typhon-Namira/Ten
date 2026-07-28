@@ -164,6 +164,34 @@ def test_repeated_dashboard_refreshes_never_invoke_ai_provider() -> None:
     provider_call.assert_not_awaited()
 
 
+def test_authoritative_cycle_and_history_reads_never_invoke_ai_provider() -> None:
+    app = create_app()
+    provider_call = AsyncMock(side_effect=AssertionError("dashboard must remain read-only"))
+
+    with TestClient(app) as client:
+        app.state.ai_reasoning_service.provider.reason = provider_call
+        latest = client.get(
+            "/api/dashboard/latest-cycle",
+            params={"symbol": "XAUUSD", "timeframe": "M5"},
+        )
+        signals = client.get(
+            "/api/dashboard/signals",
+            params={"symbol": "XAUUSD", "timeframe": "M5"},
+        )
+        analyses = client.get(
+            "/api/dashboard/analyses",
+            params={"symbol": "XAUUSD", "timeframe": "M5"},
+        )
+
+    assert latest.status_code == 200
+    assert latest.json()["status"] == "no_data"
+    assert signals.status_code == 200
+    assert signals.json()["items"] == []
+    assert analyses.status_code == 200
+    assert analyses.json()["items"] == []
+    provider_call.assert_not_awaited()
+
+
 def test_all_dashboard_read_endpoints_are_provider_and_persistence_side_effect_free() -> None:
     app = create_app()
     reasoning_call = AsyncMock(
