@@ -11,10 +11,10 @@ import hashlib
 import json
 import logging
 from time import perf_counter
-from typing import Any
-from uuid import uuid4
+from typing import Annotated, Any
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import text
 
 from backend.app.api.dashboard_status import (
@@ -32,6 +32,7 @@ from backend.app.ai_reasoning.telemetry import (
     usage_parameter as scoped_usage_parameter,
 )
 from backend.app.core.feature_flags import FeatureFlag
+from backend.app.core.security import Role, require_role
 from backend.app.engines.market_data_engine.models import canonical_symbol
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
@@ -56,6 +57,217 @@ _PIPELINE_STAGES = (
 _VALID_STAGE_STATUSES = {
     "healthy", "running", "degraded", "failed", "disabled", "blocked", "stale", "no_data"
 }
+
+
+async def _decision_for_analysis_signal(
+    request: Request,
+    signal: Any,
+) -> Any | None:
+    decisions = await request.app.state.signal_decision_service.repository.list_decisions(
+        signal.instrument,
+        signal.timeframe,
+        limit=10_000,
+    )
+    return next(
+        (
+            item
+            for item in decisions
+            if item.source_lineage is not None
+            and item.source_lineage.current_ai_signal_id == signal.signal_id
+            and item.source_lineage.current_ai_analysis_id == signal.analysis_id
+            and item.source_lineage.market_snapshot_id == signal.snapshot_id
+        ),
+        None,
+    )
+
+
+def _publication_projection(decision: Any | None) -> dict[str, Any]:
+    if decision is None:
+        return {
+            "status": "PENDING",
+            "eligible": False,
+            "reason": "deterministic_decision_not_yet_persisted",
+        }
+    blockers = [
+        item.model_dump(mode="json")
+        for item in tuple(getattr(decision, "blockers", ()) or ())
+    ]
+    eligible = bool(decision.publication_eligible)
+    return {
+        "status": "ELIGIBLE" if eligible else "INELIGIBLE",
+        "eligible": eligible,
+        "reason": (
+            "deterministic_decision_publication_eligible"
+            if eligible
+            else decision.decision_reason
+            or (blockers[0].get("message") if blockers else None)
+            or "deterministic_publication_rules_not_satisfied"
+        ),
+        "blockers": blockers,
+    }
+
+
+async def _completed_cycle_projection(
+    request: Request,
+    instrument: str,
+    timeframe: str | None,
+) -> dict[str, Any] | None:
+    pair = await request.app.state.ai_reasoning_repository.latest_completed_analysis_cycle(
+        instrument,
+        timeframe,
+    )
+    if pair is None:
+        return None
+    analysis, signal = pair
+    state = await request.app.state.unified_market_state_repository.get_state(
+        signal.snapshot_id
+    )
+    quant = await request.app.state.quant_forecast_repository.result_for_state(
+        signal.snapshot_id
+    )
+    decision = await _decision_for_analysis_signal(request, signal)
+    publication = _publication_projection(decision)
+    generated_signal_count = (
+        await request.app.state.ai_reasoning_repository.count_analysis_signals(
+            instrument,
+            timeframe,
+        )
+    )
+    minimum_sample = int(
+        getattr(
+            getattr(request.app.state.final_decision_service, "config", None),
+            "minimum_readiness_sample_size",
+            30,
+        )
+    )
+    now = datetime.now(UTC)
+    market_time = (
+        state.market_data_boundary if state is not None else analysis.knowledge_cutoff
+    )
+    stage_statuses = {
+        "unified_market_state": {
+            "status": "healthy" if state is not None else "degraded",
+            "reason": (
+                "same_cycle_market_state_persisted"
+                if state is not None
+                else "referenced_market_state_not_readable"
+            ),
+            "record_id": str(signal.snapshot_id),
+        },
+        "quant_forecast": {
+            "status": "healthy" if quant is not None else "degraded",
+            "reason": (
+                "same_cycle_quant_forecast_persisted"
+                if quant is not None
+                else "referenced_quant_forecast_not_readable"
+            ),
+            "record_id": str(analysis.quantitative_forecast_id),
+        },
+        "ai_reasoning": {
+            "status": "healthy",
+            "reason": "validated_analysis_persisted",
+            "record_id": str(analysis.analysis_id),
+        },
+        "analytical_signal": {
+            "status": "healthy",
+            "reason": "deterministic_analysis_signal_persisted",
+            "record_id": str(signal.signal_id),
+        },
+        "guardrails": {
+            "status": "healthy" if decision is not None else "running",
+            "reason": (
+                "deterministic_guardrails_completed"
+                if decision is not None
+                else "deterministic_decision_pending"
+            ),
+            "record_id": str(decision.decision_id) if decision is not None else None,
+        },
+        "final_decision": {
+            "status": "healthy" if decision is not None else "running",
+            "reason": (
+                "deterministic_final_decision_persisted"
+                if decision is not None
+                else "deterministic_decision_pending"
+            ),
+            "record_id": str(decision.decision_id) if decision is not None else None,
+        },
+        "publication": {
+            "status": "healthy" if publication["eligible"] else "blocked",
+            "reason": publication["reason"],
+            "record_id": str(decision.decision_id) if decision is not None else None,
+        },
+    }
+    serialized_state = state.model_dump(mode="json") if state is not None else None
+    serialized_quant = quant.model_dump(mode="json") if quant is not None else None
+    serialized_analysis = analysis.model_dump(mode="json")
+    result = {
+        "status": "completed",
+        "symbol": signal.instrument,
+        "instrument": signal.instrument,
+        "timeframe": signal.timeframe,
+        "cycle_id": str(signal.cycle_id),
+        "snapshot_id": str(signal.snapshot_id),
+        "analysis_id": str(analysis.analysis_id),
+        "signal_id": str(signal.signal_id),
+        "decision_id": str(decision.decision_id) if decision is not None else None,
+        "market_time": market_time,
+        "completed_at": signal.generated_at,
+        "dashboard_refreshed_at": now,
+        "updated_at": now,
+        "state": serialized_state,
+        "market_state": serialized_state,
+        "quant_forecast": serialized_quant,
+        "analysis": serialized_analysis,
+        "ai_analysis": serialized_analysis,
+        "analytical_signal": signal.model_dump(mode="json"),
+        "guardrail_decision": (
+            {
+                "state": decision.state.value,
+                "readiness": decision.readiness.value,
+                "blockers": [
+                    item.model_dump(mode="json") for item in decision.blockers
+                ],
+                "warnings": [
+                    item.model_dump(mode="json") for item in decision.warnings
+                ],
+            }
+            if decision is not None
+            else None
+        ),
+        "final_decision": (
+            decision.model_dump(mode="json") if decision is not None else None
+        ),
+        "publication": publication,
+        "stages": stage_statuses,
+        "lineage": {
+            "cycle_id": str(signal.cycle_id),
+            "market_snapshot_id": str(signal.snapshot_id),
+            "quantitative_forecast_id": str(analysis.quantitative_forecast_id),
+            "analysis_id": str(analysis.analysis_id),
+            "signal_id": str(signal.signal_id),
+            "decision_id": (
+                str(decision.decision_id) if decision is not None else None
+            ),
+        },
+        "cycle": {
+            "eligible_cycle_id": str(signal.cycle_id),
+            "snapshot_id": str(signal.snapshot_id),
+            "status": "COMPLETED",
+        },
+        "performance": {
+            "signals_generated": generated_signal_count,
+            "signals_awaiting_outcome": generated_signal_count,
+            "signals_evaluated": 0,
+            "minimum_required_sample": minimum_sample,
+            "calibration_sample_size": 0,
+            "state": (
+                "signals_exist_outcomes_pending"
+                if generated_signal_count
+                else "no_signals"
+            ),
+        },
+    }
+    return result
 
 
 def _system_stage(
@@ -264,6 +476,421 @@ async def _persist_stage_projection(
             return []
 
 
+@system_status_router.get("/latest-cycle")
+async def dashboard_latest_cycle(
+    request: Request,
+    response: Response,
+    symbol: str = "XAUUSD",
+    timeframe: str | None = None,
+) -> dict[str, Any]:
+    """Return the latest fully persisted analytical cycle through one lineage."""
+
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    instrument = canonical_symbol(symbol)
+    cycle = await _completed_cycle_projection(request, instrument, timeframe)
+    if cycle is not None:
+        return cycle
+    return {
+        "status": "no_data",
+        "symbol": instrument,
+        "instrument": instrument,
+        "timeframe": timeframe,
+        "cycle_id": None,
+        "market_time": None,
+        "completed_at": None,
+        "dashboard_refreshed_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+        "cycle": None,
+        "market_state": None,
+        "quant_forecast": None,
+        "ai_analysis": None,
+        "analysis": None,
+        "analytical_signal": None,
+        "guardrail_decision": None,
+        "final_decision": None,
+        "publication": {
+            "status": "PENDING",
+            "eligible": False,
+            "reason": "no_completed_analytical_cycle",
+        },
+        "stages": {},
+        "lineage": {},
+        "performance": {
+            "signals_generated": 0,
+            "signals_awaiting_outcome": 0,
+            "signals_evaluated": 0,
+            "minimum_required_sample": int(
+                getattr(
+                    getattr(
+                        request.app.state.final_decision_service,
+                        "config",
+                        None,
+                    ),
+                    "minimum_readiness_sample_size",
+                    30,
+                )
+            ),
+            "calibration_sample_size": 0,
+            "state": "no_signals",
+        },
+    }
+
+
+@system_status_router.get("/signals")
+async def dashboard_signal_history(
+    request: Request,
+    symbol: str = "XAUUSD",
+    timeframe: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    direction: str | None = None,
+    minimum_confidence: Annotated[int | None, Query(ge=0, le=100)] = None,
+    strength: str | None = None,
+    status: str | None = None,
+    setup: str | None = None,
+    cursor: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict[str, Any]:
+    for name, value in (("start", start), ("end", end)):
+        if value is not None and value.tzinfo is None:
+            raise HTTPException(422, f"{name} must include a timezone")
+    if start is not None:
+        start = start.astimezone(UTC)
+    if end is not None:
+        end = end.astimezone(UTC)
+    if start is not None and end is not None and start > end:
+        raise HTTPException(422, "start must precede end")
+    normalized_direction = direction.upper() if direction else None
+    if normalized_direction not in {None, "BUY", "SELL", "HOLD"}:
+        raise HTTPException(422, "direction must be BUY, SELL, or HOLD")
+    normalized_strength = strength.upper() if strength else None
+    valid_strengths = {
+        None,
+        "VERY_WEAK",
+        "WEAK",
+        "MODERATE",
+        "STRONG",
+        "VERY_STRONG",
+    }
+    if normalized_strength not in valid_strengths:
+        raise HTTPException(422, "invalid signal strength")
+    instrument = canonical_symbol(symbol)
+    candidates = await request.app.state.ai_reasoning_repository.list_analysis_signals(
+        instrument,
+        timeframe,
+        start,
+        end,
+        normalized_direction,
+        minimum_confidence,
+        normalized_strength,
+        0,
+        10_000,
+    )
+    filtered: list[Any] = []
+    normalized_status = status.lower() if status else None
+    normalized_setup = setup.lower() if setup else None
+    for item in candidates:
+        if normalized_status is None and normalized_setup is None:
+            filtered.append(item)
+            continue
+        decision = await _decision_for_analysis_signal(request, item)
+        decision_statuses = (
+            {
+                decision.state.value.lower(),
+                decision.final_action.value.lower(),
+                "eligible" if decision.publication_eligible else "ineligible",
+            }
+            if decision is not None
+            else {"pending"}
+        )
+        if normalized_status is not None and normalized_status not in decision_statuses:
+            continue
+        if normalized_setup is not None and (
+            decision is None
+            or decision.setup_family is None
+            or decision.setup_family.lower() != normalized_setup
+        ):
+            continue
+        filtered.append(item)
+    visible = filtered[cursor : cursor + limit]
+    has_more = cursor + limit < len(filtered)
+    total = len(filtered)
+    history_items: list[dict[str, Any]] = []
+    for item in visible:
+        decision = await _decision_for_analysis_signal(request, item)
+        publication = _publication_projection(decision)
+        history_items.append(
+            {
+                "analytical_signal": item.model_dump(mode="json"),
+                "publication": publication,
+                "guardrail_outcome": (
+                    decision.state.value if decision is not None else "pending"
+                ),
+                "final_action": (
+                    decision.final_action.value if decision is not None else "PENDING"
+                ),
+                "outcome_status": "pending",
+                "decision_id": (
+                    str(decision.decision_id) if decision is not None else None
+                ),
+            }
+        )
+    return {
+        "items": history_items,
+        "cursor": cursor,
+        "next_cursor": cursor + limit if has_more else None,
+        "total": total,
+        "filters_applied": {
+            "timeframe": timeframe,
+            "start": start,
+            "end": end,
+            "direction": normalized_direction,
+            "minimum_confidence": minimum_confidence,
+            "strength": normalized_strength,
+            "status": normalized_status,
+            "setup": normalized_setup,
+        },
+        "result_cap_reached": len(candidates) == 10_000,
+    }
+
+
+@system_status_router.get("/signals/{signal_id}")
+async def dashboard_signal_detail(
+    signal_id: UUID,
+    request: Request,
+) -> dict[str, Any]:
+    signal = await request.app.state.ai_reasoning_repository.get_analysis_signal(
+        signal_id
+    )
+    if signal is None:
+        raise HTTPException(404, "analytical signal not found")
+    analysis = await request.app.state.ai_reasoning_repository.get_analysis(
+        signal.analysis_id
+    )
+    state = await request.app.state.unified_market_state_repository.get_state(
+        signal.snapshot_id
+    )
+    quant = await request.app.state.quant_forecast_repository.result_for_state(
+        signal.snapshot_id
+    )
+    decision = await _decision_for_analysis_signal(request, signal)
+    return {
+        "analytical_signal": signal.model_dump(mode="json"),
+        "analysis": analysis.model_dump(mode="json") if analysis else None,
+        "state": state.model_dump(mode="json") if state else None,
+        "quant_forecast": quant.model_dump(mode="json") if quant else None,
+        "final_decision": decision.model_dump(mode="json") if decision else None,
+        "publication": _publication_projection(decision),
+        "lineage": {
+            "cycle_id": str(signal.cycle_id),
+            "market_snapshot_id": str(signal.snapshot_id),
+            "analysis_id": str(signal.analysis_id),
+            "signal_id": str(signal.signal_id),
+            "decision_id": str(decision.decision_id) if decision else None,
+        },
+    }
+
+
+@system_status_router.get("/analyses")
+async def dashboard_analysis_history(
+    request: Request,
+    symbol: str = "XAUUSD",
+    timeframe: str | None = None,
+    cursor: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict[str, Any]:
+    instrument = canonical_symbol(symbol)
+    analyses = await request.app.state.ai_reasoning_repository.list_analyses(
+        instrument,
+        timeframe,
+        None,
+        None,
+        None,
+        None,
+        cursor,
+        limit + 1,
+    )
+    visible = analyses[:limit]
+    items: list[dict[str, Any]] = []
+    for analysis in visible:
+        signal = await request.app.state.ai_reasoning_repository.signal_for_analysis(
+            analysis.analysis_id
+        )
+        items.append(
+            {
+                "analysis": analysis.model_dump(mode="json"),
+                "analytical_signal": (
+                    signal.model_dump(mode="json") if signal else None
+                ),
+            }
+        )
+    return {
+        "items": items,
+        "cursor": cursor,
+        "next_cursor": cursor + limit if len(analyses) > limit else None,
+    }
+
+
+@system_status_router.get("/analyses/{analysis_id}")
+async def dashboard_analysis_detail(
+    analysis_id: UUID,
+    request: Request,
+) -> dict[str, Any]:
+    analysis = await request.app.state.ai_reasoning_repository.get_analysis(
+        analysis_id
+    )
+    if analysis is None:
+        raise HTTPException(404, "AI market analysis not found")
+    signal = await request.app.state.ai_reasoning_repository.signal_for_analysis(
+        analysis_id
+    )
+    state = await request.app.state.unified_market_state_repository.get_state(
+        analysis.market_snapshot_id
+    )
+    quant = await request.app.state.quant_forecast_repository.result_for_state(
+        analysis.market_snapshot_id
+    )
+    decision = (
+        await _decision_for_analysis_signal(request, signal)
+        if signal is not None
+        else None
+    )
+    return {
+        "analysis": analysis.model_dump(mode="json"),
+        "analytical_signal": signal.model_dump(mode="json") if signal else None,
+        "state": state.model_dump(mode="json") if state else None,
+        "quant_forecast": quant.model_dump(mode="json") if quant else None,
+        "final_decision": decision.model_dump(mode="json") if decision else None,
+        "publication": _publication_projection(decision),
+    }
+
+
+@system_status_router.get(
+    "/reconciliation",
+    dependencies=[Depends(require_role(Role.OPERATOR))],
+)
+async def dashboard_reconciliation(
+    request: Request,
+    symbol: str = "XAUUSD",
+    timeframe: str | None = None,
+) -> dict[str, Any]:
+    """Read-only operator report; it never mutates or backfills production data."""
+
+    instrument = canonical_symbol(symbol)
+    repository = request.app.state.ai_reasoning_repository
+    signals = await repository.count_analysis_signals(instrument, timeframe)
+    signal_records = await repository.list_analysis_signals(
+        instrument,
+        timeframe,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        10_000,
+    )
+    analyses = await repository.list_analyses(
+        instrument,
+        timeframe,
+        None,
+        None,
+        None,
+        None,
+        0,
+        10_000,
+    )
+    linked = 0
+    orphan_analysis_ids: list[str] = []
+    for analysis in analyses:
+        signal = await repository.signal_for_analysis(analysis.analysis_id)
+        if signal is None:
+            orphan_analysis_ids.append(str(analysis.analysis_id))
+        else:
+            linked += 1
+    signal_without_analysis_ids: list[str] = []
+    signal_without_decision_ids: list[str] = []
+    latest_decision_id: str | None = None
+    for signal in signal_records:
+        if await repository.get_analysis(signal.analysis_id) is None:
+            signal_without_analysis_ids.append(str(signal.signal_id))
+        decision = await _decision_for_analysis_signal(request, signal)
+        if decision is None:
+            signal_without_decision_ids.append(str(signal.signal_id))
+        elif latest_decision_id is None:
+            latest_decision_id = str(decision.decision_id)
+    coherent = await repository.latest_completed_analysis_cycle(
+        instrument,
+        timeframe,
+    )
+    latest_analysis = analyses[0] if analyses else None
+    latest_signal = signal_records[0] if signal_records else None
+    latest_incomplete = next(
+        (
+            item
+            for item in analyses
+            if str(item.analysis_id) in set(orphan_analysis_ids)
+        ),
+        None,
+    )
+    warnings: list[dict[str, Any]] = []
+    if orphan_analysis_ids:
+        warnings.append(
+            {
+                "code": "completed_analysis_without_signal",
+                "record_ids": orphan_analysis_ids[:200],
+            }
+        )
+    if signal_without_analysis_ids:
+        warnings.append(
+            {
+                "code": "signal_without_analysis",
+                "record_ids": signal_without_analysis_ids[:200],
+            }
+        )
+    if signal_without_decision_ids:
+        warnings.append(
+            {
+                "code": "signal_without_final_decision",
+                "record_ids": signal_without_decision_ids[:200],
+            }
+        )
+    return {
+        "instrument": instrument,
+        "timeframe": timeframe,
+        "analysis_count": len(analyses),
+        "analytical_signal_count": signals,
+        "linked_analysis_count": linked,
+        "analysis_without_signal_count": len(orphan_analysis_ids),
+        "analysis_without_signal_ids": orphan_analysis_ids[:200],
+        "signal_without_analysis_count": len(signal_without_analysis_ids),
+        "signal_without_analysis_ids": signal_without_analysis_ids[:200],
+        "signal_without_final_decision_count": len(signal_without_decision_ids),
+        "signal_without_final_decision_ids": signal_without_decision_ids[:200],
+        "latest_completed_analysis_id": (
+            str(latest_analysis.analysis_id) if latest_analysis else None
+        ),
+        "latest_signal_id": (
+            str(latest_signal.signal_id) if latest_signal else None
+        ),
+        "latest_final_decision_id": latest_decision_id,
+        "latest_coherent_cycle_id": (
+            str(coherent[1].cycle_id) if coherent else None
+        ),
+        "latest_incomplete_cycle_id": (
+            str(latest_incomplete.cycle_id) if latest_incomplete else None
+        ),
+        "legacy_records_preserved": True,
+        "mutation_performed": False,
+        "warnings": warnings
+        + (
+            [{"code": "analysis_count_capped_at_10000", "record_ids": []}]
+            if len(analyses) == 10_000
+            else []
+        ),
+    }
+
+
 @system_status_router.get("/system-status")
 async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") -> dict[str, Any]:
     """One backend-authoritative read model for pipeline, storage and failures."""
@@ -271,7 +898,20 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
     now = datetime.now(UTC)
     symbol = canonical_symbol(instrument)
     flags = request.app.state.engine_registry.context.feature_flags
-    state = await request.app.state.unified_market_state_repository.latest_state(symbol)
+    completed_pair = (
+        await request.app.state.ai_reasoning_repository.latest_completed_analysis_cycle(
+            symbol
+        )
+    )
+    completed_analysis = completed_pair[0] if completed_pair else None
+    completed_signal = completed_pair[1] if completed_pair else None
+    state = (
+        await request.app.state.unified_market_state_repository.get_state(
+            completed_signal.snapshot_id
+        )
+        if completed_signal is not None
+        else await request.app.state.unified_market_state_repository.latest_state(symbol)
+    )
     stages: dict[str, dict[str, Any]] = {}
     evidence_by_engine = {
         item.source_engine: item for item in (state.evidence if state is not None else ())
@@ -316,21 +956,22 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         await request.app.state.quant_forecast_repository.result_for_state(state.state_id)
         if state is not None else None
     )
-    analysis = (
+    analysis = completed_analysis or (
         await request.app.state.ai_reasoning_repository.analysis_for_state(state.state_id)
-        if state is not None else None
+        if state is not None
+        else None
     )
-    analysis_signal = (
+    analysis_signal = completed_signal or (
         await request.app.state.ai_reasoning_repository.signal_for_analysis(
             analysis.analysis_id
         )
         if analysis is not None
         else None
     )
-    signal_decision = await request.app.state.signal_decision_service.repository.get_latest_decision(
-        symbol,
-        getattr(state, "trigger_timeframe", None)
-        or request.app.state.settings.market_data_timeframes[0],
+    signal_decision = (
+        await _decision_for_analysis_signal(request, analysis_signal)
+        if analysis_signal is not None
+        else None
     )
     if (
         state is not None

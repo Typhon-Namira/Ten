@@ -10,7 +10,7 @@ import logging
 from typing import Protocol
 
 from pydantic import BaseModel
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -145,6 +145,29 @@ class AIReasoningRepository(Protocol):
         instrument: str,
         timeframe: str | None = None,
     ) -> AIAnalysisSignal | None: ...
+    async def get_analysis_signal(self, signal_id: object) -> AIAnalysisSignal | None: ...
+    async def latest_completed_analysis_cycle(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> tuple[AIMarketAnalysis, AIAnalysisSignal] | None: ...
+    async def list_analysis_signals(
+        self,
+        instrument: str,
+        timeframe: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        direction: str | None,
+        minimum_confidence: int | None,
+        strength: str | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[AIAnalysisSignal, ...]: ...
+    async def count_analysis_signals(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> int: ...
     async def latest_analysis(self, instrument: str, timeframe: str | None = None) -> AIMarketAnalysis | None: ...
     async def analyses_before(
         self,
@@ -434,6 +457,82 @@ class InMemoryAIReasoningRepository:
             ]
         return max(values, key=lambda item: item.generated_at, default=None)
 
+    async def get_analysis_signal(self, signal_id: object) -> AIAnalysisSignal | None:
+        async with self._lock:
+            return self.analysis_signals.get(signal_id)
+
+    async def latest_completed_analysis_cycle(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> tuple[AIMarketAnalysis, AIAnalysisSignal] | None:
+        async with self._lock:
+            pairs = [
+                (analysis, signal)
+                for signal in self.analysis_signals.values()
+                if signal.instrument == instrument
+                and (timeframe is None or signal.timeframe == timeframe)
+                and (analysis := self.analyses.get(signal.analysis_id)) is not None
+                and analysis.status == AnalysisStatus.AVAILABLE
+                and analysis.validation_passed
+            ]
+        return max(
+            pairs,
+            key=lambda pair: (
+                pair[1].generated_at,
+                pair[0].analysis_timestamp,
+                str(pair[1].signal_id),
+            ),
+            default=None,
+        )
+
+    async def list_analysis_signals(
+        self,
+        instrument: str,
+        timeframe: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        direction: str | None,
+        minimum_confidence: int | None,
+        strength: str | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[AIAnalysisSignal, ...]:
+        async with self._lock:
+            values = [
+                item
+                for item in self.analysis_signals.values()
+                if item.instrument == instrument
+                and (timeframe is None or item.timeframe == timeframe)
+                and (start is None or item.generated_at >= start)
+                and (end is None or item.generated_at <= end)
+                and (direction is None or item.signal.value == direction)
+                and (
+                    minimum_confidence is None
+                    or item.confidence >= minimum_confidence
+                )
+                and (strength is None or item.strength.value == strength)
+            ]
+        ordered = sorted(
+            values,
+            key=lambda item: (item.generated_at, str(item.signal_id)),
+            reverse=True,
+        )
+        return tuple(ordered[offset : offset + limit])
+
+    async def count_analysis_signals(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> int:
+        async with self._lock:
+            return sum(
+                1
+                for item in self.analysis_signals.values()
+                if item.instrument == instrument
+                and (timeframe is None or item.timeframe == timeframe)
+            )
+
     async def latest_analysis(
         self,
         instrument: str,
@@ -502,7 +601,11 @@ class InMemoryAIReasoningRepository:
                 and (status is None or item.status == status)
                 and (provider is None or item.provider_metadata.provider == provider)
             ]
-        ordered = sorted(values, key=lambda item: item.analysis_timestamp, reverse=True)
+        ordered = sorted(
+            values,
+            key=lambda item: (item.analysis_timestamp, str(item.analysis_id)),
+            reverse=True,
+        )
         return tuple(ordered[offset : offset + limit])
 
     async def save_setup_family(self, value: SetupFamilyDefinition, registry_version: str) -> SetupFamilyDefinition:
@@ -972,6 +1075,105 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         return AIAnalysisSignal.model_validate(record.payload) if record else None
 
     @scoped_session
+    async def get_analysis_signal(self, signal_id: object) -> AIAnalysisSignal | None:
+        record = await self.session.get(AIAnalysisSignalRecord, signal_id)
+        return AIAnalysisSignal.model_validate(record.payload) if record else None
+
+    @scoped_session
+    async def latest_completed_analysis_cycle(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> tuple[AIMarketAnalysis, AIAnalysisSignal] | None:
+        query = (
+            select(AIMarketAnalysisRecord, AIAnalysisSignalRecord)
+            .join(
+                AIAnalysisSignalRecord,
+                AIAnalysisSignalRecord.analysis_id
+                == AIMarketAnalysisRecord.analysis_id,
+            )
+            .where(
+                AIMarketAnalysisRecord.symbol == instrument,
+                AIMarketAnalysisRecord.status == AnalysisStatus.AVAILABLE.value,
+                AIMarketAnalysisRecord.validation_passed.is_(True),
+            )
+        )
+        if timeframe is not None:
+            query = query.where(AIAnalysisSignalRecord.timeframe == timeframe)
+        row = (
+            await self.session.execute(
+                query.order_by(
+                    AIAnalysisSignalRecord.generated_at.desc(),
+                    AIMarketAnalysisRecord.analysis_timestamp.desc(),
+                    AIAnalysisSignalRecord.signal_id.desc(),
+                ).limit(1)
+            )
+        ).first()
+        if row is None:
+            return None
+        return (
+            AIMarketAnalysis.model_validate(row[0].payload),
+            AIAnalysisSignal.model_validate(row[1].payload),
+        )
+
+    @scoped_session
+    async def list_analysis_signals(
+        self,
+        instrument: str,
+        timeframe: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        direction: str | None,
+        minimum_confidence: int | None,
+        strength: str | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[AIAnalysisSignal, ...]:
+        query = select(AIAnalysisSignalRecord).where(
+            AIAnalysisSignalRecord.instrument == instrument
+        )
+        if timeframe is not None:
+            query = query.where(AIAnalysisSignalRecord.timeframe == timeframe)
+        if start is not None:
+            query = query.where(AIAnalysisSignalRecord.generated_at >= start)
+        if end is not None:
+            query = query.where(AIAnalysisSignalRecord.generated_at <= end)
+        if direction is not None:
+            query = query.where(AIAnalysisSignalRecord.signal == direction)
+        if minimum_confidence is not None:
+            query = query.where(
+                AIAnalysisSignalRecord.confidence >= minimum_confidence
+            )
+        if strength is not None:
+            query = query.where(AIAnalysisSignalRecord.strength == strength)
+        records = (
+            await self.session.scalars(
+                query.order_by(
+                    AIAnalysisSignalRecord.generated_at.desc(),
+                    AIAnalysisSignalRecord.signal_id.desc(),
+                )
+                .offset(offset)
+                .limit(limit)
+            )
+        ).all()
+        return tuple(
+            AIAnalysisSignal.model_validate(item.payload) for item in records
+        )
+
+    @scoped_session
+    async def count_analysis_signals(
+        self,
+        instrument: str,
+        timeframe: str | None = None,
+    ) -> int:
+        query = select(func.count(AIAnalysisSignalRecord.signal_id)).where(
+            AIAnalysisSignalRecord.instrument == instrument
+        )
+        if timeframe is not None:
+            query = query.where(AIAnalysisSignalRecord.timeframe == timeframe)
+        return int(await self.session.scalar(query) or 0)
+
+    @scoped_session
     async def latest_analysis(
         self,
         instrument: str,
@@ -1060,7 +1262,10 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             query = query.where(AIMarketAnalysisRecord.provider == provider)
         records = (
             await self.session.scalars(
-                query.order_by(AIMarketAnalysisRecord.analysis_timestamp.desc())
+                query.order_by(
+                    AIMarketAnalysisRecord.analysis_timestamp.desc(),
+                    AIMarketAnalysisRecord.analysis_id.desc(),
+                )
                 .offset(offset)
                 .limit(limit)
             )

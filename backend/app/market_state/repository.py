@@ -125,6 +125,7 @@ class UnifiedMarketStateRepository(Protocol):
     async def save_frame(self, value: MarketEvidenceFrame) -> MarketEvidenceFrame: ...
     async def latest_frame(self, instrument: str, timeframe: str, boundary: datetime, knowledge_cutoff: datetime) -> MarketEvidenceFrame | None: ...
     async def save_state(self, value: UnifiedMarketState) -> UnifiedMarketState: ...
+    async def get_state(self, state_id: object) -> UnifiedMarketState | None: ...
     async def latest_state(self, instrument: str) -> UnifiedMarketState | None: ...
 
 
@@ -160,6 +161,10 @@ class InMemoryUnifiedMarketStateRepository:
         async with self._lock:
             values = [item for item in self._states.values() if item.instrument == instrument]
         return max(values, key=lambda item: (item.market_data_boundary, str(item.state_id)), default=None)
+
+    async def get_state(self, state_id: object) -> UnifiedMarketState | None:
+        async with self._lock:
+            return self._states.get(state_id)
 
 
 class SqlAlchemyUnifiedMarketStateRepository(ScopedSessionRepository):
@@ -279,6 +284,51 @@ class SqlAlchemyUnifiedMarketStateRepository(ScopedSessionRepository):
             await self.session.rollback()
             raise
         return value
+
+    @scoped_session
+    async def get_state(self, state_id: object) -> UnifiedMarketState | None:
+        record = await self.session.get(UnifiedMarketStateRecord, state_id)
+        if record is None:
+            return None
+        if record.payload.get("timeframes") is not None and record.payload.get("evidence") is not None:
+            return UnifiedMarketState.model_validate(record.payload)
+        timeframe_rows = list(
+            (
+                await self.session.scalars(
+                    select(UnifiedMarketStateTimeframeRecord)
+                    .where(UnifiedMarketStateTimeframeRecord.state_id == record.state_id)
+                    .order_by(UnifiedMarketStateTimeframeRecord.timeframe)
+                )
+            ).all()
+        )
+        frame_ids = [item.frame_id for item in timeframe_rows]
+        frame_rows = list(
+            (
+                await self.session.scalars(
+                    select(MarketEvidenceFrameRecord).where(
+                        MarketEvidenceFrameRecord.frame_id.in_(frame_ids)
+                    )
+                )
+            ).all()
+        )
+        frames = {
+            item.frame_id: MarketEvidenceFrame.model_validate(item.payload)
+            for item in frame_rows
+        }
+        link_rows = (
+            await self.session.execute(
+                select(UnifiedMarketStateEvidenceLinkRecord, EvidenceItemRecord)
+                .join(
+                    EvidenceItemRecord,
+                    EvidenceItemRecord.evidence_id
+                    == UnifiedMarketStateEvidenceLinkRecord.evidence_id,
+                )
+                .where(UnifiedMarketStateEvidenceLinkRecord.state_id == record.state_id)
+                .order_by(UnifiedMarketStateEvidenceLinkRecord.ordinal)
+            )
+        ).all()
+        typed_links = [(row[0], row[1]) for row in link_rows]
+        return _reconstruct_compact_state(record, timeframe_rows, frames, typed_links)
 
     @scoped_session
     async def latest_state(self, instrument: str) -> UnifiedMarketState | None:

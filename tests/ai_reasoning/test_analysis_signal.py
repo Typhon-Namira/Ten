@@ -107,3 +107,68 @@ async def test_signal_persistence_detects_conflicting_duplicate() -> None:
             signal.model_copy(update={"reasoning_summary": "Conflicting payload."})
         )
     assert len(repository.analysis_signals) == 1
+
+
+@pytest.mark.asyncio
+async def test_latest_completed_cycle_ignores_newer_analysis_without_signal() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    completed_analysis = analysis(5)
+    incomplete_newer_analysis = analysis(10)
+    completed_signal = DeterministicAnalysisSignalGenerator().generate(
+        completed_analysis,
+        state,
+        quant,
+    )
+    await repository.save_analysis(completed_analysis)
+    await repository.save_analysis_signal(completed_signal)
+    await repository.save_analysis(incomplete_newer_analysis)
+
+    latest = await repository.latest_completed_analysis_cycle("XAUUSD", "M15")
+
+    assert latest == (completed_analysis, completed_signal)
+
+
+@pytest.mark.asyncio
+async def test_analysis_signal_history_is_stable_and_paginated() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    first_analysis = analysis(5)
+    second_analysis = analysis(10)
+    first = DeterministicAnalysisSignalGenerator().generate(
+        first_analysis,
+        state,
+        quant,
+    )
+    second = DeterministicAnalysisSignalGenerator().generate(
+        second_analysis,
+        state,
+        quant,
+    )
+    await repository.save_analysis(first_analysis)
+    await repository.save_analysis_signal(first)
+    await repository.save_analysis(second_analysis)
+    await repository.save_analysis_signal(second)
+
+    page_one = await repository.list_analysis_signals(
+        "XAUUSD", "M15", None, None, None, None, None, 0, 1
+    )
+    page_two = await repository.list_analysis_signals(
+        "XAUUSD", "M15", None, None, None, None, None, 1, 1
+    )
+
+    assert page_one == (second,)
+    assert page_two == (first,)
+    assert await repository.count_analysis_signals("XAUUSD", "M15") == 2
+    filtered = await repository.list_analysis_signals(
+        "XAUUSD",
+        "M15",
+        None,
+        None,
+        second.signal.value,
+        second.confidence,
+        second.strength.value,
+        0,
+        10,
+    )
+    assert second in filtered

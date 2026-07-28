@@ -1,4 +1,4 @@
-import type { ActiveSelection, AIReasoningDashboard, AIMarketAnalysis, AIScoreSnapshot, ChartOverlays, ChatTurn, DashboardAggregate, DashboardSystemStatus, EngineStatus, ExplainResponse, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
+import type { ActiveSelection, AIReasoningDashboard, AIMarketAnalysis, AIScoreSnapshot, AnalysisHistoryPage, AnalysisSignalPage, ChartOverlays, ChatTurn, DashboardAggregate, DashboardSystemStatus, EngineStatus, ExplainResponse, LatestCompletedCycle, MarketIntelligence, MarketStatus, OperationalSignal, PerformanceMetrics, PipelineStagesResponse, QuantCalibrationReport, QuantForecastOutcome, QuantForecastResult, RejectionsResponse, ReplaySessionOverview, SignalDecisionSnapshot, SystemDiagnostics } from '../types'
 import { ApiError } from '../lib/apiError'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.replace(/\/$/, '') ?? ''
@@ -13,7 +13,12 @@ async function timedFetch(path: string, init: RequestInit = {}, timeoutMs = DEFA
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(`${API_BASE_URL}${path}`, { ...init, signal: controller.signal })
+    return await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache', ...init.headers },
+      signal: controller.signal,
+    })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new ApiError('timeout', `Request to ${path} did not complete within ${timeoutMs / 1000}s`)
@@ -136,6 +141,12 @@ export const tenApi = {
   },
   dashboardSystemStatus: (instrument: string) =>
     request<DashboardSystemStatus>(`/api/dashboard/system-status?instrument=${encodeURIComponent(instrument)}`),
+  dashboardLatestCycle: (instrument: string, timeframe: string) =>
+    request<LatestCompletedCycle>(`/api/dashboard/latest-cycle?symbol=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}`),
+  dashboardSignals: (instrument: string, timeframe: string, cursor = 0, limit = 50) =>
+    request<AnalysisSignalPage>(`/api/dashboard/signals?symbol=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}&cursor=${cursor}&limit=${limit}`),
+  dashboardAnalyses: (instrument: string, timeframe: string, cursor = 0, limit = 50) =>
+    request<AnalysisHistoryPage>(`/api/dashboard/analyses?symbol=${encodeURIComponent(instrument)}&timeframe=${encodeURIComponent(timeframe)}&cursor=${cursor}&limit=${limit}`),
   // Explainability: every AI-authored answer here is prose over a context TEN itself assembled —
   // the AI never fetches its own data, so a chat answer can never disagree with these same panels.
   explainCurrent: (instrument: string, timeframe: string) => request<ExplainResponse>(`/api/v1/explain/current?${scoped(instrument, timeframe)}`),

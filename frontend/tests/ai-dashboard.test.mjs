@@ -15,15 +15,10 @@ test('primary navigation exposes only the five AI-centric destinations', async (
 test('overview preserves the required decision hierarchy', async () => {
   const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
   const orderedSections = [
-    '<FinalDecisionHero',
-    '<DecisionPipeline',
+    '<CurrentAnalyticalCycle',
     '<MarketStateSummary',
     '<QuantForecastSummary',
-    '<AIReasoningSummary',
-    '<GuardrailSummary',
-    '<ActiveSignalMonitor',
-    '<ValidationSummary',
-    '<OperationalHealth',
+    '<SystemStatusPanel',
   ]
   let previous = -1
   for (const section of orderedSections) {
@@ -54,28 +49,26 @@ test('data hook retains last good backend values and marks missing market eviden
 test('dashboard uses one authoritative AI aggregate with bounded visibility-aware polling', async () => {
   const hook = await source('src/hooks/useAIDashboardData.ts')
   const api = await source('src/services/api.ts')
-  assert.match(api, /dashboardLatest/)
-  assert.match(api, /\/api\/v1\/dashboard\/latest/)
-  assert.match(hook, /tenApi\.dashboardLatest/)
+  assert.match(api, /dashboardLatestCycle/)
+  assert.match(api, /\/api\/dashboard\/latest-cycle/)
+  assert.match(hook, /tenApi\.dashboardLatestCycle/)
+  assert.doesNotMatch(hook, /tenApi\.dashboardLatest\(/)
   assert.doesNotMatch(hook, /tenApi\.latestQuantForecast/)
   assert.doesNotMatch(hook, /tenApi\.latestQuantCalibration/)
   assert.doesNotMatch(hook, /tenApi\.latestAIReasoning/)
   assert.match(hook, /if \(inFlight\.current\)/)
   assert.match(hook, /document\.hidden/)
   assert.match(hook, /MAX_BACKOFF_MS/)
-  assert.match(api, /isDashboardAggregate/)
-  assert.match(api, /dashboard response schema mismatch/)
+  assert.match(api, /cache: 'no-store'/)
 })
 
 test('empty analytical stages render backend-derived reason codes', async () => {
   const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
-  const pipeline = await source('src/lib/aiDashboard.ts')
-  assert.match(dashboard, /stages\.quant_forecast\.reason/)
-  assert.match(dashboard, /stages\.ai_reasoning\.reason/)
-  assert.match(dashboard, /stages\.guardrails\.reason/)
-  assert.match(dashboard, /stages\.publication\.reason/)
-  assert.match(dashboard, /stages\.monitoring\.reason/)
-  assert.match(pipeline, /humanize\(stage\.reason\)/)
+  const cycle = await source('src/components/ai-dashboard/AuthoritativeCycle.tsx')
+  assert.match(dashboard, /stages\.quant_forecast\?\.reason/)
+  assert.match(cycle, /cycle\.publication\.reason/)
+  assert.match(cycle, /No completed analytical cycle/)
+  assert.match(cycle, /deterministic signal persistence/)
 })
 
 test('theme is light, responsive, accessible, and motion-safe', async () => {

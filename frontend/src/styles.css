@@ -198,6 +198,21 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px soli
 .signal-lifecycle .done i { border-color: var(--green); background: var(--green); }
 .signal-lifecycle .current { color: var(--ink); font-weight: 700; }
 .signal-lifecycle .current i { border-color: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
+.authoritative-signal__hero { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; margin-bottom: 16px; padding: 16px; border-radius: 12px; background: var(--surface-soft); }
+.authoritative-signal__hero > div { display: grid; gap: 4px; }
+.authoritative-signal__hero strong { font: 700 17px/1.2 Manrope,sans-serif; }
+.authoritative-signal__hero small { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.authoritative-signal__time { justify-items: end; color: var(--muted); font-size: 9px; }
+.cycle-lineage { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 14px; color: var(--faint); font-size: 8px; }
+.cycle-lineage code,.authoritative-table code,.analysis-history-list code { color: var(--muted); font-size: 8px; }
+.authoritative-table { display: grid; gap: 0; overflow-x: auto; }
+.authoritative-table > div { display: grid; grid-template-columns: 1.3fr .55fr .55fr .75fr 1.5fr; align-items: center; gap: 10px; min-width: 680px; min-height: 43px; padding: 7px 9px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+.authoritative-table__head { min-height: 30px!important; color: var(--faint)!important; font-size: 8px!important; font-weight: 700; text-transform: uppercase; }
+.authoritative-table > small { margin-top: 10px; color: var(--faint); font-size: 9px; }
+.analysis-history-list { display: grid; gap: 7px; }
+.analysis-history-list details { border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+.analysis-history-list summary { display: grid; grid-template-columns: 1.2fr 1fr auto .5fr; align-items: center; gap: 12px; padding: 12px; cursor: pointer; color: var(--muted); font-size: 10px; }
+.analysis-history-list details > div { padding: 0 12px 12px; color: var(--muted); font-size: 10px; line-height: 1.6; }
 
 .validation-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 22px; }
 .validation-metrics,.health-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 9px; }
