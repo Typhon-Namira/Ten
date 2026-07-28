@@ -33,7 +33,11 @@ from backend.app.ai_reasoning.telemetry import (
 )
 from backend.app.core.feature_flags import FeatureFlag
 from backend.app.core.security import Role, require_role
-from backend.app.engines.market_data_engine.models import canonical_symbol
+from backend.app.engines.market_data_engine.freshness import (
+    evaluate_market_data_freshness,
+)
+from backend.app.engines.market_data_engine.models import Timeframe, canonical_symbol
+from backend.app.market_state.models import REQUIRED_TIMEFRAMES
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
 system_status_router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -1252,13 +1256,33 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         item.source_engine: item for item in (state.evidence if state is not None else ())
     }
     market_timestamp = getattr(state, "market_data_boundary", None)
-    stale = bool(market_timestamp and (now - market_timestamp).total_seconds() > 1200)
+    settings = request.app.state.settings
+    freshness = await evaluate_market_data_freshness(
+        request.app.state.market_data_service,
+        symbol=symbol,
+        timeframes=tuple(Timeframe(item) for item in REQUIRED_TIMEFRAMES),
+        worker_utc_now=now,
+        freshness_limit_seconds=settings.max_candle_staleness_seconds,
+        ums_market_timestamp=market_timestamp,
+    )
+    market_data_status = freshness["status"]
     stages["market_data"] = _system_stage(
         "market_data",
         "Market Data",
-        "no_data" if state is None else "stale" if stale else "healthy",
-        "awaiting_first_synchronized_candle" if state is None else "market_boundary_stale" if stale else "closed_candles_available",
-        timestamp=market_timestamp,
+        (
+            "healthy"
+            if market_data_status in {"FRESH", "MARKET_CLOSED"}
+            else "stale"
+        ),
+        (
+            "MARKET_CLOSED"
+            if market_data_status == "MARKET_CLOSED"
+            else "market_boundary_stale"
+            if market_data_status == "STALE"
+            else "closed_candles_available"
+        ),
+        timestamp=freshness["latest_candle_timestamp"],
+        details=freshness,
     )
     for stage_id, label in _PIPELINE_STAGES[1:7]:
         evidence = evidence_by_engine.get(stage_id)

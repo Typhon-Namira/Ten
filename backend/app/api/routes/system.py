@@ -55,12 +55,19 @@ async def diagnostics(request: Request) -> dict[str, object]:
     signal = await integration.repository.latest_signal(symbol.upper().replace("/", ""), timeframe.value)
     event_metrics = app.state.pipeline_manager.event_bus.metrics()
     feature_history = await app.state.pipeline_manager.feature_store.history(mode="live", instrument=symbol.upper().replace("/", ""), timeframe=timeframe.value, limit=1)
-    provider_stats = market.manager.statistics.get(settings.market_data_provider)
+    runtime_provider = market.manager.current_provider or settings.market_data_provider
+    provider_stats = market.manager.statistics.get(runtime_provider)
     replay_enabled = settings.replay_worker_enabled
     database_healthy = isinstance(market.repository, SqlAlchemyMarketDataRepository)
     market_worker = app.state.market_data_worker.status()
     integration_worker = app.state.integration_worker.status(settings.integration_worker_enabled)
-    history_initialized = candle_count >= settings.market_data_bootstrap_candles
+    provider_capabilities = market.manager.registry.get(runtime_provider).capabilities
+    required_candle_count = min(
+        settings.market_data_bootstrap_candles,
+        provider_capabilities.maximum_history_candles
+        or settings.market_data_bootstrap_candles,
+    )
+    history_initialized = candle_count >= required_candle_count
     # Measured from the candle's CLOSE time, matching the integration layer's own freshness gate
     # (`FullSystemIntegrationService.process()`'s `age = clock() - envelope.payload.close_time`).
     # Measuring from open time (the previous formula) understated a candle's real age by a full
@@ -102,11 +109,12 @@ async def diagnostics(request: Request) -> dict[str, object]:
             "mode": "postgresql" if database_healthy else "memory",
         },
         "provider": {
-            "name": settings.market_data_provider,
+            "name": runtime_provider,
+            "preferred_provider": settings.market_data_provider,
             "configured_symbol": symbol,
-            "provider_symbol": provider_symbol(settings.market_data_provider, symbol),
+            "provider_symbol": provider_symbol(runtime_provider, symbol),
             "status": "healthy" if provider_stats and provider_stats.healthy else "unavailable" if provider_stats is None else "degraded",
-            "authentication_configured": settings.market_data_provider in market.manager.statistics,
+            "authentication_configured": runtime_provider in market.manager.statistics,
             "last_success_at": provider_stats.last_success_at if provider_stats else None,
             "last_failure_at": provider_stats.last_failure_at if provider_stats else None,
             "last_error": provider_stats.last_error if provider_stats else "ProviderNotConfigured",
@@ -121,7 +129,12 @@ async def diagnostics(request: Request) -> dict[str, object]:
             "latest_candle_age_seconds": candle_age_seconds,
             "freshness": "absent" if candle is None else "fresh" if candle_fresh else "stale",
         },
-        "history": {"candle_count": candle_count, "required_candle_count": settings.market_data_bootstrap_candles, "initialized": history_initialized},
+        "history": {
+            "candle_count": candle_count,
+            "required_candle_count": required_candle_count,
+            "requested_bootstrap_candle_count": settings.market_data_bootstrap_candles,
+            "initialized": history_initialized,
+        },
         "workers": {
             "market_data_worker": market_worker,
             "integration_worker": integration_worker,
