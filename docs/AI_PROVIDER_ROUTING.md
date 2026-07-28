@@ -34,7 +34,17 @@ TEN_GROQ_MAX_RETRIES_PER_ACCOUNT=1
 TEN_GROQ_RATE_LIMIT_COOLDOWN_SECONDS=3600
 TEN_GROQ_QUOTA_COOLDOWN_SECONDS=86400
 TEN_GROQ_POOL_STRATEGY=ordered_failover
+TEN_AI_OUTPUT_PROFILE=compact
+TEN_AI_TARGET_OUTPUT_TOKENS=900
+TEN_AI_MAX_OUTPUT_TOKENS=1400
+TEN_AI_INPUT_TOKEN_BUDGET=3500
+TEN_AI_TOKEN_SAFETY_MARGIN=256
 ```
+
+Five-minute production analysis uses the compact output profile. A provider
+`finish_reason=length` consumes at most one fresh `compact_retry` on the same
+account. Output-budget failures never open an account circuit and never trigger
+four-account failover.
 
 `TEN_GROQ_API_KEY` is temporarily accepted only when
 `TEN_GROQ_API_KEY_1` is absent. It maps to `groq_1`, emits a deprecation warning,

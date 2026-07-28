@@ -66,6 +66,14 @@ class AIProviderFailureDetails:
     provider_input_tokens: int | None = None
     provider_output_tokens: int | None = None
     provider_total_tokens: int | None = None
+    target_output_tokens: int | None = None
+    hard_output_limit: int | None = None
+    output_profile: str | None = None
+    analysis_schema_version: str | None = None
+    input_budget_utilization_percent: float | None = None
+    token_estimator: str | None = None
+    context_sections_included: tuple[str, ...] = ()
+    context_sections_omitted: tuple[str, ...] = ()
     schema_error_code: str | None = None
     schema_error_path: str | None = None
     fallback_used: bool = False

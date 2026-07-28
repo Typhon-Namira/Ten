@@ -23,6 +23,25 @@ class AIReasoningConfig(BaseModel):
     maximum_retries: int = Field(ge=0, le=1)
     temperature: float = Field(ge=0, le=1)
     max_tokens: int = Field(ge=256, le=10000)
+    output_profile: Literal["compact", "standard", "expanded"] = "compact"
+    target_output_tokens: int = Field(default=900, ge=256, le=10_000)
+    input_token_budget: int = Field(default=3_500, ge=512, le=100_000)
+    token_safety_margin: int = Field(default=256, ge=64, le=4096)
+    model_context_limit: int = Field(default=8192, ge=2048, le=1_000_000)
+    truncation_degraded_threshold: float = Field(default=0.05, ge=0, le=1)
+    truncation_unhealthy_threshold: float = Field(default=0.20, ge=0, le=1)
+    zero_completion_cycle_threshold: int = Field(default=3, ge=1, le=100)
+    provider_calls_per_analysis_degraded_threshold: float = Field(
+        default=1.5,
+        ge=1,
+        le=10,
+    )
+    schema_correction_degraded_threshold: float = Field(default=0.10, ge=0, le=1)
+    tokens_per_analysis_degraded_threshold: int = Field(
+        default=6_000,
+        ge=1_000,
+        le=1_000_000,
+    )
     request_timeout_seconds: float = Field(gt=0)
     llm_concurrency_limit: int = Field(ge=1, le=32)
     provider_backoff_initial_seconds: float = Field(gt=0)
@@ -50,6 +69,17 @@ class AIReasoningConfig(BaseModel):
             raise ValueError("AI input-token thresholds must be ordered")
         if self.max_tokens > self.absolute_max_output_tokens:
             raise ValueError("AI max_tokens exceeds the absolute output-token limit")
+        if self.target_output_tokens > self.max_tokens:
+            raise ValueError("AI target output tokens exceed the hard output limit")
+        if (
+            self.input_token_budget
+            + self.max_tokens
+            + self.token_safety_margin
+            > self.model_context_limit
+        ):
+            raise ValueError("AI input and output reservations exceed model context")
+        if self.truncation_degraded_threshold > self.truncation_unhealthy_threshold:
+            raise ValueError("AI truncation health thresholds must be ordered")
         if self.temporal_lookback_minutes != (5, 15, 30, 60, 240):
             raise ValueError("temporal lookback anchors must remain 5m, 15m, 30m, 1h, and 4h")
         return self

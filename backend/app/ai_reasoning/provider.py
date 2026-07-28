@@ -15,7 +15,7 @@ import re
 from time import perf_counter
 from typing import Any, Protocol, cast
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from backend.app.ai.provider_client import (
     AIProviderClient,
@@ -26,9 +26,18 @@ from backend.app.ai.provider_client import (
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.core.exceptions import AIProviderFailureDetails, AIProviderRequestError
 
-from .llm_context import build_llm_analysis_context
 from .analysis import AIAnalysisOutput
+from .compact_output import (
+    CompactAIAnalysisOutput,
+    CompactOutputValidationError,
+    CompactRetryAIAnalysisOutput,
+    normalize_descriptive_overflow,
+    resolve_compact_output,
+    validate_evidence_references,
+)
+from .llm_context import build_llm_analysis_context, provider_context_payload
 from .models import AIReasoningRequest
+from .token_budget import OutputProfile, TokenBudgetManager
 
 logger = logging.getLogger(__name__)
 AI_REASONING_RESPONSE_SCHEMA_TYPE = "ten_ai_reasoning_response"
@@ -58,6 +67,8 @@ class ProviderRuntimeState:
     last_failure_code: str | None = None
     last_http_status: int | None = None
     last_provider_error_code: str | None = None
+    last_request_result: str | None = None
+    request_policy_failures: int = 0
     recent_failures: list[datetime] = field(default_factory=list)
     calls_today: int = 0
     successful_analyses: int = 0
@@ -103,6 +114,10 @@ class ProviderRuntimeState:
                 else "AVAILABLE"
             ),
             "last_request_status": self.last_http_status,
+            "last_request_result": self.last_request_result,
+            "request_policy_health": (
+                "degraded" if self.request_policy_failures else "healthy"
+            ),
             "calls_today": self.calls_today,
             "successful_analyses": self.successful_analyses,
             "provider_failures": self.provider_failures,
@@ -139,18 +154,26 @@ class AIReasoningProvider(Protocol):
     def metadata(self) -> dict[str, object]: ...
 
 
-def reasoning_response_schema() -> dict[str, Any]:
+def reasoning_response_schema(
+    profile: OutputProfile | str = OutputProfile.COMPACT,
+) -> dict[str, Any]:
     """Strict application schema used for Groq JSON-output validation."""
 
+    selected = OutputProfile(profile)
+    model: type[BaseModel]
+    if selected == OutputProfile.COMPACT_RETRY:
+        model = CompactRetryAIAnalysisOutput
+    elif selected == OutputProfile.COMPACT:
+        model = CompactAIAnalysisOutput
+    else:
+        model = AIAnalysisOutput
     unsupported_keywords = {
         "title",
         "default",
         "description",
         "format",
         "minLength",
-        "maxLength",
         "minItems",
-        "maxItems",
         # Numeric bounds remain enforced by the unchanged Pydantic
         # domain schema after decoding. Omitting them from the wire
         # contract stays compact without weakening application validation.
@@ -178,7 +201,7 @@ def reasoning_response_schema() -> dict[str, Any]:
             return [compact(item) for item in value]
         return value
 
-    return cast(dict[str, Any], compact(AIAnalysisOutput.model_json_schema()))
+    return cast(dict[str, Any], compact(model.model_json_schema()))
 
 
 def _schema_issue(exc: ValidationError) -> tuple[str, str, str, str]:
@@ -193,6 +216,10 @@ def _schema_issue(exc: ValidationError) -> tuple[str, str, str, str]:
         code = "missing_required_field"
     elif error_type == "extra_forbidden":
         code = "unexpected_field"
+    elif error_type == "string_too_long":
+        code = "text_too_long"
+    elif error_type in {"too_long", "list_too_long", "tuple_too_long"}:
+        code = "too_many_items"
     elif "enum" in error_type or "literal" in error_type:
         code = "invalid_enum"
     elif any(marker in error_type for marker in ("greater", "less", "multiple")):
@@ -256,6 +283,10 @@ class _OpenAICompatibleReasoningProvider:
         input_cost_per_million_usd: float,
         output_cost_per_million_usd: float,
         setup_family_ids: tuple[str, ...],
+        output_profile: OutputProfile | str = OutputProfile.COMPACT,
+        target_output_tokens: int | None = None,
+        token_safety_margin: int = 256,
+        model_context_limit: int = 8192,
     ) -> None:
         self.client = client
         self.prompts = prompts
@@ -270,6 +301,15 @@ class _OpenAICompatibleReasoningProvider:
         self.input_cost_per_million_usd = input_cost_per_million_usd
         self.output_cost_per_million_usd = output_cost_per_million_usd
         self.setup_family_ids = setup_family_ids
+        self.token_budgets = TokenBudgetManager(
+            model=model,
+            output_profile=output_profile,
+            model_context_limit=model_context_limit,
+            maximum_input_tokens=min(target_input_tokens, hard_input_tokens),
+            target_output_tokens=target_output_tokens,
+            hard_output_limit=max_tokens,
+            safety_margin_tokens=token_safety_margin,
+        )
         self.http_calls = 0
         self.correction_attempts = 0
 
@@ -287,35 +327,68 @@ class _OpenAICompatibleReasoningProvider:
         fallback_reason: str | None = None,
         correction_instruction: str | None = None,
         previous_response_fragment: str | None = None,
+        output_profile: OutputProfile | str | None = None,
+        request_kind_override: str | None = None,
     ) -> AIProviderResponse:
         started = perf_counter()
-        schema = reasoning_response_schema()
+        selected_profile = OutputProfile(
+            output_profile or self.token_budgets.output_profile
+        )
+        schema = reasoning_response_schema(selected_profile)
+        included_sections: tuple[str, ...] = ()
+        omitted_sections: tuple[str, ...] = ()
         if correction_instruction:
             system_prompt = (
                 "Return exactly one compact JSON object and nothing else. "
                 "Correct the supplied response according to validation_error. "
                 "Do not invent market facts or emit trading actions."
             )
+            previous_response: object = previous_response_fragment
+            if previous_response_fragment:
+                try:
+                    # Keep a complete response as structured JSON. Passing an
+                    # already-serialized JSON string makes the wire payload
+                    # escape every quote and needlessly increases correction
+                    # input tokens.
+                    previous_response = json.loads(previous_response_fragment)
+                except json.JSONDecodeError:
+                    # A bounded malformed fragment is still useful for a JSON
+                    # parse correction, but must remain explicitly a string.
+                    previous_response = previous_response_fragment
             payload = {
-                "required_top_level_fields": schema["required"],
-                "additional_properties_allowed": False,
                 "validation_error": correction_instruction,
-                "previous_response": previous_response_fragment,
+                "previous_response": previous_response,
             }
         else:
             context = build_llm_analysis_context(request)
+            compact_context, included_sections, omitted_sections = (
+                provider_context_payload(context, selected_profile)
+            )
             payload = {
-                "analysis_context": context.model_dump(mode="json"),
-                "response_contract": self._response_contract(),
+                "analysis_context": compact_context,
+                "response_contract": self._response_contract(selected_profile),
             }
             system_prompt = self.prompts.load(prompt_version)
+        contract = self._response_contract(selected_profile)
+        plan = self.token_budgets.plan(
+            system_prompt=system_prompt,
+            context=(
+                cast(dict[str, Any], payload.get("analysis_context"))
+                if isinstance(payload.get("analysis_context"), dict)
+                else payload
+            ),
+            schema=contract,
+            profile=selected_profile,
+            included_sections=included_sections,
+            omitted_sections=omitted_sections,
+        )
         wire_schema = schema if self.supports_strict_json_schema else None
         request_body = build_request_body(
             system_prompt=system_prompt,
             payload=payload,
             model=self.model,
             temperature=self.temperature,
-            max_tokens=self.max_tokens,
+            max_tokens=plan.hard_output_limit,
             response_schema=wire_schema,
         )
         metrics = measure_request_body(
@@ -335,14 +408,26 @@ class _OpenAICompatibleReasoningProvider:
                 "maximum_output_tokens": metrics.maximum_output_tokens,
                 "estimated_maximum_cost_usd": metrics.estimated_maximum_cost_usd,
                 "response_schema_bytes": metrics.response_schema_bytes,
+                "output_profile": selected_profile.value,
+                "target_output_tokens": plan.target_output_tokens,
+                "hard_output_limit": plan.hard_output_limit,
+                "token_estimator": plan.estimator,
+                "input_budget_utilization_percent": (
+                    plan.input_budget_utilization_percent
+                ),
+                "schema_token_cost": plan.schema_token_cost,
+                "context_token_cost": plan.context_token_cost,
+                "prompt_token_cost": plan.prompt_token_cost,
+                "context_sections_included": plan.context_sections_included,
+                "context_sections_omitted": plan.context_sections_omitted,
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
             },
         )
         rejection_reason: str | None = None
-        if metrics.maximum_output_tokens > self.absolute_max_output_tokens:
+        if plan.hard_output_limit > self.absolute_max_output_tokens:
             rejection_reason = "maximum_output_tokens_exceeded"
-        elif metrics.estimated_input_tokens > self.hard_input_tokens:
+        elif plan.estimated_input_tokens > plan.maximum_input_tokens:
             rejection_reason = "request_too_large"
         elif metrics.estimated_maximum_cost_usd > self.maximum_request_cost_usd:
             rejection_reason = "maximum_cost_exceeded"
@@ -359,8 +444,9 @@ class _OpenAICompatibleReasoningProvider:
                     error_code=rejection_reason,
                     error_message=(
                         f"preflight rejected bytes={metrics.serialized_request_bytes} "
-                        f"estimated_input_tokens={metrics.estimated_input_tokens} "
-                        f"maximum_output_tokens={metrics.maximum_output_tokens}"
+                        f"estimated_input_tokens={plan.estimated_input_tokens} "
+                        f"maximum_input_tokens={plan.maximum_input_tokens} "
+                        f"maximum_output_tokens={plan.hard_output_limit}"
                     ),
                     body_length=metrics.serialized_request_bytes,
                     exception_class="AIProviderRequestBudgetError",
@@ -371,36 +457,58 @@ class _OpenAICompatibleReasoningProvider:
         # This increment is intentionally adjacent to the transport call. Preflight
         # rejections, scheduler ticks, cache reads, and dashboard reads never reach it.
         self.http_calls += 1
-        request_kind = (
+        request_kind = request_kind_override or (
             "schema_correction"
             if correction_instruction
             else "transport_retry"
             if attempt > 1
             else "analysis"
         )
-        completion = await self.client.complete_json(
-            system_prompt=system_prompt,
-            payload=payload,
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            response_schema=wire_schema,
-            request_id=str(request.request_id),
-            cycle_id=str(request.cycle_id),
-            instrument=request.instrument,
-            ums_boundary=request.analysis_timestamp.isoformat(),
-            trigger="five_minute_analysis_worker",
-            idempotency_key=request.idempotency_key,
-            time_bucket=(
-                request.analysis_time_bucket.isoformat()
-                if request.analysis_time_bucket
-                else None
-            ),
-            attempt=attempt,
-            fallback_used=fallback_used,
-            fallback_reason=fallback_reason,
-            attempt_type=request_kind,
-        )
+        try:
+            completion = await self.client.complete_json(
+                system_prompt=system_prompt,
+                payload=payload,
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=plan.hard_output_limit,
+                response_schema=wire_schema,
+                request_id=str(request.request_id),
+                cycle_id=str(request.cycle_id),
+                instrument=request.instrument,
+                ums_boundary=request.analysis_timestamp.isoformat(),
+                trigger="five_minute_analysis_worker",
+                idempotency_key=request.idempotency_key,
+                time_bucket=(
+                    request.analysis_time_bucket.isoformat()
+                    if request.analysis_time_bucket
+                    else None
+                ),
+                attempt=attempt,
+                fallback_used=fallback_used,
+                fallback_reason=fallback_reason,
+                attempt_type=request_kind,
+            )
+        except AIProviderRequestError as exc:
+            details = replace(
+                exc.details,
+                target_output_tokens=plan.target_output_tokens,
+                hard_output_limit=plan.hard_output_limit,
+                output_profile=plan.output_profile.value,
+                analysis_schema_version=(
+                    "compact-retry-1.0"
+                    if plan.output_profile == OutputProfile.COMPACT_RETRY
+                    else "compact-1.0"
+                    if plan.output_profile == OutputProfile.COMPACT
+                    else "standard-1.0"
+                ),
+                input_budget_utilization_percent=(
+                    plan.input_budget_utilization_percent
+                ),
+                token_estimator=plan.estimator,
+                context_sections_included=plan.context_sections_included,
+                context_sections_omitted=plan.context_sections_omitted,
+            )
+            raise AIProviderRequestError(details) from exc
         return self._response(
             completion,
             started,
@@ -408,6 +516,7 @@ class _OpenAICompatibleReasoningProvider:
             fallback_reason,
             request_kind,
             attempt,
+            plan,
         )
 
     def metadata(self) -> dict[str, object]:
@@ -427,6 +536,7 @@ class _OpenAICompatibleReasoningProvider:
         fallback_reason: str | None,
         request_kind: str,
         request_sequence: int,
+        plan: Any,
     ) -> AIProviderResponse:
         decoded_json = json.dumps(
             completion.content,
@@ -476,23 +586,113 @@ class _OpenAICompatibleReasoningProvider:
                 "extraction_note": completion.extraction_note,
                 "request_kind": request_kind,
                 "request_sequence": request_sequence,
+                "target_output_tokens": plan.target_output_tokens,
+                "hard_output_limit": plan.hard_output_limit,
+                "output_profile": plan.output_profile.value,
+                "analysis_schema_version": (
+                    "compact-retry-1.0"
+                    if plan.output_profile == OutputProfile.COMPACT_RETRY
+                    else "compact-1.0"
+                    if plan.output_profile == OutputProfile.COMPACT
+                    else "standard-1.0"
+                ),
+                "input_budget_utilization_percent": (
+                    plan.input_budget_utilization_percent
+                ),
+                "context_sections_included": plan.context_sections_included,
+                "context_sections_omitted": plan.context_sections_omitted,
+                "token_estimator": plan.estimator,
             },
         )
 
-    def _response_contract(self) -> dict[str, Any]:
-        schema = reasoning_response_schema()
+    def _response_contract(
+        self,
+        profile: OutputProfile = OutputProfile.COMPACT,
+    ) -> dict[str, Any]:
+        rules = [
+            "one JSON object; exact schema; no markdown or prose",
+            "use only supplied evidence IDs",
+            "analysis only; no trade, proposal, execution, or private reasoning",
+        ]
+        if profile in {OutputProfile.STANDARD, OutputProfile.EXPANDED}:
+            return {
+                "json_schema": reasoning_response_schema(profile),
+                "rules": rules,
+            }
+        if profile == OutputProfile.COMPACT_RETRY:
+            shape = {
+                "analysis_schema_version": "compact-retry-1.0",
+                "output_profile": "compact_retry",
+                "market_regime": {
+                    "classification": "bullish|bearish|ranging|transitional|uncertain",
+                    "strength": "0..100",
+                    "confidence": "0..1",
+                    "evidence_refs": "array<=2",
+                },
+                "higher_timeframe_context": {
+                    "bias": "bullish|bearish|neutral|mixed|uncertain",
+                    "summary": "text<=180",
+                    "evidence_refs": "array<=2",
+                },
+                "market_structure": {
+                    "short_term": "text<=120",
+                    "medium_term": "text<=180",
+                    "recent_change": "text<=120",
+                    "evidence_refs": "array<=2",
+                },
+                "liquidity_analysis": {
+                    "summary": "text<=180",
+                    "events": "array<=2;text<=100",
+                    "unresolved": "array<=2;text<=100",
+                    "evidence_refs": "array<=2",
+                },
+                "supply_demand_analysis": {
+                    "summary": "text<=160",
+                    "nearest_supply": "positive|null",
+                    "nearest_demand": "positive|null",
+                    "evidence_refs": "array<=2",
+                },
+                "momentum_analysis": {
+                    "direction": "bullish|bearish|neutral|mixed|uncertain",
+                    "strength": "0..100",
+                    "trend": "strengthening|weakening|stable|uncertain",
+                    "evidence_refs": "array<=2",
+                },
+                "volatility_analysis": {
+                    "state": "low|normal|high|extreme|uncertain",
+                    "trend": "expanding|contracting|stable|uncertain",
+                    "evidence_refs": "array<=2",
+                },
+                "bullish_evidence_refs": "array<=2",
+                "bearish_evidence_refs": "array<=2",
+                "contradiction_refs": "array<=2",
+                "key_risk_refs": "array<=2",
+                "invalidation_conditions": "array<=2;text<=160",
+                "data_quality_warnings": "array<=2;text<=120",
+                "analysis_confidence": "0..1",
+            }
+        else:
+            retry_shape = self._response_contract(
+                OutputProfile.COMPACT_RETRY
+            )["shape"]
+            shape = {
+                **cast(dict[str, Any], retry_shape),
+                "analysis_schema_version": "compact-1.0",
+                "output_profile": "compact",
+                "bullish_evidence_refs": "array<=3",
+                "bearish_evidence_refs": "array<=3",
+                "contradiction_refs": "array<=3",
+                "key_risk_refs": "array<=3",
+                "data_quality_warnings": "array<=3;text<=120",
+                "alternative_scenarios": (
+                    "array<=2:{name<=60,description<=180,probability=0..1,"
+                    "evidence_refs<=2}"
+                ),
+                "executive_summary": "text<=320",
+            }
         return {
-            # Groq JSON Object Mode does not receive response_format.json_schema,
-            # so the complete schema must be present in the prompt payload.
-            "json_schema": schema,
-            "rules": [
-                "return exactly one JSON object matching the supplied schema",
-                "return no markdown and no prose outside the JSON object",
-                "do not include chain-of-thought or private reasoning",
-                "do not recommend BUY, SELL, WAIT, LONG, SHORT, HOLD, or any trading action",
-                "do not emit a proposal, setup family, entry, stop loss, target, readiness, or publication decision",
-                "reference only evidence present in analysis_context and never invent evidence",
-            ],
+            "shape": shape,
+            "rules": rules,
         }
 
 
@@ -519,6 +719,10 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         input_cost_per_million_usd: float,
         output_cost_per_million_usd: float,
         setup_family_ids: tuple[str, ...],
+        output_profile: OutputProfile | str = OutputProfile.COMPACT,
+        target_output_tokens: int | None = None,
+        token_safety_margin: int = 256,
+        model_context_limit: int = 8192,
     ) -> None:
         self.provider_name = account_id
         super().__init__(
@@ -535,6 +739,10 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             input_cost_per_million_usd=input_cost_per_million_usd,
             output_cost_per_million_usd=output_cost_per_million_usd,
             setup_family_ids=setup_family_ids,
+            output_profile=output_profile,
+            target_output_tokens=target_output_tokens,
+            token_safety_margin=token_safety_margin,
+            model_context_limit=model_context_limit,
         )
         self.request_attempts: list[dict[str, Any]] = []
         self.attempt_counters = {
@@ -545,6 +753,14 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             "initial_schema_validation_failures": 0,
             "schema_corrections_succeeded": 0,
             "schema_corrections_failed": 0,
+            "truncated_outputs": 0,
+            "compact_retries": 0,
+            "request_policy_failures": 0,
+            "provider_http_successes": 0,
+            "schema_valid_analyses": 0,
+            "provider_input_tokens": 0,
+            "provider_output_tokens": 0,
+            "provider_total_tokens": 0,
         }
 
     def _record_attempt(
@@ -623,6 +839,61 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             "prompt_character_count": (
                 metadata.get("prompt_character_count") if response else None
             ),
+            "target_output_tokens": (
+                metadata.get("target_output_tokens")
+                if response
+                else error.target_output_tokens if error else None
+            ),
+            "hard_output_limit": (
+                metadata.get("hard_output_limit")
+                if response
+                else error.hard_output_limit if error else None
+            ),
+            "output_profile": (
+                metadata.get("output_profile")
+                if response
+                else error.output_profile if error else None
+            ),
+            "analysis_schema_version": (
+                metadata.get("analysis_schema_version")
+                if response
+                else error.analysis_schema_version if error else None
+            ),
+            "input_budget_utilization_percent": (
+                metadata.get("input_budget_utilization_percent")
+                if response
+                else error.input_budget_utilization_percent if error else None
+            ),
+            "output_budget_utilization_percent": (
+                round(
+                    usage["output_tokens"]
+                    / max(1, cast(int, metadata["hard_output_limit"]))
+                    * 100,
+                    2,
+                )
+                if usage
+                and isinstance(usage.get("output_tokens"), int)
+                and isinstance(metadata.get("hard_output_limit"), int)
+                else None
+            ),
+            "token_estimator": (
+                metadata.get("token_estimator")
+                if response
+                else error.token_estimator if error else None
+            ),
+            "context_sections_included": (
+                metadata.get("context_sections_included", ())
+                if response
+                else error.context_sections_included if error else ()
+            ),
+            "context_sections_omitted": (
+                metadata.get("context_sections_omitted", ())
+                if response
+                else error.context_sections_omitted if error else ()
+            ),
+            "fields_completed_before_failure": (
+                len(response.raw_output) if response else None
+            ),
             "schema_valid": schema_valid,
             "schema_error_code": schema_error_code or (
                 error.schema_error_code if error else None
@@ -631,6 +902,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 error.schema_error_path if error else None
             ),
             "schema_correction_triggered": correction_triggered,
+            "compact_retry_triggered": request_kind == "compact_retry",
             "limit_classification": (
                 error.limit_classification if error else None
             ),
@@ -648,6 +920,22 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             self.attempt_counters[counter] += 1
         if item["http_status"] == 429:
             self.attempt_counters["http_429_responses"] += 1
+        if item["http_status"] == 200:
+            self.attempt_counters["provider_http_successes"] += 1
+        for usage_key, counter_key in (
+            ("input_tokens", "provider_input_tokens"),
+            ("output_tokens", "provider_output_tokens"),
+            ("total_tokens", "provider_total_tokens"),
+        ):
+            usage_value = item.get(usage_key)
+            if isinstance(usage_value, int):
+                self.attempt_counters[counter_key] += usage_value
+        if schema_valid:
+            self.attempt_counters["schema_valid_analyses"] += 1
+        if schema_error_code in {"finish_reason_length", "truncated_response"}:
+            self.attempt_counters["truncated_outputs"] += 1
+        if request_kind == "compact_retry":
+            self.attempt_counters["compact_retries"] += 1
         if request_kind == "analysis" and schema_valid is False:
             if schema_error_code in {
                 "empty_response",
@@ -702,7 +990,10 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         fallback_reason: str | None = None,
         correction_instruction: str | None = None,
         previous_response_fragment: str | None = None,
+        output_profile: OutputProfile | str | None = None,
+        request_kind_override: str | None = None,
     ) -> AIProviderResponse:
+        del previous_response_fragment, output_profile, request_kind_override
         request_kind = "schema_correction" if correction_instruction else "analysis"
         initial_response: AIProviderResponse | None = None
         previous_fragment: str | None = None
@@ -714,6 +1005,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 fallback_used=fallback_used,
                 fallback_reason=fallback_reason,
                 correction_instruction=correction_instruction,
+                output_profile=OutputProfile.COMPACT,
             )
         except AIProviderRequestError as exc:
             self._record_attempt(
@@ -724,6 +1016,15 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 schema_valid=False,
                 schema_error_code=exc.details.schema_error_code,
             )
+            if exc.details.reason_code == "truncated_response":
+                return await self._compact_retry(
+                    request,
+                    prompt_version=prompt_version,
+                    attempt=attempt + 1,
+                    fallback_used=fallback_used,
+                    fallback_reason="output_truncated",
+                    initial_usage=self._failure_usage(exc.details),
+                )
             if exc.details.reason_code not in {"response_decoding_failed"}:
                 raise
             correction_instruction = (
@@ -735,50 +1036,51 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             normalized, removed = _normalized_contract_output(response.raw_output)
             if removed:
                 response = replace(response, raw_output=normalized)
-            try:
-                AIAnalysisOutput.model_validate(response.raw_output)
+            finish_reason = (
+                response.operational_metadata.get("finish_reason")
+                if response.operational_metadata
+                else None
+            )
+            if finish_reason == "length":
                 self._record_attempt(
                     request,
                     request_kind=request_kind,
                     request_sequence=attempt,
                     response=response,
+                    schema_valid=False,
+                    schema_error_code="finish_reason_length",
+                    schema_error_path="provider_response",
+                )
+                return await self._compact_retry(
+                    request,
+                    prompt_version=prompt_version,
+                    attempt=attempt + 1,
+                    fallback_used=fallback_used,
+                    fallback_reason="output_truncated",
+                    initial_usage=response.token_usage,
+                )
+            try:
+                resolved = self._validate_and_resolve(
+                    response,
+                    request,
+                    OutputProfile.COMPACT,
+                )
+                self._record_attempt(
+                    request,
+                    request_kind=request_kind,
+                    request_sequence=attempt,
+                    response=resolved,
                     schema_valid=True,
                 )
-                return response
+                return resolved
             except ValidationError as exc:
                 code, field_path, expected, fragment = _schema_issue(exc)
-                finish_reason = (
-                    response.operational_metadata.get("finish_reason")
-                    if response.operational_metadata
-                    else None
-                )
-                if finish_reason == "length":
-                    code = "finish_reason_length"
-                    self._record_attempt(
-                        request,
-                        request_kind=request_kind,
-                        request_sequence=attempt,
-                        response=response,
-                        schema_valid=False,
-                        schema_error_code=code,
-                        schema_error_path=field_path,
-                    )
-                    raise AIProviderRequestError(
-                        AIProviderFailureDetails(
-                            provider=self.provider_name,
-                            reason_code="truncated_response",
-                            phase="structured_output_validation",
-                            endpoint=f"{self.client.base_url}/chat/completions",
-                            model=self.model,
-                            request_id=str(request.request_id),
-                            cycle_id=str(request.cycle_id),
-                            http_status=200,
-                            finish_reason="length",
-                            schema_error_code=code,
-                            schema_error_path=field_path,
-                            exception_class="ProviderOutputTruncated",
-                        )
-                    ) from exc
+            except CompactOutputValidationError as exc:
+                code = exc.code
+                field_path = exc.path
+                expected = str(exc)
+                fragment = "{}"
+            if "code" in locals():
                 correction_instruction = (
                     f"{code} at {field_path}: {expected}. "
                     f"Invalid fragment: {fragment}"
@@ -841,7 +1143,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                             ),
                             exception_class="SchemaCorrectionCapacityUnavailable",
                         )
-                    ) from exc
+                    )
 
         logger.warning(
             "ai_provider.correction.started",
@@ -875,6 +1177,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 fallback_reason=fallback_reason,
                 correction_instruction=correction_instruction,
                 previous_response_fragment=previous_fragment,
+                output_profile=OutputProfile.COMPACT,
             )
         except AIProviderRequestError as exc:
             self._record_attempt(
@@ -889,7 +1192,11 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         corrected_raw, _ = _normalized_contract_output(corrected.raw_output)
         corrected = replace(corrected, raw_output=corrected_raw)
         try:
-            AIAnalysisOutput.model_validate(corrected.raw_output)
+            resolved = self._validate_and_resolve(
+                corrected,
+                request,
+                OutputProfile.COMPACT,
+            )
         except ValidationError as exc:
             code, path, _, _ = _schema_issue(exc)
             self._record_attempt(
@@ -901,20 +1208,244 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 schema_error_code=code,
                 schema_error_path=path,
             )
-        else:
+            return corrected
+        except CompactOutputValidationError as exc:
             self._record_attempt(
                 request,
                 request_kind="schema_correction",
                 request_sequence=attempt + 1,
                 response=corrected,
+                schema_valid=False,
+                schema_error_code=exc.code,
+                schema_error_path=exc.path,
+            )
+            return corrected
+        else:
+            self._record_attempt(
+                request,
+                request_kind="schema_correction",
+                request_sequence=attempt + 1,
+                response=resolved,
                 schema_valid=True,
             )
         return replace(
-            corrected,
+            resolved,
             token_usage=_combined_usage(
                 initial_response.token_usage if initial_response else None,
                 corrected.token_usage,
             ),
+        )
+
+    @staticmethod
+    def _failure_usage(
+        details: AIProviderFailureDetails,
+    ) -> dict[str, int] | None:
+        usage = {
+            key: value
+            for key, value in (
+                ("input_tokens", details.provider_input_tokens),
+                ("output_tokens", details.provider_output_tokens),
+                ("total_tokens", details.provider_total_tokens),
+            )
+            if value is not None
+        }
+        return usage or None
+
+    def _validate_and_resolve(
+        self,
+        response: AIProviderResponse,
+        request: AIReasoningRequest,
+        profile: OutputProfile,
+    ) -> AIProviderResponse:
+        normalized, changes = normalize_descriptive_overflow(response.raw_output)
+        if "analysis_schema_version" not in normalized:
+            standard = AIAnalysisOutput.model_validate(normalized)
+            metadata = dict(response.operational_metadata or {})
+            metadata["output_profile"] = "standard"
+            metadata["analysis_schema_version"] = "standard-1.0"
+            metadata["local_descriptive_normalizations"] = changes
+            return replace(
+                response,
+                raw_output=standard.model_dump(mode="json"),
+                operational_metadata=metadata,
+            )
+        context = build_llm_analysis_context(request)
+        wire: CompactAIAnalysisOutput | CompactRetryAIAnalysisOutput
+        if profile == OutputProfile.COMPACT_RETRY:
+            wire = CompactRetryAIAnalysisOutput.model_validate(normalized)
+        else:
+            wire = CompactAIAnalysisOutput.model_validate(normalized)
+        validate_evidence_references(wire, context.evidence_catalog)
+        resolved = resolve_compact_output(wire, context.evidence_catalog)
+        metadata = dict(response.operational_metadata or {})
+        metadata["local_descriptive_normalizations"] = changes
+        return replace(
+            response,
+            raw_output=resolved.model_dump(mode="json"),
+            operational_metadata=metadata,
+        )
+
+    async def _compact_retry(
+        self,
+        request: AIReasoningRequest,
+        *,
+        prompt_version: str,
+        attempt: int,
+        fallback_used: bool,
+        fallback_reason: str,
+        initial_usage: dict[str, int] | None,
+    ) -> AIProviderResponse:
+        logger.warning(
+            "ai_provider.compact_retry.started",
+            extra={
+                "provider": self.provider_name,
+                "analysis_job_id": str(request.request_id),
+                "eligible_cycle_id": str(request.cycle_id),
+                "request_kind": "compact_retry",
+                "request_sequence": attempt,
+                "previous_output_included": False,
+            },
+        )
+        try:
+            retry = await super().reason(
+                request,
+                prompt_version=prompt_version,
+                attempt=attempt,
+                fallback_used=fallback_used,
+                fallback_reason=fallback_reason,
+                output_profile=OutputProfile.COMPACT_RETRY,
+                request_kind_override="compact_retry",
+            )
+        except AIProviderRequestError as exc:
+            self._record_attempt(
+                request,
+                request_kind="compact_retry",
+                request_sequence=attempt,
+                error=exc.details,
+                schema_valid=False,
+                schema_error_code=(
+                    "finish_reason_length"
+                    if exc.details.reason_code == "truncated_response"
+                    else exc.details.schema_error_code
+                ),
+            )
+            if exc.details.reason_code != "truncated_response":
+                raise
+            self.attempt_counters["request_policy_failures"] += 1
+            raise self._output_budget_error(request, exc.details) from exc
+        finish_reason = (
+            retry.operational_metadata.get("finish_reason")
+            if retry.operational_metadata
+            else None
+        )
+        if finish_reason == "length":
+            self._record_attempt(
+                request,
+                request_kind="compact_retry",
+                request_sequence=attempt,
+                response=retry,
+                schema_valid=False,
+                schema_error_code="finish_reason_length",
+            )
+            self.attempt_counters["request_policy_failures"] += 1
+            raise self._output_budget_error(request)
+        try:
+            resolved = self._validate_and_resolve(
+                retry,
+                request,
+                OutputProfile.COMPACT_RETRY,
+            )
+        except (ValidationError, CompactOutputValidationError) as exc:
+            if isinstance(exc, ValidationError):
+                code, path, _, _ = _schema_issue(exc)
+            else:
+                code, path = exc.code, exc.path
+            self._record_attempt(
+                request,
+                request_kind="compact_retry",
+                request_sequence=attempt,
+                response=retry,
+                schema_valid=False,
+                schema_error_code=code,
+                schema_error_path=path,
+            )
+            raise AIProviderRequestError(
+                AIProviderFailureDetails(
+                    provider=self.provider_name,
+                    reason_code="schema_validation_error",
+                    phase="compact_retry_validation",
+                    endpoint=f"{self.client.base_url}/chat/completions",
+                    model=self.model,
+                    request_id=str(request.request_id),
+                    cycle_id=str(request.cycle_id),
+                    http_status=200,
+                    schema_error_code=code,
+                    schema_error_path=path,
+                    exception_class=type(exc).__name__,
+                )
+            ) from exc
+        self._record_attempt(
+            request,
+            request_kind="compact_retry",
+            request_sequence=attempt,
+            response=resolved,
+            schema_valid=True,
+        )
+        return replace(
+            resolved,
+            token_usage=_combined_usage(initial_usage, retry.token_usage),
+            fallback_used=True,
+            fallback_reason="output_truncated_compact_retry",
+        )
+
+    def _output_budget_error(
+        self,
+        request: AIReasoningRequest,
+        details: AIProviderFailureDetails | None = None,
+    ) -> AIProviderRequestError:
+        return AIProviderRequestError(
+            AIProviderFailureDetails(
+                provider=self.provider_name,
+                reason_code="output_budget_exceeded",
+                phase="output_budget_policy",
+                endpoint=f"{self.client.base_url}/chat/completions",
+                model=self.model,
+                request_id=str(request.request_id),
+                cycle_id=str(request.cycle_id),
+                http_status=200,
+                finish_reason="length",
+                schema_error_code="OUTPUT_BUDGET_EXCEEDED",
+                provider_input_tokens=(
+                    details.provider_input_tokens if details else None
+                ),
+                provider_output_tokens=(
+                    details.provider_output_tokens if details else None
+                ),
+                provider_total_tokens=(
+                    details.provider_total_tokens if details else None
+                ),
+                target_output_tokens=(
+                    details.target_output_tokens if details else None
+                ),
+                hard_output_limit=details.hard_output_limit if details else None,
+                output_profile=details.output_profile if details else None,
+                analysis_schema_version=(
+                    details.analysis_schema_version if details else None
+                ),
+                input_budget_utilization_percent=(
+                    details.input_budget_utilization_percent
+                    if details
+                    else None
+                ),
+                token_estimator=details.token_estimator if details else None,
+                context_sections_included=(
+                    details.context_sections_included if details else ()
+                ),
+                context_sections_omitted=(
+                    details.context_sections_omitted if details else ()
+                ),
+                exception_class="OutputBudgetExceeded",
+            )
         )
 
 
@@ -1044,7 +1575,13 @@ class GroqProviderPool:
                 return response
             except AIProviderRequestError as exc:
                 last_error = exc
-                self._failure(account_id, exc.details)
+                if exc.details.reason_code in {
+                    "output_budget_exceeded",
+                    "schema_validation_error",
+                }:
+                    self._policy_failure(account_id, exc.details)
+                else:
+                    self._failure(account_id, exc.details)
                 logger.warning(
                     "groq_pool.account.failed",
                     extra={
@@ -1198,6 +1735,7 @@ class GroqProviderPool:
         state.circuit_open_until = None
         state.last_failure_code = None
         state.last_provider_error_code = None
+        state.last_request_result = "SCHEMA_VALID"
         status_code = (
             response.operational_metadata.get("status_code")
             if response.operational_metadata
@@ -1230,6 +1768,7 @@ class GroqProviderPool:
         state.last_failure_code = details.reason_code
         state.last_http_status = details.http_status
         state.last_provider_error_code = details.error_code
+        state.last_request_result = details.reason_code.upper()
         state.provider_failures += 1
         self._telemetry[provider]["provider_failures"] += 1
         state.recent_failures = [
@@ -1301,6 +1840,33 @@ class GroqProviderPool:
             },
         )
 
+    def _policy_failure(
+        self,
+        provider: str,
+        details: AIProviderFailureDetails,
+    ) -> None:
+        """Record request-design failure without poisoning provider eligibility."""
+
+        state = self.states[provider]
+        state.status = ProviderStatus.AVAILABLE
+        state.last_http_status = details.http_status or 200
+        state.last_request_result = details.reason_code.upper()
+        state.last_failure_code = details.reason_code
+        state.last_provider_error_code = None
+        state.circuit_open_until = None
+        state.request_policy_failures += 1
+        logger.warning(
+            "ai_provider.request_policy.failed",
+            extra={
+                "provider": provider,
+                "model": state.model,
+                "status": state.status.value,
+                "last_request_result": state.last_request_result,
+                "provider_failure": False,
+                "eligible_now": True,
+            },
+        )
+
     @staticmethod
     def _reset_at(
         details: AIProviderFailureDetails,
@@ -1358,7 +1924,6 @@ class GroqProviderPool:
             "quota_exhausted",
             "token_quota_exhausted",
             "rate_limited",
-            "truncated_response",
             "provider_unavailable",
             "request_timeout",
         }
@@ -1469,9 +2034,17 @@ class GroqProviderPool:
             "initial_schema_validation_failures",
             "schema_corrections_succeeded",
             "schema_corrections_failed",
+            "truncated_outputs",
+            "compact_retries",
+            "request_policy_failures",
+            "provider_http_successes",
+            "schema_valid_analyses",
+            "provider_input_tokens",
+            "provider_output_tokens",
+            "provider_total_tokens",
         ):
             metrics[key] = sum(
-                provider.attempt_counters[key] for provider in self.providers
+                provider.attempt_counters.get(key, 0) for provider in self.providers
             )
         for provider in self.providers:
             account_id = provider.provider_name

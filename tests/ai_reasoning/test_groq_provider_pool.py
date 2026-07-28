@@ -44,6 +44,11 @@ class StubProvider:
             "initial_schema_validation_failures": 0,
             "schema_corrections_succeeded": 0,
             "schema_corrections_failed": 0,
+            "truncated_outputs": 0,
+            "compact_retries": 0,
+            "request_policy_failures": 0,
+            "provider_http_successes": 0,
+            "schema_valid_analyses": 0,
         }
 
     @property
@@ -163,6 +168,39 @@ async def test_account_one_success_stops_ordered_failover() -> None:
     router.mark_analysis_persisted("groq_1", NOW)
     assert router.active_provider == "groq_1"
     assert router.states["groq_1"].successful_analyses == 1
+
+
+@pytest.mark.asyncio
+async def test_output_budget_failure_does_not_poison_account_or_fail_over() -> None:
+    budget_failure = AIProviderRequestError(
+        AIProviderFailureDetails(
+            provider="groq_1",
+            reason_code="output_budget_exceeded",
+            phase="output_budget_policy",
+            endpoint="https://api.groq.test/openai/v1/chat/completions",
+            model="llama-3.1-8b-instant",
+            request_id="request-1",
+            cycle_id="cycle-1",
+            http_status=200,
+            finish_reason="length",
+            schema_error_code="OUTPUT_BUDGET_EXCEEDED",
+        )
+    )
+    providers = four({1: [budget_failure]})
+    router = pool(providers)
+
+    with pytest.raises(AIProviderRequestError) as captured:
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert captured.value.details.reason_code == "output_budget_exceeded"
+    assert [provider.calls for provider in providers] == [1, 0, 0, 0]
+    state = router.states["groq_1"]
+    assert state.status == ProviderStatus.AVAILABLE
+    assert state.circuit_open_until is None
+    assert state.last_http_status == 200
+    assert state.last_request_result == "OUTPUT_BUDGET_EXCEEDED"
+    assert state.provider_failures == 0
+    assert state.request_policy_failures == 1
 
 
 @pytest.mark.asyncio

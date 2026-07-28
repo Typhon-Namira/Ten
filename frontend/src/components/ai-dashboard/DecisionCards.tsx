@@ -156,6 +156,14 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
       <Metric label="Initial schema failures" value={usage?.initial_schema_validation_failures ?? 'Unavailable'} />
       <Metric label="Corrections succeeded / failed" value={`${usage?.schema_corrections_succeeded ?? 0} / ${usage?.schema_corrections_failed ?? 0}`} />
       <Metric label="HTTP 429 responses" value={usage?.http_429_responses ?? 'Unavailable'} />
+      <Metric label="Truncated outputs" value={usage?.truncated_outputs ?? 'Unavailable'} detail={usage?.truncation_rate == null ? 'Rate unavailable' : `${(usage.truncation_rate * 100).toFixed(1)}%`} />
+      <Metric label="Compact retries" value={usage?.compact_retries ?? 'Unavailable'} />
+      <Metric label="Request-policy failures" value={usage?.request_policy_failures ?? 'Unavailable'} />
+      <Metric label="Tokens / completed analysis" value={usage?.tokens_per_completed_analysis?.toLocaleString() ?? 'Unavailable'} />
+      <Metric label="Calls / completed analysis" value={usage?.provider_calls_per_completed_analysis?.toFixed(2) ?? 'Unavailable'} />
+      <Metric label="Average input tokens" value={usage?.average_input_tokens?.toFixed(0) ?? 'Unavailable'} />
+      <Metric label="Average output tokens" value={usage?.average_output_tokens?.toFixed(0) ?? 'Unavailable'} detail={`P95 ${usage?.p95_output_tokens ?? 'Unavailable'}`} />
+      <Metric label="Completion rate" value={usage?.completion_rate == null ? 'Unavailable' : `${(usage.completion_rate * 100).toFixed(1)}%`} />
       <Metric label="Skipped before provider" value={health?.call_control.skipped_before_provider_call ?? 'Unavailable'} />
       <Metric label="Deduplicated before provider" value={health?.call_control.deduplicated_before_provider_call ?? 'Unavailable'} />
       <Metric label="Provider failures" value={usage?.provider_failures ?? 'Unavailable'} />
@@ -172,7 +180,7 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
           key={accountId}
           label={`Groq ${index + 1}`}
           value={account?.status ?? 'DISABLED'}
-          detail={`${account?.eligible_now ? 'eligible' : 'not eligible'} · ${account?.circuit_state ?? 'CLOSED'} · HTTP ${account?.last_http_status ?? 'none'} · ${account?.last_provider_error_code ?? account?.last_failure_code ?? 'no error'} · analysis ${account?.analysis_requests ?? 0} · corrections ${account?.schema_correction_requests ?? 0} · 429s ${account?.http_429_responses ?? 0} · tokens ${account?.token_usage.total_tokens ?? 0} · analyses ${account?.successful_analyses ?? 0} · reset ${account?.cooldown_until ?? 'none'}`}
+          detail={`${account?.eligible_now ? 'eligible' : 'not eligible'} · ${account?.circuit_state ?? 'CLOSED'} · HTTP ${account?.last_http_status ?? 'none'} · result ${account?.last_request_result ?? 'none'} · policy ${account?.request_policy_health ?? 'healthy'} · analysis requests ${account?.analysis_requests ?? 0} · corrections ${account?.schema_correction_requests ?? 0} · 429s ${account?.http_429_responses ?? 0} · tokens ${account?.token_usage.total_tokens ?? 0} · persisted analyses ${account?.successful_analyses ?? 0} · reset ${account?.cooldown_until ?? 'none'}`}
         />
       })}
     </div>
@@ -181,6 +189,7 @@ export function OperationalHealth({ data, stale }: { data: AIReasoningDashboard 
         <strong>{attempt.account_id} · {humanize(attempt.request_kind)}</strong>
         <span>HTTP {attempt.http_status ?? 'none'} · finish {attempt.finish_reason ?? 'unknown'}</span>
         <span>Tokens {attempt.input_tokens ?? '—'} / {attempt.output_tokens ?? '—'} / {attempt.total_tokens ?? '—'}</span>
+        <span>{attempt.output_profile ?? 'unknown profile'} · budget {attempt.target_output_tokens ?? '—'} / {attempt.hard_output_limit ?? '—'} · used {attempt.output_budget_utilization_percent ?? '—'}%</span>
         <span>Schema {attempt.schema_valid === true ? 'valid' : attempt.schema_error_code ?? 'not validated'} {attempt.schema_error_path ?? ''}</span>
       </div>)}
     </div>}
