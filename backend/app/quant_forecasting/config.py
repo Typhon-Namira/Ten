@@ -18,8 +18,13 @@ class QuantForecastingConfig(BaseModel):
 
     @model_validator(mode="after")
     def exact_phase_two_horizons(self) -> "QuantForecastingConfig":
-        expected = {("3_m1", "M1", 3), ("5_m1", "M1", 5), ("10_m1", "M1", 10), ("3_m5", "M5", 3)}
+        expected = {
+            ("1_m5", "M5", 1),
+            ("3_m5", "M5", 3),
+            ("1_m15", "M15", 1),
+            ("3_m15", "M15", 3),
+        }
         actual = {(item.horizon_id, item.timeframe, item.candle_count) for item in self.horizons}
         if actual != expected or len(self.horizons) != 4:
-            raise ValueError("Phase 2 requires exactly 3 M1, 5 M1, 10 M1, and 3 M5 horizons")
+            raise ValueError("Quant forecasting requires exactly 1/3 M5 and 1/3 M15 horizons")
         return self

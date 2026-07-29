@@ -57,7 +57,7 @@ def _stage_status(result: object) -> str:
 class FullSystemIntegrationService:
     """Coordinates existing engines at a final-candle boundary; contains no analytics."""
 
-    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
+    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, signal_synthesizer: Any | None = None, signal_synthesis_repository: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
         self.event_bus, self.repository, self.config = event_bus, repository, config
         self.market_data, self.smc, self.liquidity = market_data, smc, liquidity
         self.volume_profile, self.institutional_flow = volume_profile, institutional_flow
@@ -69,6 +69,8 @@ class FullSystemIntegrationService:
         self.unified_market_state = unified_market_state
         self.quantitative_forecasting = quantitative_forecasting
         self.ai_reasoning = ai_reasoning
+        self.signal_synthesizer = signal_synthesizer
+        self.signal_synthesis_repository = signal_synthesis_repository
         self.ai_centric_shadow_mode = ai_centric_shadow_mode
         self._unsubscribe: Callable[[], None] | None = None
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -430,6 +432,33 @@ class FullSystemIntegrationService:
                                 market_state,
                                 quantitative_forecast,
                             )
+                            if (
+                                validated_analysis is not None
+                                and self.signal_synthesizer is not None
+                                and self.signal_synthesis_repository is not None
+                            ):
+                                failure_stage = "multi_timeframe_signal_synthesis"
+                                synthesis = self.signal_synthesizer.synthesize(
+                                    market_state,
+                                    quantitative_forecast,
+                                    validated_analysis.analysis,
+                                )
+                                synthesis = await self.signal_synthesis_repository.save(
+                                    synthesis
+                                )
+                                logger.info(
+                                    "multi_timeframe_signal.persist.completed",
+                                    extra={
+                                        **log_context,
+                                        "synthesis_id": str(synthesis.synthesis_id),
+                                        "market_state_id": str(synthesis.market_state_id),
+                                        "analysis_id": str(synthesis.analysis_id),
+                                        "M5": synthesis.timeframe_signals[0].analytical_direction.value,
+                                        "M15": synthesis.timeframe_signals[1].analytical_direction.value,
+                                        "combined": synthesis.combined_signal.analytical_direction.value,
+                                        "execution_status": synthesis.combined_signal.execution_status.value,
+                                    },
+                                )
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)
             failure_stage = "evidence_assembly"

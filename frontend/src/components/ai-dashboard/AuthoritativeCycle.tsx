@@ -25,6 +25,7 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
   const analysis = cycle.analysis
   const decision = cycle.final_decision
   const lifecycle = cycle.signal_lifecycle
+  const matrix = cycle.timeframe_matrix ?? []
   return <>
     <section className="ai-card ai-card--wide authoritative-signal">
       <SectionHeader eyebrow="Latest completed coherent cycle" title="Current analytical signal" action={<TrendingUp size={19} />} />
@@ -67,6 +68,30 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
         <span>Decision <code>{cycle.decision_id ?? 'pending'}</code></span>
       </div>
     </section>
+    {matrix.length ? <section className="ai-card ai-card--wide">
+      <SectionHeader eyebrow="Independent point-in-time synthesis" title="Multi-timeframe signal matrix" action={<Activity size={19} />} />
+      <div className="authoritative-table">
+        <div className="authoritative-table__head"><span>Timeframe</span><span>Signal</span><span>Confidence / strength</span><span>Execution</span><span>Evidence</span></div>
+        {matrix.map(item => <div key={item.signal_id}>
+          <strong>{item.timeframe === 'COMBINED' ? 'Combined' : item.timeframe}</strong>
+          <StatusBadge tone={signalTone(item.analytical_direction)}>{item.analytical_direction}</StatusBadge>
+          <span><strong>{item.confidence.toFixed(0)}%</strong><small>{humanize(item.strength)}</small></span>
+          <span><strong>{item.execution_status}</strong><small>{item.blocking_reasons.map(humanize).join(' · ') || 'Eligible'}</small></span>
+          <DetailDrawer label={`${item.evidence_breakdown.length} traceable facts`}>
+            <p>{item.directional_thesis}</p>
+            <p>Bullish {item.bullish_score.toFixed(2)} · Bearish {item.bearish_score.toFixed(2)} · Horizon {item.expected_horizon}</p>
+            <p><strong>Confidence decomposition</strong> {Object.entries(item.confidence_decomposition).map(([key, value]) => `${humanize(key)} ${value.toFixed(1)}%`).join(' · ')}</p>
+            <ul>{item.evidence_breakdown.map((fact, index) => <li key={`${fact.evidence_id}-${fact.correlation_group}-${index}`}>
+              <strong>{fact.directional_contribution === item.analytical_direction ? 'Supporting' : 'Contradicting'} · {humanize(fact.family)} · {fact.directional_contribution} {Math.abs(fact.weighted_score).toFixed(2)}</strong>
+              {' '}{fact.tool} / {fact.timeframe} · {fact.reason} · normalized {fact.normalized_score.toFixed(2)} · weight {(fact.weight * 100).toFixed(0)}% · correlation {(fact.correlated_discount * 100).toFixed(0)}% · quality {(fact.quality * 100).toFixed(0)}% · freshness {(fact.freshness * 100).toFixed(0)}% · facts {fact.source_fact_identifiers.join(', ')}
+            </li>)}</ul>
+            <p><strong>Invalidation</strong> {item.invalidation_conditions.join(' · ') || 'No validated structural invalidation available'}</p>
+            <p><strong>Execution blockers</strong> {item.blocking_reasons.map(humanize).join(' · ') || 'None'}</p>
+            <p><strong>Geometry</strong> {item.geometry == null ? 'Unavailable' : `Entry ${formatPrice(item.geometry.entry)} · stop ${formatPrice(item.geometry.stop_loss)} · target ${formatPrice(item.geometry.take_profit)} · RR ${item.geometry.risk_reward_ratio.toFixed(2)} · facts ${item.geometry.basis_fact_identifiers.join(', ')}`}</p>
+          </DetailDrawer>
+        </div>)}
+      </div>
+    </section> : null}
     <div className="ai-card-grid">
       <section className="ai-card">
         <SectionHeader eyebrow="AI interpretation" title="Deep market analysis" action={<BrainCircuit size={19} />} />

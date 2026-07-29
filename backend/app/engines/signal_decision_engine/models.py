@@ -43,7 +43,7 @@ class DecisionDirection(StrEnum):
 class FinalSignalAction(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
-    WAIT = "WAIT"
+    HOLD = "HOLD"
 
 
 class SignalReadiness(StrEnum):
@@ -377,7 +377,7 @@ class SignalDecision(DecisionModel):
     mode: DecisionMode
     explanation: DecisionExplanation
     metadata: DecisionMetadata
-    final_action: FinalSignalAction = FinalSignalAction.WAIT
+    final_action: FinalSignalAction = FinalSignalAction.HOLD
     setup_family: str | None = None
     readiness: SignalReadiness = SignalReadiness.WAITING
     entry_low: float | None = Field(default=None, gt=0)
@@ -402,6 +402,18 @@ class SignalDecision(DecisionModel):
             raise ValueError("decision timestamps must be timezone-aware")
         return value.astimezone(UTC)
 
+    @field_validator("final_action", mode="before")
+    @classmethod
+    def normalize_historical_wait_action(cls, value: object) -> object:
+        """Keep historical JSON readable without allowing WAIT into new decisions."""
+
+        return FinalSignalAction.HOLD if value == "WAIT" else value
+
+    @field_validator("readiness", mode="before")
+    @classmethod
+    def normalize_historical_waiting_readiness(cls, value: object) -> object:
+        return SignalReadiness.REJECTED if value == "waiting" else value
+
     @model_validator(mode="after")
     def invariants(self) -> SignalDecision:
         if self.valid_until < self.valid_from:
@@ -414,7 +426,7 @@ class SignalDecision(DecisionModel):
             raise ValueError("observe-only decisions require warnings and no blockers")
         if self.state in {DecisionState.INSUFFICIENT_EVIDENCE, DecisionState.INVALID} and not self.blockers:
             raise ValueError("non-actionable decisions require explicit limitations")
-        if self.final_action == FinalSignalAction.WAIT:
+        if self.final_action == FinalSignalAction.HOLD:
             if any(
                 value is not None
                 for value in (
@@ -424,18 +436,28 @@ class SignalDecision(DecisionModel):
                     self.risk_reward,
                 )
             ) or self.take_profit_targets:
-                raise ValueError("WAIT cannot contain execution geometry")
+                raise ValueError("HOLD cannot contain execution geometry")
             if self.publication_eligible:
-                raise ValueError("WAIT cannot be publication eligible")
-        elif (
-            self.entry_low is None
-            or self.entry_high is None
-            or self.stop_loss is None
-            or not self.take_profit_targets
-            or not self.invalidation
-            or self.risk_reward is None
-        ):
-            raise ValueError("actionable signal requires entry, invalidation, stop, targets, and risk/reward")
+                raise ValueError("HOLD cannot be publication eligible")
+        else:
+            geometry = (
+                self.entry_low,
+                self.entry_high,
+                self.stop_loss,
+                self.risk_reward,
+            )
+            if self.publication_eligible or self.readiness == SignalReadiness.READY:
+                if (
+                    any(value is None for value in geometry)
+                    or not self.take_profit_targets
+                    or not self.invalidation
+                ):
+                    raise ValueError(
+                        "execution-ready signal requires entry, invalidation, stop, "
+                        "targets, and risk/reward"
+                    )
+            elif any(value is not None for value in geometry) or self.take_profit_targets:
+                raise ValueError("blocked analytical direction cannot contain partial geometry")
         for value in (self.eligibility_score, self.directional_strength, self.confidence_score, self.market_risk_score, self.data_quality_score, self.evidence_alignment_score):
             if not math.isfinite(value):
                 raise ValueError("decision scores must be finite")

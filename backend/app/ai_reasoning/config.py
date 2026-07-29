@@ -14,7 +14,7 @@ class AIReasoningConfig(BaseModel):
     request_schema_version: str
     reasoning_policy_version: str
     setup_family_registry_version: str
-    analysis_timeframe: Literal["M5"] = "M5"
+    analysis_timeframe: Literal["M5_M15"] = "M5_M15"
     analysis_interval_minutes: Literal[5] = 5
     prompt_version_new_market: str
     prompt_version_existing_signal: str

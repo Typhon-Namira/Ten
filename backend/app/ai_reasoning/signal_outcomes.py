@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from .analysis import (
+    AnalysisExecutionEligibility,
     AIAnalysisSignal,
     AIAnalysisSignalOutcome,
     AnalysisSignalAction,
@@ -18,7 +19,10 @@ class AnalysisSignalOutcomeEvaluator:
         self,
         signal: AIAnalysisSignal,
     ) -> AIAnalysisSignalOutcome:
-        hold = signal.signal == AnalysisSignalAction.HOLD
+        terminal_without_execution = (
+            signal.signal == AnalysisSignalAction.HOLD
+            or signal.execution_eligibility == AnalysisExecutionEligibility.INELIGIBLE
+        )
         return AIAnalysisSignalOutcome(
             outcome_id=uuid5(
                 NAMESPACE_URL,
@@ -27,7 +31,7 @@ class AnalysisSignalOutcomeEvaluator:
             signal_id=signal.signal_id,
             status=(
                 AnalysisSignalLifecycle.COMPLETED
-                if hold
+                if terminal_without_execution
                 else AnalysisSignalLifecycle.ACTIVE
             ),
             entry_reached=False,
@@ -35,8 +39,14 @@ class AnalysisSignalOutcomeEvaluator:
             target_hit=False,
             expired=False,
             evaluated_at=signal.generated_at,
-            completed_at=signal.generated_at if hold else None,
-            reason_codes=("hold_cycle_completed",) if hold else (),
+            completed_at=signal.generated_at if terminal_without_execution else None,
+            reason_codes=(
+                ("hold_cycle_completed",)
+                if signal.signal == AnalysisSignalAction.HOLD
+                else ("execution_blocked",)
+                if terminal_without_execution
+                else ()
+            ),
         )
 
     def evaluate(

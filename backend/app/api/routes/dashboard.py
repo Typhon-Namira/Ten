@@ -173,6 +173,61 @@ def _publication_projection(decision: Any | None) -> dict[str, Any]:
     }
 
 
+def _authoritative_signal_projection(
+    signal: Any,
+    decision: Any,
+    *,
+    lifecycle_status: str,
+) -> dict[str, Any]:
+    """Project the persisted deterministic decision as the cycle's sole final signal."""
+
+    serialized: dict[str, Any] = dict(signal.model_dump(mode="json"))
+    candidate = serialized.get("signal")
+    final_action = decision.final_action.value
+    execution_ready = bool(getattr(decision, "publication_eligible", False))
+    serialized.update(
+        {
+            "candidate_signal": candidate,
+            "signal": final_action,
+            "authoritative_action": final_action,
+            "confidence": decision.overall_confidence,
+            "signal_confidence": decision.overall_confidence,
+            "overall_confidence": decision.overall_confidence,
+            "lifecycle_status": (
+                "HOLD"
+                if final_action == "HOLD"
+                else lifecycle_status
+                if execution_ready
+                else "BLOCKED"
+            ),
+            "execution_eligibility": (
+                "ELIGIBLE" if execution_ready else "INELIGIBLE"
+            ),
+            "execution_status": "READY" if execution_ready else "BLOCKED",
+            "blocking_reasons": [
+                item.reason_code for item in getattr(decision, "blockers", ())
+            ]
+            + [
+                item.reason_code for item in getattr(decision, "warnings", ())
+            ],
+            "reasoning_summary": decision.decision_reason,
+        }
+    )
+    if final_action == "HOLD":
+        serialized.update(
+            {
+                "entry": None,
+                "stop_loss": None,
+                "take_profit": None,
+                "risk_reward_ratio": None,
+                "valid_from": None,
+                "valid_until": None,
+                "expected_holding_seconds": None,
+            }
+        )
+    return serialized
+
+
 async def _signal_lifecycle_projection(
     request: Request,
     signal: Any,
@@ -191,7 +246,6 @@ async def _signal_lifecycle_projection(
     valid_until = getattr(signal, "valid_until", None)
     if valid_until is None:
         legacy_validity_seconds = {
-            "M1": 60,
             "M5": 300,
             "M15": 900,
             "M30": 1800,
@@ -263,6 +317,14 @@ async def _completed_cycle_projection(
     if selected is None:
         return None
     analysis, signal, decision, state, quant, previous_cycle_id = selected
+    synthesis_repository = getattr(
+        request.app.state, "multi_timeframe_signal_repository", None
+    )
+    multi_timeframe_signal = (
+        await synthesis_repository.for_state(signal.snapshot_id)
+        if synthesis_repository is not None
+        else None
+    )
     publication = _publication_projection(decision)
     generated_signal_count = (
         await request.app.state.ai_reasoning_repository.count_analysis_signals(
@@ -283,8 +345,15 @@ async def _completed_cycle_projection(
         signal,
         now=now,
     )
+    authoritative_action = decision.final_action.value
     authoritative_lifecycle_status = (
-        "CURRENT" if lifecycle["status"] == "ACTIVE" else lifecycle["status"]
+        "HOLD"
+        if authoritative_action == "HOLD"
+        else "BLOCKED"
+        if not decision.publication_eligible
+        else "CURRENT"
+        if lifecycle["status"] == "ACTIVE"
+        else lifecycle["status"]
     )
     authoritative_lifecycle = {
         **lifecycle,
@@ -329,7 +398,7 @@ async def _completed_cycle_projection(
             "analysis_id": str(analysis.analysis_id),
             "signal_id": str(signal.signal_id),
             "decision_id": str(decision.decision_id),
-            "action": signal.signal.value,
+            "action": authoritative_action,
             "publication_eligible": publication["eligible"],
             "lifecycle_status": authoritative_lifecycle_status,
             "analysis_timestamp": analysis.analysis_timestamp,
@@ -367,9 +436,17 @@ async def _completed_cycle_projection(
             "record_id": str(analysis.analysis_id),
         },
         "analytical_signal": {
-            "status": "healthy",
-            "reason": "deterministic_analysis_signal_persisted",
-            "record_id": str(signal.signal_id),
+            "status": "healthy" if multi_timeframe_signal is not None else "degraded",
+            "reason": (
+                "multi_timeframe_analysis_signal_persisted"
+                if multi_timeframe_signal is not None
+                else "legacy_single_timeframe_signal_only"
+            ),
+            "record_id": str(
+                multi_timeframe_signal.synthesis_id
+                if multi_timeframe_signal is not None
+                else signal.signal_id
+            ),
         },
         "guardrails": {
             "status": "healthy",
@@ -390,11 +467,12 @@ async def _completed_cycle_projection(
     serialized_state = state.model_dump(mode="json") if state is not None else None
     serialized_quant = quant.model_dump(mode="json") if quant is not None else None
     serialized_analysis = analysis.model_dump(mode="json")
-    serialized_signal = signal.model_dump(mode="json")
-    serialized_signal["lifecycle_status"] = lifecycle["status"]
+    serialized_signal = _authoritative_signal_projection(
+        signal,
+        decision,
+        lifecycle_status=authoritative_lifecycle_status,
+    )
     if signal.schema_version == "1.0":
-        serialized_signal["signal_confidence"] = signal.confidence
-        serialized_signal["overall_confidence"] = signal.confidence
         serialized_signal["analysis_confidence"] = (
             analysis.output.analysis_confidence * 100
             if analysis.output is not None
@@ -413,7 +491,7 @@ async def _completed_cycle_projection(
         "analysis_timestamp": analysis.analysis_timestamp,
         "signal_generated_at": signal.generated_at,
         "decision_timestamp": decision.decided_at,
-        "action": signal.signal.value,
+        "action": authoritative_action,
         "publication_eligible": publication["eligible"],
         "lifecycle_status": authoritative_lifecycle_status,
         "cycle_version": cycle_version,
@@ -427,6 +505,22 @@ async def _completed_cycle_projection(
         "analysis": serialized_analysis,
         "ai_analysis": serialized_analysis,
         "analytical_signal": serialized_signal,
+        "multi_timeframe_signal": (
+            multi_timeframe_signal.model_dump(mode="json")
+            if multi_timeframe_signal is not None
+            else None
+        ),
+        "timeframe_matrix": (
+            [
+                item.model_dump(mode="json")
+                for item in (
+                    *multi_timeframe_signal.timeframe_signals,
+                    multi_timeframe_signal.combined_signal,
+                )
+            ]
+            if multi_timeframe_signal is not None
+            else []
+        ),
         "signal_lifecycle": authoritative_lifecycle,
         "guardrail_decision": (
             {
@@ -453,6 +547,11 @@ async def _completed_cycle_projection(
             "quantitative_forecast_id": str(analysis.quantitative_forecast_id),
             "analysis_id": str(analysis.analysis_id),
             "signal_id": str(signal.signal_id),
+            "multi_timeframe_synthesis_id": (
+                str(multi_timeframe_signal.synthesis_id)
+                if multi_timeframe_signal is not None
+                else None
+            ),
             "decision_id": (
                 str(decision.decision_id) if decision is not None else None
             ),
@@ -836,6 +935,8 @@ async def dashboard_latest_cycle(
         "ai_analysis": None,
         "analysis": None,
         "analytical_signal": None,
+        "multi_timeframe_signal": None,
+        "timeframe_matrix": [],
         "guardrail_decision": None,
         "final_decision": None,
         "publication": {
@@ -955,8 +1056,15 @@ async def dashboard_signal_history(
             item,
             now=datetime.now(UTC),
         )
-        serialized_signal = item.model_dump(mode="json")
-        serialized_signal["lifecycle_status"] = lifecycle["status"]
+        serialized_signal = (
+            _authoritative_signal_projection(
+                item,
+                decision,
+                lifecycle_status=lifecycle["status"],
+            )
+            if decision is not None
+            else item.model_dump(mode="json")
+        )
         history_items.append(
             {
                 "analytical_signal": serialized_signal,
@@ -1319,7 +1427,7 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         "unified_market_state",
         "Unified Market State",
         "no_data" if state is None else "degraded" if state.status.value == "degraded" else "healthy",
-        "awaiting_synchronized_m1_m5_m15_state" if state is None else "point_in_time_state_persisted",
+        "awaiting_synchronized_m5_m15_state" if state is None else "point_in_time_state_persisted",
         timestamp=market_timestamp,
         record_id=getattr(state, "state_id", None),
         details={"evidence_completeness": getattr(state, "evidence_completeness", None)},
@@ -1373,7 +1481,8 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         timestamp=getattr(analysis, "analysis_timestamp", None), record_id=getattr(analysis, "analysis_id", None),
         details={
             "signal_id": getattr(analysis_signal, "signal_id", None),
-            "signal": getattr(getattr(analysis_signal, "signal", None), "value", None),
+            "candidate_signal": getattr(getattr(analysis_signal, "signal", None), "value", None),
+            "signal": getattr(getattr(signal_decision, "final_action", None), "value", None),
             "confidence": getattr(analysis_signal, "confidence", None),
             "strength": getattr(getattr(analysis_signal, "strength", None), "value", None),
         },
@@ -1412,7 +1521,17 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         "stages": stage_list,
         "current_decision": signal_decision.model_dump(mode="json") if signal_decision is not None else None,
         "current_analysis_signal": (
-            analysis_signal.model_dump(mode="json")
+            _authoritative_signal_projection(
+                analysis_signal,
+                signal_decision,
+                lifecycle_status=(
+                    "HOLD"
+                    if signal_decision.final_action.value == "HOLD"
+                    else "CURRENT"
+                ),
+            )
+            if analysis_signal is not None and signal_decision is not None
+            else analysis_signal.model_dump(mode="json")
             if analysis_signal is not None
             else None
         ),
@@ -1754,7 +1873,7 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
 
     state = await request.app.state.unified_market_state_repository.latest_state(symbol)
     if state is None:
-        reason = "ai_centric_shadow_mode_disabled" if not shadow_enabled else "awaiting_synchronized_m1_m5_m15_state"
+        reason = "ai_centric_shadow_mode_disabled" if not shadow_enabled else "awaiting_synchronized_m5_m15_state"
         stages = {
             "market_state": _stage(status="not_available", reason=reason),
             "engine_outputs": _stage(status="not_available", reason=reason),
@@ -1914,7 +2033,7 @@ async def latest_dashboard(request: Request, instrument: str = "XAUUSD") -> dict
     stages = {
         "market_state": _stage(
             status=state_status,
-            reason="synchronized_m1_m5_m15_state_persisted",
+            reason="synchronized_m5_m15_state_persisted",
             data=state,
             record_id=state.state_id,
             timestamp=state.market_data_boundary,

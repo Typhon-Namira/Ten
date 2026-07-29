@@ -115,6 +115,7 @@ class ConservativeSignalDecisionPolicy:
                 RuleSeverity.INFORMATIONAL,
                 "ai_analysis_unavailable",
             )
+        signal_aligned = False
         if analysis_signal is None:
             rule(
                 "ai.signal_authority",
@@ -323,6 +324,32 @@ class ConservativeSignalDecisionPolicy:
         else:
             state = DecisionState.ELIGIBLE
 
+        actionable = (
+            state == DecisionState.ELIGIBLE
+            and direction != DecisionDirection.NEUTRAL
+            and analysis_valid
+            and analysis_signal is not None
+            and analysis_signal.signal
+            in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
+            and signal_aligned
+            and geometry_valid
+        )
+        if not actionable and not hard and not insufficient:
+            hold_reason = (
+                "validated_ai_analysis_unavailable"
+                if not analysis_valid
+                else "analysis_signal_unavailable"
+                if analysis_signal is None
+                else "analysis_signal_hold"
+                if analysis_signal.signal == AnalysisSignalAction.HOLD
+                else "analysis_signal_direction_mismatch"
+                if not signal_aligned
+                else "structural_geometry_invalid"
+            )
+            hold_warning = self._synthetic_warning(decision_input, hold_reason)
+            evaluations.append(hold_warning)
+            soft.append(hold_warning)
+
         ai_confidence = (
             float(analysis_signal.confidence)
             if analysis_signal is not None
@@ -349,7 +376,15 @@ class ConservativeSignalDecisionPolicy:
             blockers += (self._reason(insufficient[-1]),)
         warnings = tuple(self._reason(item) for item in evaluations if item.outcome == RuleOutcome.WARNING)
         if score.status == ScoreStatus.DEGRADED:
-            warnings += (self._reason(soft[-1]),)
+            warnings += (
+                self._reason(
+                    next(
+                        item
+                        for item in soft
+                        if item.reason_code == "ai_score_degraded"
+                    )
+                ),
+            )
         supporting = tuple(self._reason(item) for item in evaluations if item.outcome == RuleOutcome.PASSED)
         explanation = DecisionExplanation(
             summary_code=f"{direction.value}_{state.value}",
@@ -364,27 +399,14 @@ class ConservativeSignalDecisionPolicy:
         )
         previous = decision_input.history.latest
         active = decision_input.history.active
-        actionable = (
-            state == DecisionState.ELIGIBLE
-            and direction != DecisionDirection.NEUTRAL
-            and analysis_valid
-            and analysis_signal is not None
-            and analysis_signal.signal
-            in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
-            and (
-                analysis_signal.signal == AnalysisSignalAction.BUY
-                and direction == DecisionDirection.BULLISH
-                or analysis_signal.signal == AnalysisSignalAction.SELL
-                and direction == DecisionDirection.BEARISH
-            )
-            and geometry_valid
-        )
         final_action = (
             FinalSignalAction.BUY
-            if actionable and direction == DecisionDirection.BULLISH
+            if analysis_signal is not None
+            and analysis_signal.signal == AnalysisSignalAction.BUY
             else FinalSignalAction.SELL
-            if actionable and direction == DecisionDirection.BEARISH
-            else FinalSignalAction.WAIT
+            if analysis_signal is not None
+            and analysis_signal.signal == AnalysisSignalAction.SELL
+            else FinalSignalAction.HOLD
         )
         entry_low: float | None = None
         entry_high: float | None = None
@@ -517,7 +539,13 @@ class ConservativeSignalDecisionPolicy:
                 if actionable
                 else None
             ),
-            readiness=SignalReadiness.READY if actionable else SignalReadiness.WAITING,
+            readiness=(
+                SignalReadiness.READY
+                if actionable
+                else SignalReadiness.CONDITIONAL
+                if state == DecisionState.OBSERVE_ONLY
+                else SignalReadiness.REJECTED
+            ),
             entry_low=entry_low,
             entry_high=entry_high,
             invalidation=invalidation,

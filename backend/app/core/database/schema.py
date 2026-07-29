@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from .base import Base
 
 
-SCHEMA_HEAD_REVISION = "20260728_0013"
+SCHEMA_HEAD_REVISION = "20260729_0014"
 
 
 async def prepare_database_schema(connection: AsyncConnection, *, managed_runtime: bool) -> None:

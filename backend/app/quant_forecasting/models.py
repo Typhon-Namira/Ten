@@ -49,7 +49,7 @@ class ForecastHorizon(ImmutableForecastModel):
 
     @model_validator(mode="after")
     def duration_matches_timeframe(self) -> ForecastHorizon:
-        seconds = {"M1": 60, "M5": 300}.get(self.timeframe)
+        seconds = {"M5": 300, "M15": 900}.get(self.timeframe)
         if seconds is None or self.duration_seconds != seconds * self.candle_count:
             raise ValueError("forecast horizon duration must match its candle timeframe")
         return self

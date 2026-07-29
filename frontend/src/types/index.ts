@@ -101,7 +101,7 @@ export interface SignalDecisionSnapshot {
   blockers: DecisionReason[]
   warnings: DecisionReason[]
   mode: 'live' | 'replay'
-  final_action: 'BUY' | 'SELL' | 'WAIT'
+  final_action: 'BUY' | 'SELL' | 'HOLD'
   setup_family: string | null
   readiness: 'ready' | 'conditional' | 'waiting' | 'rejected'
   entry_low: number | null
@@ -557,7 +557,7 @@ export interface ReplaySessionOverview {
 
 export interface QuantForecastHorizon {
   horizon_id: string
-  timeframe: 'M1' | 'M5'
+  timeframe: 'M5' | 'M15'
   candle_count: number
   duration_seconds: number
 }
@@ -774,10 +774,75 @@ export interface AIAnalysisSignal {
   valid_from: string | null
   valid_until: string | null
   expected_holding_seconds: number | null
-  lifecycle_status: 'ACTIVE' | 'COMPLETED' | 'STALE' | 'EXPIRED' | 'STOPPED' | 'TARGET_HIT' | 'STOP_HIT' | 'SUPERSEDED'
+  lifecycle_status: 'ACTIVE' | 'HOLD' | 'BLOCKED' | 'COMPLETED' | 'STALE' | 'EXPIRED' | 'STOPPED' | 'TARGET_HIT' | 'STOP_HIT' | 'SUPERSEDED'
+  execution_eligibility: 'ELIGIBLE' | 'INELIGIBLE'
+  execution_status: 'READY' | 'BLOCKED'
+  blocking_reasons: string[]
   fallback: boolean
   source: string
   generated_at: string
+}
+
+export interface DirectionalEvidenceContribution {
+  evidence_id: string
+  tool: string
+  timeframe: 'M5' | 'M15'
+  family: string
+  correlation_group: string
+  directional_contribution: 'BUY' | 'SELL'
+  raw_value: unknown
+  normalized_score: number
+  weight: number
+  effective_weight: number
+  weighted_score: number
+  quality: number
+  freshness: number
+  correlated_discount: number
+  reason: string
+  source_fact_identifiers: string[]
+}
+
+export interface TimeframeAnalyticalSignal {
+  signal_id: string
+  timeframe: 'M5' | 'M15' | 'COMBINED'
+  analytical_direction: 'BUY' | 'SELL'
+  confidence: number
+  strength: 'VERY_WEAK' | 'WEAK' | 'MODERATE' | 'STRONG' | 'VERY_STRONG'
+  bullish_score: number
+  bearish_score: number
+  expected_horizon: string
+  evidence_breakdown: DirectionalEvidenceContribution[]
+  confidence_decomposition: Record<string, number>
+  directional_thesis: string
+  invalidation_conditions: string[]
+  execution_eligibility: 'ELIGIBLE' | 'INELIGIBLE'
+  execution_status: 'READY' | 'BLOCKED'
+  blocking_reasons: string[]
+  geometry: {
+    entry: number
+    stop_loss: number
+    take_profit: number
+    risk_reward_ratio: number
+    basis_fact_identifiers: string[]
+  } | null
+  completed_at: string
+}
+
+export interface MultiTimeframeSignalSet {
+  synthesis_id: string
+  market_state_id: string
+  analysis_id: string
+  timeframe_signals: TimeframeAnalyticalSignal[]
+  combined_signal: TimeframeAnalyticalSignal
+  timeframe_contributions: Array<{
+    timeframe: 'M5' | 'M15'
+    direction: 'BUY' | 'SELL'
+    confidence: number
+    structural_importance: number
+    evidence_quality: number
+    signed_contribution: number
+    explanation: string
+  }>
 }
 
 export interface AuthoritativeCycleStage {
@@ -810,6 +875,8 @@ export interface LatestCompletedCycle {
   quant_forecast?: QuantForecastResult | null
   analysis: AIMarketAnalysis | null
   analytical_signal: AIAnalysisSignal | null
+  multi_timeframe_signal?: MultiTimeframeSignalSet | null
+  timeframe_matrix?: TimeframeAnalyticalSignal[]
   signal_lifecycle?: {
     status: AIAnalysisSignal['lifecycle_status'] | 'CURRENT'
     signal_age_seconds: number
@@ -1089,7 +1156,7 @@ export interface AIReasoningDashboard {
       }
     }>
     call_control: {
-      analysis_timeframe: 'M5'
+      analysis_timeframe: 'M5_M15'
       interval_minutes: 5
       eligible_five_minute_cycles: number
       analyses_successfully_completed: number
@@ -1144,7 +1211,7 @@ export type DashboardDataStatus =
   | 'blocked'
   | 'disabled'
   | 'running'
-  | 'wait'
+  | 'hold'
   | 'not_required'
   | 'not_applicable'
 
@@ -1159,7 +1226,7 @@ export interface DashboardStage<T = unknown> {
   // Present only for specific statuses — see backend/app/api/dashboard_status.py's StageResult.extra
   // for which fields accompany which status (e.g. `elapsed_seconds`/`job_state` on "running"/
   // "pending", `retry_in_seconds` on "blocked", `field`/`expected`/`received` on a structured-
-  // output validation failure, `direction` on "wait", `config_source` on publication "disabled").
+  // output validation failure, `direction` on "hold", `config_source` on publication "disabled").
   elapsed_seconds?: number
   job_state?: string
   retry_in_seconds?: number

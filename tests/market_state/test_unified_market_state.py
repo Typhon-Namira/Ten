@@ -89,20 +89,19 @@ async def capture(service: UnifiedMarketStateService, timeframe: Timeframe, valu
 
 
 @pytest.mark.asyncio
-async def test_m1_m5_m15_are_synchronized_at_the_same_point_in_time() -> None:
+async def test_m5_m15_are_synchronized_at_the_same_point_in_time() -> None:
     repository = InMemoryUnifiedMarketStateRepository()
     service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
 
-    assert await capture(service, Timeframe.M1) is None
     assert await capture(service, Timeframe.M5) is None
     state = await capture(service, Timeframe.M15)
 
     assert state is not None
-    assert tuple(item.timeframe for item in state.timeframes) == ("M1", "M5", "M15")
+    assert tuple(item.timeframe for item in state.timeframes) == ("M5", "M15")
     assert all(item.source_candle_close_at == BOUNDARY for item in state.timeframes)
     assert all(item.expected_candle_close_at == BOUNDARY for item in state.timeframes)
     assert all(not item.stale for item in state.timeframes)
-    assert len(state.evidence) == 21
+    assert len(state.evidence) == 14
     assert state.evidence_completeness == 1
     assert state.market_schedule is not None
     assert state.market_schedule.market_status.value == "OPEN"
@@ -117,7 +116,6 @@ async def test_synchronizer_never_selects_a_future_timeframe_frame() -> None:
     service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE + timedelta(minutes=5))
     future_close = BOUNDARY + timedelta(minutes=5)
 
-    await capture(service, Timeframe.M1, close_at=BOUNDARY)
     await capture(service, Timeframe.M5, close_at=future_close)
     await capture(service, Timeframe.M15, close_at=BOUNDARY)
 
@@ -139,14 +137,13 @@ async def test_capture_rejects_future_engine_data_leakage() -> None:
     future = outputs()
     future["smc"] = output("smc", KNOWLEDGE + timedelta(seconds=1))
     with pytest.raises(ValueError, match="future engine evidence"):
-        await capture(service, Timeframe.M1, future)
+        await capture(service, Timeframe.M5, future)
 
 
 @pytest.mark.asyncio
 async def test_complete_nested_engine_output_is_preserved_without_scalar_collapse() -> None:
     repository = InMemoryUnifiedMarketStateRepository()
     service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
-    await capture(service, Timeframe.M1)
     await capture(service, Timeframe.M5)
     state = await capture(service, Timeframe.M15)
     assert state is not None
@@ -167,7 +164,6 @@ async def test_complete_nested_engine_output_is_preserved_without_scalar_collaps
 async def test_compact_persistence_owns_large_payload_once_without_losing_runtime_evidence() -> None:
     repository = InMemoryUnifiedMarketStateRepository()
     service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
-    await capture(service, Timeframe.M1)
     await capture(service, Timeframe.M5)
     state = await capture(service, Timeframe.M15)
     assert state is not None
@@ -191,7 +187,6 @@ async def test_compact_persistence_owns_large_payload_once_without_losing_runtim
 async def test_legacy_and_compact_rows_reconstruct_semantically_identical_state() -> None:
     repository = InMemoryUnifiedMarketStateRepository()
     service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
-    await capture(service, Timeframe.M1)
     await capture(service, Timeframe.M5)
     state = await capture(service, Timeframe.M15)
     assert state is not None
@@ -239,14 +234,13 @@ async def test_repeated_unchanged_cycles_do_not_grow_frames_or_state_history() -
     repository = InMemoryUnifiedMarketStateRepository()
     service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
     for _ in range(25):
-        await capture(service, Timeframe.M1)
         await capture(service, Timeframe.M5)
         await capture(service, Timeframe.M15)
 
-    assert len(repository._frames) == 3
+    assert len(repository._frames) == 2
     assert len(repository._states) == 1
     state = next(iter(repository._states.values()))
-    assert len(state.evidence) == 21
+    assert len(state.evidence) == 14
 
 
 @pytest.mark.asyncio
@@ -256,31 +250,29 @@ async def test_unavailable_evidence_is_explicit_and_never_serialized_as_zero() -
     missing_volume = outputs()
     missing_volume.pop("volume_profile")
 
-    await capture(service, Timeframe.M1, missing_volume)
     await capture(service, Timeframe.M5, missing_volume)
     state = await capture(service, Timeframe.M15, missing_volume)
     assert state is not None
 
     unavailable = [item for item in state.evidence if item.source_engine == "volume_profile"]
-    assert len(unavailable) == 3
+    assert len(unavailable) == 2
     assert all(item.availability == EvidenceAvailability.UNAVAILABLE for item in unavailable)
     assert all(item.raw_value is None and item.normalized_value is None for item in unavailable)
     assert all(item.confidence is None and item.quality is None and item.uncertainty is None for item in unavailable)
     assert set(state.unavailable_evidence) == {item.evidence_id for item in unavailable}
-    assert state.evidence_completeness == pytest.approx(18 / 21)
+    assert state.evidence_completeness == pytest.approx(12 / 14)
 
 
 @pytest.mark.asyncio
 async def test_older_closed_frame_is_retained_but_explicitly_marked_stale() -> None:
     repository = InMemoryUnifiedMarketStateRepository()
     service = UnifiedMarketStateService(repository, clock=lambda: KNOWLEDGE)
-    await capture(service, Timeframe.M1, close_at=BOUNDARY)
     await capture(service, Timeframe.M5, close_at=BOUNDARY)
     await capture(service, Timeframe.M15, close_at=BOUNDARY - timedelta(minutes=15))
 
     state = await service.synchronize(
         instrument="XAUUSD",
-        trigger_timeframe="M1",
+        trigger_timeframe="M5",
         market_data_boundary=BOUNDARY,
         knowledge_cutoff=KNOWLEDGE,
         cycle_id=uuid4(),

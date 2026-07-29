@@ -87,6 +87,12 @@ from backend.app.final_decision import (
     SqlAlchemyFinalDecisionRepository,
 )
 from backend.app.storage.maintenance import StorageMaintenanceWorker
+from backend.app.signal_synthesis import (
+    InMemoryMultiTimeframeSignalRepository,
+    MultiTimeframeSignalRepository,
+    MultiTimeframeSignalSynthesizer,
+    SqlAlchemyMultiTimeframeSignalRepository,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -499,6 +505,15 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             monitoring_enabled=ai_monitoring_enabled,
             final_decision=app.state.final_decision_service,
         )
+        signal_synthesis_repository: MultiTimeframeSignalRepository = (
+            InMemoryMultiTimeframeSignalRepository()
+        )
+        if app.state.database_session_factory is not None:
+            signal_synthesis_repository = SqlAlchemyMultiTimeframeSignalRepository(
+                app.state.database_session_factory
+            )
+        app.state.multi_timeframe_signal_repository = signal_synthesis_repository
+        app.state.multi_timeframe_signal_synthesizer = MultiTimeframeSignalSynthesizer()
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
             repository=app.state.integration_repository,
@@ -517,6 +532,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             unified_market_state=app.state.unified_market_state_service,
             quantitative_forecasting=app.state.quant_forecast_service,
             ai_reasoning=app.state.ai_reasoning_service,
+            signal_synthesizer=app.state.multi_timeframe_signal_synthesizer,
+            signal_synthesis_repository=app.state.multi_timeframe_signal_repository,
             ai_centric_shadow_mode=ai_centric_shadow_mode,
         )
         if integration_config.enabled and integration_config.live_pipeline_enabled:

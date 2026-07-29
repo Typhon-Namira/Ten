@@ -193,11 +193,11 @@ def derive_final_action_stage(
     if _value(getattr(forecast, "status", None)) in TERMINAL_FAILURE_STATUS_VALUES:
         reason, extra = _forecast_failure_detail(forecast)
         return StageResult(
-            "wait",
+            "hold",
             "ai_provider_unavailable",
             error_code=getattr(forecast, "failure_state", None),
             extra={
-                "direction": "WAIT",
+                "direction": "HOLD",
                 "publication_eligible": False,
                 "upstream_reason": reason,
                 **extra,
@@ -205,7 +205,7 @@ def derive_final_action_stage(
         )
     if no_actionable_proposal(proposal):
         reason = "ai_proposal_recommended_wait" if proposal is not None else "ai_reasoning_produced_no_proposal"
-        return StageResult("wait", reason, extra={"direction": "WAIT"})
+        return StageResult("hold", reason, extra={"direction": "HOLD"})
     return StageResult("not_available", "guardrail_result_not_yet_persisted")
 
 
@@ -257,8 +257,8 @@ def derive_monitoring_stage(
             "published_managed_signal_monitored",
             extra={"managed_signal_state": signal_state},
         )
-    if final_action_status == "wait":
-        return StageResult("not_required", "latest_final_action_non_actionable_wait")
+    if final_action_status == "hold":
+        return StageResult("not_required", "latest_final_action_non_actionable_hold")
     if action is not None and _value(getattr(action, "action", None)) in ACTIONABLE_FINAL_ACTION_VALUES and publication is None and not publication_enabled:
         return StageResult("blocked", "signal_publication_disabled")
     return StageResult("not_available", "no_managed_signal_for_latest_cycle")
@@ -274,7 +274,7 @@ def derive_outcome_stage(
 ) -> StageResult:
     if outcome is not None:
         return StageResult("available", "signal_outcome_persisted")
-    if final_action_status == "wait":
+    if final_action_status == "hold":
         return StageResult("not_applicable", "no_managed_signal_opened_for_cycle")
     if action is not None and _value(getattr(action, "action", None)) in ACTIONABLE_FINAL_ACTION_VALUES and publication is None and not publication_enabled:
         return StageResult("not_started", "no_published_signal_to_track_outcome_for")

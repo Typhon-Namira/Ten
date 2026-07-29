@@ -38,6 +38,17 @@ test('decision copy is derived from backend action states and never implies exec
   assert.match(shell, /Analysis and decision support only/)
 })
 
+test('completed cycles keep BUY or SELL analysis separate from execution status', async () => {
+  const cycle = await source('src/components/ai-dashboard/AuthoritativeCycle.tsx')
+  const types = await source('src/types/index.ts')
+  assert.match(cycle, /cycle\.timeframe_matrix/)
+  assert.match(cycle, /Execution/)
+  assert.match(cycle, /blocking_reasons/)
+  assert.match(types, /analytical_direction: 'BUY' \| 'SELL'/)
+  assert.match(types, /execution_status: 'READY' \| 'BLOCKED'/)
+  assert.doesNotMatch(types, /analytical_direction:.*'HOLD'|analytical_direction:.*'WAIT'/)
+})
+
 test('data hook retains last good backend values and marks missing market evidence stale', async () => {
   const hook = await source('src/hooks/useAIDashboardData.ts')
   assert.match(hook, /Promise\.allSettled/)

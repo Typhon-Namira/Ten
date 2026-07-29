@@ -4,7 +4,7 @@ import { loadLightweightCharts, type LWChartApi, type LWPriceLine, type LWSeries
 import { useChartFocus } from '../lib/ChartFocusContext'
 import type { ChartCandle } from '../types'
 
-const TIMEFRAMES = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1']
+const TIMEFRAMES = ['M5', 'M15']
 
 type OverlayKey = 'structure' | 'zones' | 'liquidity' | 'volumeProfile' | 'events'
 

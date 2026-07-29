@@ -149,7 +149,11 @@ class AIReasoningRequestBuilder:
             )
 
         prediction = next(
-            (item for item in quant.predictions if item.horizon.horizon_id == "10_m1"),
+            (
+                item
+                for item in quant.predictions
+                if item.horizon.timeframe.upper() in {"M5", "M15"}
+            ),
             quant.predictions[0] if quant.predictions else None,
         )
         spread_value = next(

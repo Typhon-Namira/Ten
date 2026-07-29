@@ -28,7 +28,7 @@ class _ImmutableDTO(BaseModel):
 
 
 class TimeframeTrendSummary(_ImmutableDTO):
-    timeframe: Literal["M1", "M5", "M15"]
+    timeframe: Literal["M5", "M15"]
     state: str = Field(max_length=48)
     stale: bool
     freshness_seconds: float = Field(ge=0)
@@ -708,9 +708,9 @@ def build_llm_analysis_context(request: AIReasoningRequest) -> LLMAnalysisContex
 
     trend_by_timeframe: list[TimeframeTrendSummary] = []
     trend_evidence = _evidence_items(request, "trend_evidence")
-    for item in request.supported_timeframe_states[:3]:
-        timeframe = str(item.get("timeframe", "M1"))
-        if timeframe not in {"M1", "M5", "M15"}:
+    for item in request.supported_timeframe_states[:2]:
+        timeframe = str(item.get("timeframe", "M5"))
+        if timeframe not in {"M5", "M15"}:
             continue
         facts = [
             fact
@@ -795,7 +795,7 @@ def build_llm_analysis_context(request: AIReasoningRequest) -> LLMAnalysisContex
         institutional_flow=_engine_summary(flow_items, fallback="Institutional Flow summary unavailable"),
         quant=CompactQuantForecast(
             status=str(request.data_quality_summary.get("quant_status", "unknown"))[:48],
-            horizon="10_m1",
+            horizon="M5_M15",
             dominant_direction=dominant,
             buy_probability=probabilities["BUY"],
             sell_probability=probabilities["SELL"],

@@ -38,7 +38,7 @@ _ENGINE_NAMES = (
     "market_regime",
     "economic_calendar",
 )
-_TIMEFRAME_MINUTES = {"M1": 1, "M5": 5, "M15": 15}
+_TIMEFRAME_MINUTES = {"M5": 5, "M15": 15}
 
 
 def _canonical(value: Any) -> str:
@@ -88,7 +88,7 @@ def expected_closed_boundary(boundary: datetime, timeframe: str) -> datetime:
 
 
 class UnifiedMarketStateService:
-    """Captures full engine outputs and builds synchronized M1/M5/M15 states."""
+    """Captures full engine outputs and builds synchronized M5/M15 states."""
 
     def __init__(
         self,

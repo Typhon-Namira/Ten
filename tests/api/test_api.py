@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from backend.app.core.config import Settings
 from backend.app.ai_reasoning.request_persistence import PersistedAIReasoningRequest
 from backend.app.api.routes.dashboard import (
+    _authoritative_signal_projection,
     _latest_complete_cycle_lineage,
     _stage_fingerprint,
     _system_stage,
@@ -45,6 +46,43 @@ def test_unchanged_stage_status_has_one_stable_history_fingerprint() -> None:
 
     changed = {**stage, "reason": "empty_profile_period"}
     assert _stage_fingerprint(changed) != _stage_fingerprint(stage)
+
+
+def test_authoritative_dashboard_preserves_direction_when_execution_is_blocked() -> None:
+    signal = SimpleNamespace(
+        model_dump=lambda **_: {
+            "signal": "SELL",
+            "entry": 2400.0,
+            "stop_loss": 2410.0,
+            "take_profit": 2380.0,
+            "risk_reward_ratio": 2.0,
+            "valid_from": datetime.now(UTC),
+            "valid_until": datetime.now(UTC) + timedelta(minutes=5),
+            "expected_holding_seconds": 300,
+        }
+    )
+    decision = SimpleNamespace(
+        final_action=SimpleNamespace(value="SELL"),
+        decision_reason="risk_hard_block",
+        overall_confidence=0.0,
+        publication_eligible=False,
+        blockers=(SimpleNamespace(reason_code="risk_hard_block"),),
+        warnings=(),
+    )
+
+    result = _authoritative_signal_projection(
+        signal,
+        decision,
+        lifecycle_status="CURRENT",
+    )
+
+    assert result["candidate_signal"] == "SELL"
+    assert result["signal"] == "SELL"
+    assert result["authoritative_action"] == "SELL"
+    assert result["lifecycle_status"] == "BLOCKED"
+    assert result["execution_status"] == "BLOCKED"
+    assert result["blocking_reasons"] == ["risk_hard_block"]
+    assert "WAIT" not in str(result)
 
 
 def test_unhandled_exception_on_get_degrades_to_200_not_500() -> None:
@@ -197,6 +235,8 @@ def test_authoritative_cycle_and_history_reads_never_invoke_ai_provider() -> Non
         "ai_market_analyses.symbol = :instrument"
     )
     assert latest_body["selection_diagnostics"]["latest_ai_market_analysis_id"] is None
+    assert latest_body["multi_timeframe_signal"] is None
+    assert latest_body["timeframe_matrix"] == []
     assert signals.status_code == 200
     assert signals.json()["items"] == []
     assert analyses.status_code == 200
@@ -650,18 +690,18 @@ def test_dashboard_reports_terminal_ai_failure_not_pending_end_to_end() -> None:
     assert body["stages"]["ai_reasoning"]["reason"] == "groq_1_returned_http_401"
     assert body["stages"]["ai_reasoning"]["error_code"] == "authentication_failed"
     assert body["stages"]["ai_reasoning"]["retryable"] is True
-    # A terminal provider failure must fail closed to an explicit WAIT, not remain stuck
+    # A terminal provider failure must fail closed to an explicit HOLD, not remain stuck
     # awaiting a proposal that cannot arrive.
-    assert body["stages"]["final_action"]["status"] == "wait"
+    assert body["stages"]["final_action"]["status"] == "hold"
     assert body["stages"]["final_action"]["reason"] == "ai_provider_unavailable"
-    assert body["stages"]["final_action"]["direction"] == "WAIT"
+    assert body["stages"]["final_action"]["direction"] == "HOLD"
     assert body["stages"]["final_action"]["publication_eligible"] is False
     assert "awaiting" not in body["stages"]["final_action"]["reason"]
     assert body["status"] == "failed"
 
 
-def test_dashboard_reports_wait_outcome_when_forecast_valid_with_no_proposal_end_to_end() -> None:
-    """Required behavior: "valid forecast + no proposal -> final action = WAIT, guardrails =
+def test_dashboard_reports_hold_outcome_when_forecast_valid_with_no_proposal_end_to_end() -> None:
+    """Required behavior: "valid forecast + no proposal -> final action = HOLD, guardrails =
     not_required" -- proven at the real HTTP boundary, not just against the pure function."""
     boundary = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
     state_id, cycle_id, forecast_id = uuid4(), uuid4(), uuid4()
@@ -687,12 +727,12 @@ def test_dashboard_reports_wait_outcome_when_forecast_valid_with_no_proposal_end
     body = response.json()
     assert body["stages"]["ai_reasoning"]["status"] == "available"
     assert body["stages"]["guardrails"]["status"] == "not_required"
-    assert body["stages"]["final_action"]["status"] == "wait"
-    assert body["stages"]["final_action"]["direction"] == "WAIT"
+    assert body["stages"]["final_action"]["status"] == "hold"
+    assert body["stages"]["final_action"]["direction"] == "HOLD"
     # `TEN_AI_SIGNAL_MONITORING` is unset in this test app's default config, so monitoring itself
     # is disabled -- that takes precedence over "not_required" (see
-    # test_monitoring_not_required_for_wait_final_action in test_dashboard_status.py for the
-    # dedicated, monitoring-enabled unit-level proof of the WAIT -> not_required branch).
+    # test_monitoring_not_required_for_hold_final_action in test_dashboard_status.py for the
+    # dedicated, monitoring-enabled unit-level proof of the HOLD -> not_required branch).
     assert body["stages"]["monitoring"]["status"] == "not_available"
     assert body["stages"]["monitoring"]["reason"] == "ai_signal_monitoring_disabled"
     assert body["stages"]["outcome"]["status"] == "not_applicable"

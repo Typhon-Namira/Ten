@@ -45,7 +45,7 @@ class ForecastOutcomeEvaluator:
                 candle_count=0,
                 reason_codes=("horizon_not_complete",),
             )
-        duration = 60 if prediction.horizon.timeframe == "M1" else 300
+        duration = {"M5": 300, "M15": 900}[prediction.horizon.timeframe]
         eligible = sorted(
             [
                 candle

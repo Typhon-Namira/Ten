@@ -50,6 +50,16 @@ class AnalysisSignalLifecycle(StrEnum):
     SUPERSEDED = "SUPERSEDED"
 
 
+class AnalysisExecutionEligibility(StrEnum):
+    ELIGIBLE = "ELIGIBLE"
+    INELIGIBLE = "INELIGIBLE"
+
+
+class AnalysisExecutionStatus(StrEnum):
+    READY = "READY"
+    BLOCKED = "BLOCKED"
+
+
 class QuantAIAlignment(StrEnum):
     AGREEMENT = "agreement"
     DISAGREEMENT = "disagreement"
@@ -286,6 +296,11 @@ class AIAnalysisSignal(StrictAnalysisModel):
     valid_until: datetime | None = None
     expected_holding_seconds: int | None = Field(default=None, gt=0)
     lifecycle_status: AnalysisSignalLifecycle = AnalysisSignalLifecycle.ACTIVE
+    execution_eligibility: AnalysisExecutionEligibility = (
+        AnalysisExecutionEligibility.INELIGIBLE
+    )
+    execution_status: AnalysisExecutionStatus = AnalysisExecutionStatus.BLOCKED
+    blocking_reasons: tuple[str, ...] = ()
     fallback: bool = False
     source: str = "deterministic_analysis_signal"
     generated_at: datetime
@@ -298,6 +313,29 @@ class AIAnalysisSignal(StrictAnalysisModel):
         if value.tzinfo is None:
             raise ValueError("analysis-signal timestamp must be timezone-aware")
         return value.astimezone(UTC)
+
+    @model_validator(mode="before")
+    @classmethod
+    def historical_execution_projection(cls, value: object) -> object:
+        if not isinstance(value, dict) or "execution_eligibility" in value:
+            return value
+        projected = dict(value)
+        geometry = tuple(
+            projected.get(field)
+            for field in ("entry", "stop_loss", "take_profit", "risk_reward_ratio")
+        )
+        if projected.get("signal") in {"BUY", "SELL"} and all(
+            item is not None for item in geometry
+        ):
+            projected["execution_eligibility"] = "ELIGIBLE"
+            projected["execution_status"] = "READY"
+        else:
+            projected["execution_eligibility"] = "INELIGIBLE"
+            projected["execution_status"] = "BLOCKED"
+            projected["blocking_reasons"] = tuple(
+                projected.get("risk_flags") or ("historical_non_actionable_signal",)
+            )
+        return projected
 
     @model_validator(mode="after")
     def geometry_and_strength_are_consistent(self) -> AIAnalysisSignal:
@@ -315,8 +353,22 @@ class AIAnalysisSignal(StrictAnalysisModel):
             if any(value is not None for value in geometry):
                 raise ValueError("HOLD analysis signal cannot contain execution geometry")
             return self
-        if any(value is None for value in geometry):
-            raise ValueError("directional analysis signal requires complete geometry")
+        if self.execution_eligibility == AnalysisExecutionEligibility.ELIGIBLE:
+            if self.execution_status != AnalysisExecutionStatus.READY:
+                raise ValueError("eligible analytical signal must be execution-ready")
+            if self.blocking_reasons:
+                raise ValueError("eligible analytical signal cannot retain blockers")
+            if any(value is None for value in geometry):
+                raise ValueError("eligible analytical signal requires complete geometry")
+        else:
+            if self.execution_status != AnalysisExecutionStatus.BLOCKED:
+                raise ValueError("ineligible analytical signal must be blocked")
+            if not self.blocking_reasons:
+                raise ValueError("ineligible analytical signal requires explicit blockers")
+            if all(value is None for value in geometry):
+                return self
+            if any(value is None for value in geometry):
+                raise ValueError("partial analytical geometry is prohibited")
         assert self.entry is not None
         assert self.stop_loss is not None
         assert self.take_profit is not None

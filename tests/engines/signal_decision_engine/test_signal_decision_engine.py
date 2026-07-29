@@ -16,12 +16,15 @@ from backend.app.engines.signal_decision_engine import (
     DependencyHealth,
     DependencyState,
     EconomicRiskReference,
+    FinalSignalAction,
+    InMemorySignalDecisionRepository,
     MarketRegimeReference,
     RuleDefinition,
     RuleRegistry,
     SignalDecisionConfig,
     SignalDecisionConfigurationError,
     SignalDecisionInput,
+    SignalReadiness,
     production_rule_registry,
 )
 from backend.app.engines.signal_decision_engine.models import DecisionMode, RuleCategory
@@ -116,6 +119,52 @@ def test_numeric_threshold_precedence(updates: dict[str, object], state: Decisio
     result = ConservativeSignalDecisionPolicy().evaluate(decision_input(score=ai_score(**updates)))
     assert result.state == state
     assert reason in reason_codes(result)
+    assert result.final_action in {
+        FinalSignalAction.BUY,
+        FinalSignalAction.SELL,
+        FinalSignalAction.HOLD,
+    }
+    if state != DecisionState.ELIGIBLE:
+        assert result.final_action == FinalSignalAction.HOLD
+        assert result.blockers or result.warnings
+        assert result.publication_eligible is False
+        assert result.readiness in {
+            SignalReadiness.CONDITIONAL,
+            SignalReadiness.REJECTED,
+        }
+
+
+@pytest.mark.asyncio
+async def test_blocked_cycle_persists_exactly_one_authoritative_hold() -> None:
+    repository = InMemorySignalDecisionRepository()
+    decision = ConservativeSignalDecisionPolicy().evaluate(
+        decision_input(score=ai_score(market_risk_score=90.0))
+    )
+
+    first = await repository.save_decision(decision)
+    second = await repository.save_decision(decision)
+    persisted = await repository.list_decisions("XAUUSD", "M15")
+
+    assert first == second
+    assert len(persisted) == 1
+    assert persisted[0].final_action == FinalSignalAction.HOLD
+    assert persisted[0].blockers
+    assert persisted[0].publication_eligible is False
+
+
+def test_historical_wait_payload_reads_as_hold_but_cannot_round_trip_wait() -> None:
+    decision = ConservativeSignalDecisionPolicy().evaluate(
+        decision_input(score=ai_score(market_risk_score=90.0))
+    )
+    historical = decision.model_dump(mode="python")
+    historical["final_action"] = "WAIT"
+    historical["readiness"] = "waiting"
+
+    normalized = decision.__class__.model_validate(historical)
+
+    assert normalized.final_action == FinalSignalAction.HOLD
+    assert normalized.readiness == SignalReadiness.REJECTED
+    assert normalized.model_dump(mode="json")["final_action"] == "HOLD"
 
 
 def test_freshness_boundaries_and_stale_status() -> None:

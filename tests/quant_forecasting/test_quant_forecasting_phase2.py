@@ -45,7 +45,7 @@ async def market_state(*, outputs: dict[str, object] | None = None) -> UnifiedMa
     service = UnifiedMarketStateService(InMemoryUnifiedMarketStateRepository(), clock=lambda: NOW)
     values = outputs or {}
     state = None
-    for timeframe in (Timeframe.M1, Timeframe.M5, Timeframe.M15):
+    for timeframe in (Timeframe.M5, Timeframe.M15):
         envelope = CanonicalEventEnvelope.final_candle(candle(timeframe), uuid4(), NOW)
         state = await service.capture_cycle(envelope, values)
     assert state is not None
@@ -72,10 +72,10 @@ async def test_exact_configured_horizons_and_probabilities() -> None:
     assert result is not None
     assert result.status == ForecastStatus.AVAILABLE
     assert [(item.horizon.candle_count, item.horizon.timeframe) for item in result.predictions] == [
-        (3, "M1"),
-        (5, "M1"),
-        (10, "M1"),
+        (1, "M5"),
         (3, "M5"),
+        (1, "M15"),
+        (3, "M15"),
     ]
     assert all(abs(item.buy_probability + item.sell_probability + item.neutral_probability - 1) < 1e-10 for item in result.predictions)
     assert result.shadow_only is True
@@ -170,16 +170,16 @@ async def test_outcome_waits_for_closed_horizon_and_is_spread_adjusted() -> None
     prediction = result.predictions[0]
     evaluator = ForecastOutcomeEvaluator()
     future = [
-        candle(Timeframe.M1, timestamp=BOUNDARY + timedelta(minutes=index), close=3302 + index)
-        for index in range(3)
+        candle(Timeframe.M5, timestamp=BOUNDARY + timedelta(minutes=5 * index), close=3302 + index)
+        for index in range(1)
     ]
 
     pending = evaluator.evaluate(result, prediction, future, evaluated_at=BOUNDARY + timedelta(minutes=2))
-    completed = evaluator.evaluate(result, prediction, future, evaluated_at=BOUNDARY + timedelta(minutes=3))
+    completed = evaluator.evaluate(result, prediction, future, evaluated_at=BOUNDARY + timedelta(minutes=5))
 
     assert pending.status == OutcomeStatus.PENDING
     assert completed.status == OutcomeStatus.VALID
-    assert completed.candle_count == 3
+    assert completed.candle_count == 1
     assert completed.spread_adjusted_return is not None
     assert completed.realized_return is not None
     assert completed.spread_adjusted_return < completed.realized_return
@@ -203,9 +203,7 @@ async def test_mfe_mae_and_conservative_tp_sl_ordering_are_deterministic() -> No
     )
     entry = prediction.reference_price
     bars = [
-        candle(Timeframe.M1, timestamp=BOUNDARY, close=entry),
-        candle(Timeframe.M1, timestamp=BOUNDARY + timedelta(minutes=1), close=entry),
-        candle(Timeframe.M1, timestamp=BOUNDARY + timedelta(minutes=2), close=entry),
+        candle(Timeframe.M5, timestamp=BOUNDARY, close=entry),
     ]
     bars[0] = bars[0].model_copy(update={"high": entry * 1.002, "low": entry * 0.998})
 
@@ -213,7 +211,7 @@ async def test_mfe_mae_and_conservative_tp_sl_ordering_are_deterministic() -> No
         result,
         prediction,
         bars,
-        evaluated_at=BOUNDARY + timedelta(minutes=3),
+        evaluated_at=BOUNDARY + timedelta(minutes=5),
     )
 
     assert outcome.status == OutcomeStatus.VALID
@@ -231,12 +229,12 @@ async def test_calibration_reports_brier_log_loss_ece_and_buckets() -> None:
     result = await build_service(InMemoryQuantForecastRepository()).forecast(state)
     assert result is not None
     prediction = result.predictions[0]
-    candles = [candle(Timeframe.M1, timestamp=BOUNDARY + timedelta(minutes=index), close=3304 + index) for index in range(3)]
+    candles = [candle(Timeframe.M5, timestamp=BOUNDARY, close=3304)]
     outcome = ForecastOutcomeEvaluator().evaluate(
         result,
         prediction,
         candles,
-        evaluated_at=BOUNDARY + timedelta(minutes=3),
+        evaluated_at=BOUNDARY + timedelta(minutes=5),
     )
 
     report = CalibrationReporter().build(result.model_name, result.model_version, [(prediction, outcome)], generated_at=NOW)
@@ -289,7 +287,7 @@ async def test_outcome_worker_persists_only_after_each_horizon_is_complete() -> 
     outcomes = await ForecastOutcomeWorker(
         repository,
         MarketData(),
-        clock=lambda: BOUNDARY + timedelta(minutes=15),
+        clock=lambda: BOUNDARY + timedelta(minutes=45),
     ).evaluate(result)
 
     assert len(outcomes) == 4

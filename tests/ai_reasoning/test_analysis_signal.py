@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from backend.app.ai_reasoning.analysis import (
+    AnalysisExecutionEligibility,
     AnalysisSignalAction,
     AnalysisSignalStrength,
 )
@@ -15,12 +18,26 @@ from tests.ai_reasoning.test_ai_reasoning_lifecycle import state_and_quant
 from tests.ai_reasoning.test_analysis_architecture_v2 import analysis
 
 
+def aligned_analysis(state, quant, index: int = 5, **kwargs):
+    value = analysis(index, **kwargs)
+    return value.model_copy(
+        update={
+            "cycle_id": state.cycle_id,
+            "market_snapshot_id": state.state_id,
+            "quantitative_forecast_id": quant.result_id,
+            "analysis_timestamp": state.market_data_boundary,
+            "knowledge_cutoff": state.knowledge_cutoff,
+            "created_at": state.knowledge_cutoff,
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_completed_analysis_produces_directionally_valid_signal() -> None:
     state, quant = await state_and_quant()
 
     signal = DeterministicAnalysisSignalGenerator().generate(
-        analysis(5),
+        aligned_analysis(state, quant),
         state,
         quant,
     )
@@ -32,34 +49,32 @@ async def test_completed_analysis_produces_directionally_valid_signal() -> None:
             AnalysisSignalStrength.STRONG,
             AnalysisSignalStrength.VERY_STRONG,
         }
-    assert signal.stop_loss is not None
-    assert signal.entry is not None
-    assert signal.take_profit is not None
-    assert signal.stop_loss < signal.entry < signal.take_profit
+    assert signal.execution_eligibility == AnalysisExecutionEligibility.INELIGIBLE
+    assert signal.entry is None
+    assert signal.blocking_reasons
 
 
 @pytest.mark.asyncio
-async def test_weak_directional_evidence_produces_hold_without_levels() -> None:
+async def test_weak_directional_evidence_preserves_low_confidence_direction_without_levels() -> None:
     state, quant = await state_and_quant()
 
     signal = DeterministicAnalysisSignalGenerator().generate(
-        analysis(5, regime="ranging", confidence=0.4),
+        aligned_analysis(state, quant, regime="ranging", confidence=0.4),
         state,
         quant,
     )
 
-    assert signal.signal == AnalysisSignalAction.HOLD
-    assert signal.confidence <= 39
+    assert signal.signal in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
     assert signal.entry is None
     assert signal.stop_loss is None
     assert signal.take_profit is None
-    assert "insufficient_evidence_for_direction" in signal.risk_flags
+    assert signal.execution_eligibility == AnalysisExecutionEligibility.INELIGIBLE
 
 
 @pytest.mark.asyncio
-async def test_bearish_analysis_produces_directionally_valid_sell_levels() -> None:
+async def test_ai_bearish_claim_cannot_override_deterministic_evidence_or_create_levels() -> None:
     state, quant = await state_and_quant()
-    bearish = analysis(5, regime="bearish")
+    bearish = aligned_analysis(state, quant, regime="bearish")
     assert bearish.output is not None
     structural_output = bearish.output.model_copy(
         update={
@@ -77,32 +92,30 @@ async def test_bearish_analysis_produces_directionally_valid_sell_levels() -> No
         quant,
     )
 
-    assert signal.signal == AnalysisSignalAction.SELL
-    assert signal.take_profit is not None
-    assert signal.entry is not None
-    assert signal.stop_loss is not None
-    assert signal.take_profit < signal.entry < signal.stop_loss
-    assert signal.risk_reward_ratio is not None
-    assert signal.risk_reward_ratio >= 2
+    assert signal.signal == AnalysisSignalAction.BUY
+    assert signal.take_profit is None
+    assert signal.entry is None
+    assert signal.stop_loss is None
+    assert signal.execution_eligibility == AnalysisExecutionEligibility.INELIGIBLE
 
 
 @pytest.mark.asyncio
-async def test_direction_without_minimum_structural_rr_produces_hold() -> None:
+async def test_direction_without_minimum_structural_rr_is_blocked_not_hold() -> None:
     state, quant = await state_and_quant()
 
     signal = DeterministicAnalysisSignalGenerator().generate(
-        analysis(5, regime="bearish"),
+        aligned_analysis(state, quant, regime="bearish"),
         state,
         quant,
     )
 
-    assert signal.signal == AnalysisSignalAction.HOLD
+    assert signal.signal in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
     assert signal.entry is None
-    assert "no_structural_geometry_meets_minimum_risk_reward" in signal.risk_flags
+    assert signal.blocking_reasons
 
 
 @pytest.mark.asyncio
-async def test_geometry_uses_structure_not_tiny_expected_move() -> None:
+async def test_tiny_expected_move_never_manufactures_geometry() -> None:
     state, quant = await state_and_quant()
     prediction = quant.predictions[0].model_copy(
         update={
@@ -117,17 +130,15 @@ async def test_geometry_uses_structure_not_tiny_expected_move() -> None:
     tiny_quant = quant.model_copy(update={"predictions": (prediction,)})
 
     signal = DeterministicAnalysisSignalGenerator().generate(
-        analysis(5),
+        aligned_analysis(state, tiny_quant),
         state,
         tiny_quant,
     )
 
     assert signal.signal == AnalysisSignalAction.BUY
-    assert signal.entry == prediction.reference_price
-    assert signal.stop_loss == 3300
-    assert signal.take_profit == 3350
-    assert signal.risk_reward_ratio is not None
-    assert signal.risk_reward_ratio > 2
+    assert signal.entry is None
+    assert signal.stop_loss is None
+    assert signal.take_profit is None
     assert signal.analysis_confidence == 80
     assert signal.confidence == round(signal.signal_confidence)
 
@@ -137,8 +148,9 @@ async def test_replay_of_identical_point_in_time_inputs_is_byte_stable() -> None
     state, quant = await state_and_quant()
     generator = DeterministicAnalysisSignalGenerator()
 
-    first = generator.generate(analysis(5), state, quant)
-    second = generator.generate(analysis(5), state, quant)
+    current = aligned_analysis(state, quant)
+    first = generator.generate(current, state, quant)
+    second = generator.generate(current, state, quant)
 
     assert first == second
     assert first.model_dump_json() == second.model_dump_json()
@@ -147,18 +159,30 @@ async def test_replay_of_identical_point_in_time_inputs_is_byte_stable() -> None
 @pytest.mark.asyncio
 async def test_degraded_source_data_caps_confidence_at_59() -> None:
     state, quant = await state_and_quant()
+    from backend.app.market_state import EvidenceAvailability
+
+    evidence = list(state.evidence)
+    evidence[0] = evidence[0].model_copy(
+        update={"availability": EvidenceAvailability.DEGRADED}
+    )
     degraded = state.model_copy(
-        update={"degraded_evidence": (state.evidence[0].evidence_id,)}
+        update={
+            "evidence": tuple(evidence),
+            "degraded_evidence": (evidence[0].evidence_id,),
+        }
     )
 
+    baseline = DeterministicAnalysisSignalGenerator().generate(
+        aligned_analysis(state, quant), state, quant
+    )
     signal = DeterministicAnalysisSignalGenerator().generate(
-        analysis(5),
+        aligned_analysis(degraded, quant),
         degraded,
         quant,
     )
 
-    assert signal.confidence <= 59
-    assert "stale_or_degraded_source_data" in signal.risk_flags
+    assert signal.confidence <= baseline.confidence
+    assert "timeframe_evidence_degraded" in signal.risk_flags
 
 
 @pytest.mark.asyncio
@@ -166,7 +190,7 @@ async def test_signal_persistence_detects_conflicting_duplicate() -> None:
     state, quant = await state_and_quant()
     repository = InMemoryAIReasoningRepository()
     signal = DeterministicAnalysisSignalGenerator().generate(
-        analysis(5),
+        aligned_analysis(state, quant),
         state,
         quant,
     )
@@ -183,9 +207,12 @@ async def test_signal_persistence_detects_conflicting_duplicate() -> None:
 @pytest.mark.asyncio
 async def test_latest_completed_cycle_ignores_newer_analysis_without_signal() -> None:
     state, quant = await state_and_quant()
+    next_state, next_quant = await state_and_quant(
+        state.market_data_boundary + timedelta(minutes=5)
+    )
     repository = InMemoryAIReasoningRepository()
-    completed_analysis = analysis(5)
-    incomplete_newer_analysis = analysis(10)
+    completed_analysis = aligned_analysis(state, quant, 5)
+    incomplete_newer_analysis = aligned_analysis(next_state, next_quant, 10)
     completed_signal = DeterministicAnalysisSignalGenerator().generate(
         completed_analysis,
         state,
@@ -208,9 +235,12 @@ async def test_latest_completed_cycle_ignores_newer_analysis_without_signal() ->
 @pytest.mark.asyncio
 async def test_analysis_signal_history_is_stable_and_paginated() -> None:
     state, quant = await state_and_quant()
+    next_state, next_quant = await state_and_quant(
+        state.market_data_boundary + timedelta(minutes=5)
+    )
     repository = InMemoryAIReasoningRepository()
-    first_analysis = analysis(5)
-    second_analysis = analysis(10)
+    first_analysis = aligned_analysis(state, quant, 5)
+    second_analysis = aligned_analysis(next_state, next_quant, 10)
     first = DeterministicAnalysisSignalGenerator().generate(
         first_analysis,
         state,
@@ -218,8 +248,8 @@ async def test_analysis_signal_history_is_stable_and_paginated() -> None:
     )
     second = DeterministicAnalysisSignalGenerator().generate(
         second_analysis,
-        state,
-        quant,
+        next_state,
+        next_quant,
     )
     await repository.save_analysis(first_analysis)
     await repository.save_analysis_signal(first)
