@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from backend.app.engines.market_data_engine.models import MarketScheduleStatus
 
 
-REQUIRED_TIMEFRAMES = ("M1", "M5", "M15")
+REQUIRED_TIMEFRAMES = ("M5", "M15")
 
 
 class ImmutableMarketStateModel(BaseModel):
@@ -106,7 +106,7 @@ class MarketEvidenceFrame(ImmutableMarketStateModel):
     @model_validator(mode="after")
     def point_in_time_invariants(self) -> MarketEvidenceFrame:
         if self.timeframe not in REQUIRED_TIMEFRAMES:
-            raise ValueError("Unified Market State Phase 1 supports M1, M5, and M15 frames")
+            raise ValueError("Unified Market State supports M5 and M15 frames")
         if self.candle_close_at <= self.candle_open_at:
             raise ValueError("frame candle close must follow open")
         if self.candle_close_at > self.knowledge_cutoff or self.created_at > self.knowledge_cutoff:
@@ -216,7 +216,7 @@ class UnifiedMarketState(ImmutableMarketStateModel):
     def synchronized_point_in_time_state(self) -> UnifiedMarketState:
         names = tuple(item.timeframe for item in self.timeframes)
         if set(names) != set(REQUIRED_TIMEFRAMES) or len(names) != len(REQUIRED_TIMEFRAMES):
-            raise ValueError("Unified Market State requires exactly one M1, M5, and M15 frame")
+            raise ValueError("Unified Market State requires exactly one M5 and M15 frame")
         if self.market_data_boundary > self.knowledge_cutoff or self.created_at > self.knowledge_cutoff:
             raise ValueError("market state exceeds its knowledge cutoff")
         frames = {timeframe_state.frame_id: timeframe_state for timeframe_state in self.timeframes}

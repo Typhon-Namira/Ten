@@ -241,19 +241,19 @@ def test_guardrails_not_required_when_proposal_recommends_wait():
     assert result.status == "not_required"
 
 
-def test_final_action_is_wait_when_forecast_valid_and_no_proposal():
+def test_final_action_is_hold_when_forecast_valid_and_no_proposal():
     result = derive_final_action_stage(forecast=forecast(), proposal=None, action=None)
-    assert result.status == "wait"
-    assert result.extra["direction"] == "WAIT"
+    assert result.status == "hold"
+    assert result.extra["direction"] == "HOLD"
 
 
-def test_final_action_is_wait_when_proposal_recommends_wait():
+def test_final_action_is_hold_when_legacy_proposal_recommends_wait():
     result = derive_final_action_stage(forecast=forecast(), proposal=proposal(recommended_action="WAIT"), action=None)
-    assert result.status == "wait"
+    assert result.status == "hold"
     assert result.reason == "ai_proposal_recommended_wait"
 
 
-def test_final_action_fails_closed_to_wait_after_a_terminal_ai_failure():
+def test_final_action_fails_closed_to_hold_after_a_terminal_ai_failure():
     """Item 11 at this layer: once ai_reasoning has terminally failed, final_action must not sit
     in "awaiting" anything — it is blocked by a resolved upstream failure."""
     result = derive_final_action_stage(
@@ -261,10 +261,10 @@ def test_final_action_fails_closed_to_wait_after_a_terminal_ai_failure():
         proposal=None,
         action=None,
     )
-    assert result.status == "wait"
+    assert result.status == "hold"
     assert result.reason == "ai_provider_unavailable"
     assert result.error_code == "authentication_failed"
-    assert result.extra["direction"] == "WAIT"
+    assert result.extra["direction"] == "HOLD"
     assert result.extra["publication_eligible"] is False
     assert "awaiting" not in result.reason
 
@@ -302,25 +302,25 @@ def test_publication_disabled_status_is_independent_of_upstream_stage_results():
 # --- monitoring / outcome -------------------------------------------------------------------------
 
 
-def test_monitoring_not_required_for_wait_final_action():
+def test_monitoring_not_required_for_hold_final_action():
     """Item 9."""
     result = derive_monitoring_stage(
         signal=None,
-        final_action_status="wait",
+        final_action_status="hold",
         action=None,
         publication=None,
         publication_enabled=False,
         monitoring_enabled=True,
     )
     assert result.status == "not_required"
-    assert result.reason == "latest_final_action_non_actionable_wait"
+    assert result.reason == "latest_final_action_non_actionable_hold"
 
 
 def test_outcome_not_applicable_when_no_signal_was_ever_opened():
     """Item 10."""
     result = derive_outcome_stage(
         outcome=None,
-        final_action_status="wait",
+        final_action_status="hold",
         action=None,
         publication=None,
         publication_enabled=False,
@@ -383,7 +383,7 @@ def test_active_signal_without_publication_is_reported_as_inconsistent():
 def test_monitoring_disabled_flag_takes_precedence():
     result = derive_monitoring_stage(
         signal=None,
-        final_action_status="wait",
+        final_action_status="hold",
         action=None,
         publication=None,
         publication_enabled=False,

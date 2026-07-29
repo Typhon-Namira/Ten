@@ -35,7 +35,7 @@ class PointInTimeFeatureExtractor:
         # Revalidation makes the anti-future-leakage contract explicit at this boundary.
         state = UnifiedMarketState.model_validate(state.model_dump(mode="python"))
         features: list[QuantFeatureValue] = []
-        for timeframe in ("M1", "M5", "M15"):
+        for timeframe in ("M5", "M15"):
             item = next(
                 (
                     evidence
@@ -90,7 +90,7 @@ class PointInTimeFeatureExtractor:
                     )
                 )
 
-        for timeframe in ("M1", "M5", "M15"):
+        for timeframe in ("M5", "M15"):
             scoped = [item for item in state.evidence if item.source_timeframe == timeframe]
             for item in scoped:
                 feature_availability = FeatureAvailability(item.availability.value)

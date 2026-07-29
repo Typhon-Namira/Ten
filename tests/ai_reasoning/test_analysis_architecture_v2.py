@@ -27,7 +27,7 @@ from backend.app.ai_reasoning.repository import (
     InMemoryAIReasoningRepository,
 )
 from backend.app.engines.signal_decision_engine import ConservativeSignalDecisionPolicy
-from backend.app.engines.signal_decision_engine.models import FinalSignalAction
+from backend.app.engines.signal_decision_engine.models import FinalSignalAction, SignalReadiness
 from tests.engines.ai_scoring_engine.test_ai_scoring import NOW
 from tests.engines.signal_decision_engine.test_signal_decision_engine import decision_input
 from tests.ai_reasoning.test_ai_reasoning_lifecycle import build_service, state_and_quant
@@ -285,7 +285,8 @@ def test_signal_engine_is_only_action_authority_and_confidence_is_independent() 
 
 def test_missing_analysis_fails_closed_for_publication_without_breaking_audit_decision() -> None:
     decision = ConservativeSignalDecisionPolicy().evaluate(decision_input())
-    assert decision.final_action == FinalSignalAction.WAIT
+    assert decision.final_action == FinalSignalAction.HOLD
+    assert decision.readiness == SignalReadiness.REJECTED
     assert decision.publication_eligible is False
 
 

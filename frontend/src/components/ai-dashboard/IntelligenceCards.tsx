@@ -8,7 +8,7 @@ function percent(input: number | null | undefined): string {
 }
 
 export function MarketStateSummary({ data }: { data: MarketIntelligence | null }) {
-  if (!data) return <section className="ai-card"><SectionHeader eyebrow="Market intelligence" title="Unified market state" /><EmptyState title="Waiting for market state" detail="Waiting for a synchronized M1, M5, and M15 state." /></section>
+  if (!data) return <section className="ai-card"><SectionHeader eyebrow="Market intelligence" title="Unified market state" /><EmptyState title="Waiting for market state" detail="Waiting for a synchronized M5 and M15 state." /></section>
   const staleSources = data.diagnostics.filter(item => item.freshness === 'stale')
   return <section className="ai-card">
     <SectionHeader eyebrow="Market intelligence" title="Unified market state" action={<CandlestickChart size={19} />} />
@@ -25,7 +25,7 @@ export function MarketStateSummary({ data }: { data: MarketIntelligence | null }
     </div>
     <div className="card-foot">
       <StatusBadge tone={staleSources.length ? 'negative' : 'positive'}>{staleSources.length ? `${staleSources.length} stale sources` : 'Point-in-time state current'}</StatusBadge>
-      <span>M1 · M5 · M15 synchronized</span>
+      <span>M5 · M15 synchronized</span>
     </div>
     {(data.current_bos || data.current_choch || data.current_order_block || data.current_fvg || data.ai_missing_sources.length || data.ai_degraded_sources.length) && <DetailDrawer label="Technical details">
       <div className="detail-grid">

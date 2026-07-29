@@ -78,17 +78,15 @@ class DeterministicBaselineProvider:
         }
         if len(values) < self.config.minimum_numeric_features:
             return self._empty(result_id, request, ForecastStatus.INSUFFICIENT_HISTORY, ("insufficient_point_in_time_features",))
-        reference_price = values.get("m1.close")
+        reference_price = values.get("m5.close")
         if reference_price is None or reference_price <= 0:
-            return self._empty(result_id, request, ForecastStatus.UNAVAILABLE, ("m1_reference_price_unavailable",))
+            return self._empty(result_id, request, ForecastStatus.UNAVAILABLE, ("m5_reference_price_unavailable",))
 
         momentum = (
-            values.get("m1.body_return", 0.0) * 0.55
-            + values.get("m5.body_return", 0.0) * 0.30
-            + values.get("m15.body_return", 0.0) * 0.15
+            values.get("m5.body_return", 0.0) * 0.60
+            + values.get("m15.body_return", 0.0) * 0.40
         )
         observed_range = max(
-            values.get("m1.range_return", 0.0),
             values.get("m5.range_return", 0.0) / sqrt(5),
             values.get("m15.range_return", 0.0) / sqrt(15),
             self.config.neutral_band,

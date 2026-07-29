@@ -59,10 +59,10 @@ export function PipelineIcon({ status }: { status: PipelineStatus }) {
   if (status === 'unavailable' || status === 'blocked') return <Info aria-hidden="true" />
   if (status === 'running') return <Loader2 aria-hidden="true" className="spin" />
   if (status === 'disabled') return <ShieldOff aria-hidden="true" />
-  // "wait"/"not_required"/"not_applicable" are all legitimate, resolved, non-actionable outcomes
+  // "hold"/"not_required"/"not_applicable" are all legitimate, resolved, non-actionable outcomes
   // — deliberately a different mark from "waiting" (still in progress) so a viewer doesn't read a
-  // concluded WAIT scenario as a step that just hasn't happened yet.
-  if (status === 'wait' || status === 'not_required' || status === 'not_applicable') return <MinusCircle aria-hidden="true" />
+  // concluded HOLD scenario as a step that just hasn't happened yet.
+  if (status === 'hold' || status === 'not_required' || status === 'not_applicable') return <MinusCircle aria-hidden="true" />
   return <Circle aria-hidden="true" />
 }
 

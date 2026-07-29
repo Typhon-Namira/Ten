@@ -8,7 +8,7 @@ import type {
 } from '../types'
 
 export type Tone = 'positive' | 'negative' | 'neutral' | 'warning'
-export type PipelineStatus = 'completed' | 'active' | 'waiting' | 'rejected' | 'failed' | 'unavailable' | 'blocked' | 'disabled' | 'running' | 'wait' | 'not_required' | 'not_applicable'
+export type PipelineStatus = 'completed' | 'active' | 'waiting' | 'rejected' | 'failed' | 'unavailable' | 'blocked' | 'disabled' | 'running' | 'hold' | 'not_required' | 'not_applicable'
 
 export interface PipelineStep {
   id: string
@@ -78,7 +78,7 @@ export function decisionHeadline(action: FinalSystemAction | null): string {
   if (action.action === 'expired') return 'EXPIRED'
   if (action.action === 'monitoring') return 'MONITORING'
   if (action.action === 'no_action') return 'NO ACTION'
-  if (action.action === 'postponed' || action.action === 'temporarily_blocked') return 'WAIT'
+  if (action.action === 'postponed' || action.action === 'temporarily_blocked') return 'HOLD'
   return humanize(action.action).toUpperCase()
 }
 
@@ -117,12 +117,12 @@ export function pipelineSteps(
         : stage.status === 'degraded' || stage.status === 'partial' ? 'unavailable'
         // These pass through as their own distinct PipelineStatus values instead of collapsing
         // into "waiting" — that collapse is exactly what made a real, already-resolved outcome
-        // (a provider-backoff block, a legitimate non-actionable WAIT conclusion, a disabled
+        // (a provider-backoff block, a legitimate non-actionable HOLD conclusion, a disabled
         // stage) indistinguishable from "hasn't started yet".
         : stage.status === 'blocked' ? 'blocked'
         : stage.status === 'disabled' ? 'disabled'
         : stage.status === 'running' ? 'running'
-        : stage.status === 'wait' ? 'wait'
+        : stage.status === 'hold' ? 'hold'
         : stage.status === 'not_required' ? 'not_required'
         : stage.status === 'not_applicable' ? 'not_applicable'
         : 'waiting'
@@ -138,7 +138,7 @@ export function pipelineSteps(
   const rejected = action?.approval_state === 'rejected' || action?.approval_state === 'blocked'
   const failed = forecast?.status === 'failed' || forecast?.status === 'invalid'
   return [
-    { id: 'market', label: 'Market State', status: marketAvailable ? 'completed' : 'unavailable', detail: marketAvailable ? 'M1 · M5 · M15' : 'Unavailable' },
+    { id: 'market', label: 'Market State', status: marketAvailable ? 'completed' : 'unavailable', detail: marketAvailable ? 'M5 · M15' : 'Unavailable' },
     { id: 'quant', label: 'Quant Forecast', status: quantStatus === 'available' ? 'completed' : quantStatus ? 'unavailable' : 'waiting', detail: quantStatus ? humanize(quantStatus) : 'Awaiting forecast' },
     { id: 'reasoning', label: 'AI Reasoning', status: failed ? 'failed' : forecast ? 'completed' : 'waiting', detail: forecast ? humanize(forecast.status) : 'Not evaluated' },
     { id: 'proposal', label: 'AI Proposal', status: proposal ? 'completed' : failed ? 'unavailable' : 'waiting', detail: proposal ? humanize(proposal.recommended_action) : 'No proposal' },

@@ -6,7 +6,7 @@ export function ShadowForecastPanel({ forecast, calibration, outcomes }: { forec
   return <div className="shadow-forecast">
     <div className="shadow-forecast__banner">SHADOW FORECAST — NOT USED FOR LIVE SIGNAL PUBLICATION</div>
     {!forecast
-      ? <p className="empty-state">No shadow forecast is persisted. Shadow mode is disabled by default or a synchronized M1/M5/M15 state is not yet complete.</p>
+      ? <p className="empty-state">No shadow forecast is persisted. Shadow mode is disabled by default or a synchronized M5/M15 state is not yet complete.</p>
       : <>
         <div className="shadow-forecast__meta">
           <span>{forecast.status.replaceAll('_', ' ')}</span>

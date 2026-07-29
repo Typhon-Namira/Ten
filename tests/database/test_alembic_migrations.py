@@ -30,6 +30,28 @@ def test_runtime_schema_revision_matches_the_actual_alembic_head() -> None:
     assert script.get_current_head() == SCHEMA_HEAD_REVISION
 
 
+def test_multi_timeframe_signal_migration_is_strict_idempotent_and_reversible() -> None:
+    source = (
+        ROOT
+        / "migrations/versions/20260729_0014_multi_timeframe_signal_synthesis.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260729_0014"' in source
+    assert 'down_revision = "20260728_0013"' in source
+    assert '"multi_timeframe_signal_sets"' in source
+    assert '"timeframe_analytical_signals"' in source
+    assert "ux_multi_timeframe_signal_sets_market_state_id" in source
+    assert "ux_multi_timeframe_signal_sets_analysis_id" in source
+    assert "ux_timeframe_analytical_signal_scope" in source
+    assert "combined_direction IN ('BUY','SELL')" in source
+    assert "analytical_direction IN ('BUY','SELL')" in source
+    assert "execution_status IN ('READY','BLOCKED')" in source
+    assert 'ondelete="CASCADE"' in source
+    assert 'ondelete="RESTRICT"' in source
+    assert 'op.drop_table("timeframe_analytical_signals")' in source
+    assert 'op.drop_table("multi_timeframe_signal_sets")' in source
+
+
 def test_initial_migration_renders_every_model_as_postgresql_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEN_DATABASE_URL", "postgresql+asyncpg://ten:ten@localhost:5432/ten")
     output = StringIO()

@@ -13,6 +13,13 @@ from backend.app.events import InMemoryEventBus
 from backend.app.features import InMemoryFeatureStore
 from backend.app.integration import CanonicalEventEnvelope, FullSystemIntegrationService, InMemoryIntegrationRepository, IntegrationConfig, IntegrationMode, MissingIntegrationEventError, OperationalSignal, canonical_hash
 from backend.app.integration.stage_tracker import PipelineStageTracker
+from backend.app.ai_reasoning.signal import DeterministicAnalysisSignalGenerator
+from backend.app.signal_synthesis import (
+    InMemoryMultiTimeframeSignalRepository,
+    MultiTimeframeSignalSynthesizer,
+)
+from tests.ai_reasoning.test_ai_reasoning_lifecycle import state_and_quant
+from tests.signal_synthesis.test_multi_timeframe_signal import aligned_analysis
 
 
 class FakeMarketData:
@@ -556,6 +563,64 @@ async def test_ai_reasoning_failure_is_isolated_from_scoring_and_publication() -
     assert repository.metrics()["snapshots"] == 1
     assert await repository.signals() == ()
     assert coordinator.failures == 0
+
+
+@pytest.mark.asyncio
+async def test_validated_ai_cycle_persists_the_multi_timeframe_matrix_before_decision() -> None:
+    state, quant = await state_and_quant()
+    current_analysis = aligned_analysis(state, quant)
+    current_signal = DeterministicAnalysisSignalGenerator().generate(
+        current_analysis,
+        state,
+        quant,
+    )
+
+    class FixedCapture:
+        async def capture_cycle(self, *_: object, **__: object) -> object:
+            return state
+
+    class FixedForecast:
+        async def forecast(self, _: object) -> object:
+            return quant
+
+    class FixedReasoning:
+        async def process(self, _state: object, _forecast: object) -> object:
+            return SimpleNamespace(
+                analysis=current_analysis,
+                signal=current_signal,
+                temporal_context=None,
+                temporal_metrics=None,
+            )
+
+    bus, integration_repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, integration_repository)
+    synthesis_repository = InMemoryMultiTimeframeSignalRepository()
+    coordinator.unified_market_state = FixedCapture()
+    coordinator.quantitative_forecasting = FixedForecast()
+    coordinator.ai_reasoning = FixedReasoning()
+    coordinator.signal_synthesizer = MultiTimeframeSignalSynthesizer()
+    coordinator.signal_synthesis_repository = synthesis_repository
+    coordinator.ai_centric_shadow_mode = True
+
+    await coordinator.process(
+        CanonicalEventEnvelope.final_candle(
+            candle(Timeframe.M5),
+            state.cycle_id,
+            NOW,
+        )
+    )
+
+    persisted = await synthesis_repository.for_state(state.state_id)
+    assert persisted is not None
+    assert tuple(item.timeframe for item in persisted.timeframe_signals) == (
+        "M5",
+        "M15",
+    )
+    assert persisted.combined_signal.timeframe == "COMBINED"
+    assert all(
+        item.analytical_direction.value in {"BUY", "SELL"}
+        for item in (*persisted.timeframe_signals, persisted.combined_signal)
+    )
 
 
 @pytest.mark.asyncio

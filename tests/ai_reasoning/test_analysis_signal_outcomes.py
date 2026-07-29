@@ -4,17 +4,51 @@ from datetime import timedelta
 
 import pytest
 
-from backend.app.ai_reasoning.analysis import AnalysisSignalLifecycle
+from backend.app.ai_reasoning.analysis import (
+    AIAnalysisSignal,
+    AnalysisExecutionEligibility,
+    AnalysisExecutionStatus,
+    AnalysisSignalAction,
+    AnalysisSignalLifecycle,
+)
 from backend.app.ai_reasoning.signal import DeterministicAnalysisSignalGenerator
 from backend.app.ai_reasoning.signal_outcomes import AnalysisSignalOutcomeEvaluator
 from tests.ai_reasoning.test_ai_reasoning_lifecycle import state_and_quant
-from tests.ai_reasoning.test_analysis_architecture_v2 import analysis
+from tests.ai_reasoning.test_analysis_signal import aligned_analysis
+
+
+def execution_ready(signal: AIAnalysisSignal) -> AIAnalysisSignal:
+    payload = signal.model_dump(mode="python")
+    if signal.signal == AnalysisSignalAction.BUY:
+        payload.update(
+            entry=3300.0,
+            stop_loss=3290.0,
+            take_profit=3320.0,
+            risk_reward_ratio=2.0,
+        )
+    else:
+        payload.update(
+            entry=3300.0,
+            stop_loss=3310.0,
+            take_profit=3280.0,
+            risk_reward_ratio=2.0,
+        )
+    payload.update(
+        execution_eligibility=AnalysisExecutionEligibility.ELIGIBLE,
+        execution_status=AnalysisExecutionStatus.READY,
+        blocking_reasons=(),
+    )
+    return AIAnalysisSignal.model_validate(payload)
 
 
 @pytest.mark.asyncio
 async def test_target_hit_records_mfe_holding_time_rr_and_profit() -> None:
     state, quant = await state_and_quant()
-    signal = DeterministicAnalysisSignalGenerator().generate(analysis(5), state, quant)
+    signal = execution_ready(
+        DeterministicAnalysisSignalGenerator().generate(
+            aligned_analysis(state, quant), state, quant
+        )
+    )
     assert signal.entry is not None
     assert signal.take_profit is not None
     evaluator = AnalysisSignalOutcomeEvaluator()
@@ -50,7 +84,11 @@ async def test_target_hit_records_mfe_holding_time_rr_and_profit() -> None:
 @pytest.mark.asyncio
 async def test_same_candle_target_and_stop_resolves_conservatively() -> None:
     state, quant = await state_and_quant()
-    signal = DeterministicAnalysisSignalGenerator().generate(analysis(5), state, quant)
+    signal = execution_ready(
+        DeterministicAnalysisSignalGenerator().generate(
+            aligned_analysis(state, quant), state, quant
+        )
+    )
     assert signal.stop_loss is not None
     assert signal.take_profit is not None
     evaluator = AnalysisSignalOutcomeEvaluator()
@@ -73,7 +111,11 @@ async def test_same_candle_target_and_stop_resolves_conservatively() -> None:
 @pytest.mark.asyncio
 async def test_new_cycle_supersedes_unresolved_signal() -> None:
     state, quant = await state_and_quant()
-    signal = DeterministicAnalysisSignalGenerator().generate(analysis(5), state, quant)
+    signal = execution_ready(
+        DeterministicAnalysisSignalGenerator().generate(
+            aligned_analysis(state, quant), state, quant
+        )
+    )
     assert signal.entry is not None
     evaluator = AnalysisSignalOutcomeEvaluator()
 

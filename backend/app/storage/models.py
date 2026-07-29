@@ -784,7 +784,7 @@ class MarketEvidenceFrameRecord(Base):
 
 
 class UnifiedMarketStateRecord(Base):
-    """Immutable, synchronized M1/M5/M15 state for an AI-centric shadow cycle."""
+    """Immutable, synchronized M5/M15 state for an AI-centric shadow cycle."""
 
     __tablename__ = "unified_market_states"
     __table_args__ = (
@@ -1266,6 +1266,83 @@ class AIAnalysisSignalRecord(Base):
         DateTime(timezone=True),
         index=True,
     )
+
+
+class MultiTimeframeSignalSetRecord(Base):
+    """One immutable M5/M15/combined synthesis per market state."""
+
+    __tablename__ = "multi_timeframe_signal_sets"
+    __table_args__ = (
+        Index(
+            "ux_multi_timeframe_signal_sets_market_state_id",
+            "market_state_id",
+            unique=True,
+        ),
+        Index(
+            "ux_multi_timeframe_signal_sets_analysis_id",
+            "analysis_id",
+            unique=True,
+        ),
+    )
+
+    synthesis_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    market_state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
+    )
+    analysis_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_analyses.analysis_id", ondelete="RESTRICT"),
+    )
+    quantitative_forecast_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quantitative_forecasts.result_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    combined_direction: Mapped[str] = mapped_column(String(16), index=True)
+    combined_confidence: Mapped[float] = mapped_column(Float)
+    execution_status: Mapped[str] = mapped_column(String(16), index=True)
+    schema_version: Mapped[str] = mapped_column(String(16))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    market_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class TimeframeAnalyticalSignalRecord(Base):
+    """Queryable per-timeframe projection; evidence remains in the immutable payload."""
+
+    __tablename__ = "timeframe_analytical_signals"
+    __table_args__ = (
+        Index(
+            "ux_timeframe_analytical_signal_scope",
+            "synthesis_id",
+            "timeframe",
+            unique=True,
+        ),
+        Index(
+            "ix_timeframe_analytical_signal_latest",
+            "instrument",
+            "timeframe",
+            "completed_at",
+        ),
+    )
+
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    synthesis_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("multi_timeframe_signal_sets.synthesis_id", ondelete="CASCADE"),
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    analytical_direction: Mapped[str] = mapped_column(String(16), index=True)
+    confidence: Mapped[float] = mapped_column(Float)
+    strength: Mapped[str] = mapped_column(String(24), index=True)
+    execution_status: Mapped[str] = mapped_column(String(16), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class AIAnalysisSignalOutcomeRecord(Base):

@@ -1,7 +1,7 @@
 /** Approximate bar duration per timeframe, minutes — matches backend/app/engines/market_data_engine
  * Timeframe durations. Used only to turn "N candles still needed" into a human ETA; never sent to
  * the backend and never used for anything except this estimate. */
-const TIMEFRAME_MINUTES: Record<string, number> = { M1: 1, M5: 5, M15: 15, M30: 30, H1: 60, H4: 240, D1: 1440 }
+const TIMEFRAME_MINUTES: Record<string, number> = { M5: 5, M15: 15 }
 
 export interface BootstrapEstimate {
   remainingCandles: number

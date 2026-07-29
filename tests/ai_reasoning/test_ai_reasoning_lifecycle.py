@@ -88,7 +88,7 @@ async def state_and_quant(
         )
     }
     state = None
-    timeframes = [Timeframe.M1, Timeframe.M15]
+    timeframes = [timeframe for timeframe in (Timeframe.M5, Timeframe.M15) if timeframe != trigger]
     timeframes.append(trigger)
     for timeframe in timeframes:
         frame_boundary = expected_closed_boundary(boundary, timeframe.value)
@@ -512,7 +512,7 @@ async def test_all_four_accounts_failing_is_unhealthy_and_persists_no_analysis()
 
 
 @pytest.mark.asyncio
-async def test_only_m5_trigger_at_utc_five_minute_boundary_is_eligible() -> None:
+async def test_only_m5_or_m15_close_trigger_is_eligible() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
     service = build_service(repository, provider)
@@ -527,6 +527,18 @@ async def test_only_m5_trigger_at_utc_five_minute_boundary_is_eligible() -> None
 
     assert await service.process(state, quant) is not None
     assert provider.calls == 1
+
+    m15_state, m15_quant = await state_and_quant(
+        BOUNDARY + timedelta(minutes=15),
+        trigger=Timeframe.M15,
+    )
+    service = build_service(
+        repository,
+        provider,
+        now=BOUNDARY + timedelta(minutes=15, seconds=5),
+    )
+    assert await service.process(m15_state, m15_quant) is not None
+    assert provider.calls == 2
 
 
 @pytest.mark.asyncio
@@ -575,7 +587,7 @@ async def test_stale_market_data_is_rejected_before_provider_call(
     state, quant = await state_and_quant()
     stale_frames = tuple(
         item.model_copy(update={"stale": True})
-        if item.timeframe == "M1"
+        if item.timeframe == "M5"
         else item
         for item in state.timeframes
     )
