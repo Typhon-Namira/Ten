@@ -1398,6 +1398,114 @@ class AIAnalysisSignalOutcomeRecord(Base):
     )
 
 
+class ForwardMarketScenarioRecord(Base):
+    """Immutable M5/M15 scenario produced from one completed market state."""
+
+    __tablename__ = "forward_market_scenarios"
+    __table_args__ = (
+        Index(
+            "ux_forward_market_scenario_boundary",
+            "instrument",
+            "timeframe",
+            "market_cutoff_time",
+            unique=True,
+        ),
+        Index(
+            "ix_forward_market_scenario_latest",
+            "instrument",
+            "timeframe",
+            "market_cutoff_time",
+        ),
+    )
+
+    scenario_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    market_state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    synthesis_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("multi_timeframe_signal_sets.synthesis_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    analysis_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_analyses.analysis_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    quantitative_forecast_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quantitative_forecasts.result_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    primary_direction: Mapped[str] = mapped_column(String(16), index=True)
+    scenario_validity: Mapped[str] = mapped_column(String(16), index=True)
+    execution_geometry_validity: Mapped[str] = mapped_column(String(24), index=True)
+    market_cutoff_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expiry: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class CombinedForwardScenarioRecord(Base):
+    """Authoritative M15 comparison of current M5 and M15 scenarios."""
+
+    __tablename__ = "combined_forward_scenarios"
+
+    combined_scenario_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True
+    )
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    market_state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
+        unique=True,
+        index=True,
+    )
+    m5_scenario_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("forward_market_scenarios.scenario_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    m15_scenario_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("forward_market_scenarios.scenario_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    agreement: Mapped[str] = mapped_column(String(24), index=True)
+    combined_direction: Mapped[str] = mapped_column(String(16), index=True)
+    execution_geometry_validity: Mapped[str] = mapped_column(String(24), index=True)
+    market_cutoff_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expiry: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ScenarioOutcomeRecord(Base):
+    """Realized, post-expiry scenario outcome with calibration metrics."""
+
+    __tablename__ = "scenario_outcomes"
+
+    outcome_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    scenario_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("forward_market_scenarios.scenario_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    calibration_bucket: Mapped[str] = mapped_column(String(16), index=True)
+    directional_accuracy: Mapped[float] = mapped_column(Float)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class AIForecastScenarioRecord(Base):
     __tablename__ = "ai_forecast_scenarios"
 

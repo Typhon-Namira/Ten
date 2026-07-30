@@ -57,7 +57,7 @@ def _stage_status(result: object) -> str:
 class FullSystemIntegrationService:
     """Coordinates existing engines at a final-candle boundary; contains no analytics."""
 
-    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, signal_synthesizer: Any | None = None, signal_synthesis_repository: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
+    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, signal_synthesizer: Any | None = None, signal_synthesis_repository: Any | None = None, scenario_forecasting: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
         self.event_bus, self.repository, self.config = event_bus, repository, config
         self.market_data, self.smc, self.liquidity = market_data, smc, liquidity
         self.volume_profile, self.institutional_flow = volume_profile, institutional_flow
@@ -71,6 +71,7 @@ class FullSystemIntegrationService:
         self.ai_reasoning = ai_reasoning
         self.signal_synthesizer = signal_synthesizer
         self.signal_synthesis_repository = signal_synthesis_repository
+        self.scenario_forecasting = scenario_forecasting
         self.ai_centric_shadow_mode = ai_centric_shadow_mode
         self._unsubscribe: Callable[[], None] | None = None
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -459,6 +460,16 @@ class FullSystemIntegrationService:
                                         "execution_status": synthesis.combined_signal.execution_status.value,
                                     },
                                 )
+                                if self.scenario_forecasting is not None:
+                                    failure_stage = "scenario_forecasting"
+                                    await self.scenario_forecasting.process(
+                                        market_state,
+                                        quantitative_forecast,
+                                        synthesis,
+                                        trigger_timeframe=timeframe.value,
+                                        candles=tuple(candles),
+                                        evaluated_at=max(self.clock(), boundary),
+                                    )
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)
             failure_stage = "evidence_assembly"

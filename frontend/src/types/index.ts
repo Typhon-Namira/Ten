@@ -845,6 +845,65 @@ export interface MultiTimeframeSignalSet {
   }>
 }
 
+export interface ScenarioGeometry {
+  entry_zone: { low: number; high: number }
+  entry: number
+  stop_loss: number
+  take_profit: number
+  secondary_target: number | null
+  risk_reward_ratio: number
+  basis_fact_identifiers: string[]
+  validity: 'VALID'
+  reason: string
+}
+
+export interface ForwardMarketScenario {
+  scenario_id: string
+  timeframe: 'M5' | 'M15'
+  market_cutoff_time: string
+  reference_market_price: number
+  forecast_horizon_seconds: number
+  primary_direction: 'BULLISH' | 'BEARISH' | 'RANGE' | 'INCONCLUSIVE'
+  scenario_type: string
+  expected_price_path: string
+  expected_range: { low: number; high: number }
+  expected_closing_zone: { low: number; high: number }
+  expected_move: number
+  expected_high: number
+  expected_low: number
+  invalidation_level: number | null
+  primary_target: number | null
+  confidence: number
+  calibrated_probability: number | null
+  calibration_status: string
+  evidence_strength: number
+  supporting_fact_ids: string[]
+  contradicting_fact_ids: string[]
+  narrative: string
+  expiry: string
+  scenario_validity: 'VALID' | 'DEGRADED' | 'INVALID'
+  scenario_validity_reason: string
+  execution_geometry_validity: 'VALID' | 'UNAVAILABLE' | 'NOT_EXECUTABLE'
+  geometry_rejection_reason: string | null
+  geometry: ScenarioGeometry | null
+}
+
+export interface CombinedForwardScenario {
+  combined_scenario_id: string
+  m5_scenario_id: string
+  m15_scenario_id: string
+  agreement: 'ALIGNED' | 'PULLBACK_COMPATIBLE' | 'CONFLICT' | 'INCONCLUSIVE'
+  combined_direction: 'BULLISH' | 'BEARISH' | 'RANGE' | 'INCONCLUSIVE'
+  expected_price_path: string
+  confidence: number
+  scenario_validity: 'VALID' | 'DEGRADED' | 'INVALID'
+  execution_geometry_validity: 'VALID' | 'UNAVAILABLE' | 'NOT_EXECUTABLE'
+  geometry_rejection_reason: string | null
+  geometry: ScenarioGeometry | null
+  expiry: string
+  publication_status: string
+}
+
 export interface AuthoritativeCycleStage {
   status: SystemStageStatus
   reason: string
@@ -876,6 +935,13 @@ export interface LatestCompletedCycle {
   analysis: AIMarketAnalysis | null
   analytical_signal: AIAnalysisSignal | null
   multi_timeframe_signal?: MultiTimeframeSignalSet | null
+  forward_market_scenarios?: {
+    m5: ForwardMarketScenario | null
+    m15: ForwardMarketScenario | null
+    combined: CombinedForwardScenario | null
+    analytical_intelligence_only: true
+    broker_execution: false
+  }
   timeframe_matrix?: TimeframeAnalyticalSignal[]
   signal_lifecycle?: {
     status: AIAnalysisSignal['lifecycle_status'] | 'CURRENT'

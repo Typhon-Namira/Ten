@@ -442,6 +442,37 @@ async def _completed_cycle_projection(
         if synthesis_repository is not None
         else None
     )
+    scenario_repository = getattr(
+        request.app.state, "scenario_forecast_repository", None
+    )
+    m5_scenario = (
+        await scenario_repository.latest_scenario(
+            instrument,
+            "M5",
+            at_or_before=analysis.knowledge_cutoff,
+        )
+        if scenario_repository is not None
+        else None
+    )
+    m15_scenario = (
+        await scenario_repository.latest_scenario(
+            instrument,
+            "M15",
+            at_or_before=analysis.knowledge_cutoff,
+        )
+        if scenario_repository is not None
+        else None
+    )
+    combined_scenario = (
+        await scenario_repository.latest_combined(instrument)
+        if scenario_repository is not None
+        else None
+    )
+    if (
+        combined_scenario is not None
+        and combined_scenario.market_cutoff_time > analysis.knowledge_cutoff
+    ):
+        combined_scenario = None
     publication = _publication_projection(decision)
     generated_signal_count = (
         await request.app.state.ai_reasoning_repository.count_analysis_signals(
@@ -681,6 +712,17 @@ async def _completed_cycle_projection(
             if multi_timeframe_signal is not None
             else None
         ),
+        "forward_market_scenarios": {
+            "m5": m5_scenario.model_dump(mode="json") if m5_scenario else None,
+            "m15": m15_scenario.model_dump(mode="json") if m15_scenario else None,
+            "combined": (
+                combined_scenario.model_dump(mode="json")
+                if combined_scenario
+                else None
+            ),
+            "analytical_intelligence_only": True,
+            "broker_execution": False,
+        },
         "timeframe_matrix": (
             [
                 item.model_dump(mode="json")
@@ -1167,6 +1209,13 @@ async def dashboard_latest_cycle(
         "analysis": None,
         "analytical_signal": None,
         "multi_timeframe_signal": None,
+        "forward_market_scenarios": {
+            "m5": None,
+            "m15": None,
+            "combined": None,
+            "analytical_intelligence_only": True,
+            "broker_execution": False,
+        },
         "timeframe_matrix": [],
         "guardrail_decision": None,
         "final_decision": None,
