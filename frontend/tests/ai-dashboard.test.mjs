@@ -16,6 +16,7 @@ test('overview preserves the required decision hierarchy', async () => {
   const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
   const orderedSections = [
     '<CurrentAnalyticalCycle',
+    '<ForwardMarketScenarios',
     '<MarketStateSummary',
     '<QuantForecastSummary',
     '<SystemStatusPanel',
@@ -36,6 +37,19 @@ test('decision copy is derived from backend action states and never implies exec
   }
   assert.match(shell, /No Broker Execution/)
   assert.match(shell, /Analysis and decision support only/)
+})
+
+test('dashboard renders structured M5 M15 and combined forward scenarios', async () => {
+  const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
+  const scenarios = await source('src/components/ai-dashboard/ForwardMarketScenarios.tsx')
+  const types = await source('src/types/index.ts')
+  assert.match(dashboard, /ForwardMarketScenarios/)
+  assert.match(scenarios, /Forward Market Scenarios/)
+  assert.match(scenarios, /Combined forward scenario/)
+  assert.match(scenarios, /Analytical Intelligence Only/)
+  assert.match(scenarios, /No Broker Execution/)
+  assert.match(types, /forward_market_scenarios/)
+  assert.match(types, /execution_geometry_validity/)
 })
 
 test('completed cycles keep BUY or SELL analysis separate from execution status', async () => {

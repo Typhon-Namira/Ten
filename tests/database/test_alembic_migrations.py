@@ -52,6 +52,26 @@ def test_multi_timeframe_signal_migration_is_strict_idempotent_and_reversible() 
     assert 'op.drop_table("multi_timeframe_signal_sets")' in source
 
 
+def test_scenario_forecasting_migration_is_traceable_and_reversible() -> None:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations/versions/20260730_0016_scenario_forecasting.py"
+    )
+    source = path.read_text(encoding="utf-8")
+
+    for table in (
+        "forward_market_scenarios",
+        "combined_forward_scenarios",
+        "scenario_outcomes",
+    ):
+        assert f'"{table}"' in source
+        assert f'op.drop_table("{table}")' in source
+    assert "ux_forward_market_scenario_boundary" in source
+    assert "market_cutoff_time" in source
+    assert "ondelete=\"RESTRICT\"" in source
+    assert "ondelete=\"CASCADE\"" in source
+
+
 def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     source = (
         ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"

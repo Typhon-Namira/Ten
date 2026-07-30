@@ -93,6 +93,13 @@ from backend.app.signal_synthesis import (
     MultiTimeframeSignalSynthesizer,
     SqlAlchemyMultiTimeframeSignalRepository,
 )
+from backend.app.scenario_forecasting import (
+    InMemoryScenarioForecastRepository,
+    ScenarioForecastRepository,
+    ScenarioForecastingEngine,
+    ScenarioForecastingService,
+    SqlAlchemyScenarioForecastRepository,
+)
 from backend.app.signal_notifications import (
     SignalEmailOutboxRepository,
     SignalEmailWorker,
@@ -526,6 +533,18 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             )
         app.state.multi_timeframe_signal_repository = signal_synthesis_repository
         app.state.multi_timeframe_signal_synthesizer = MultiTimeframeSignalSynthesizer()
+        scenario_repository: ScenarioForecastRepository = (
+            InMemoryScenarioForecastRepository()
+        )
+        if app.state.database_session_factory is not None:
+            scenario_repository = SqlAlchemyScenarioForecastRepository(
+                app.state.database_session_factory
+            )
+        app.state.scenario_forecast_repository = scenario_repository
+        app.state.scenario_forecasting_service = ScenarioForecastingService(
+            scenario_repository,
+            ScenarioForecastingEngine(),
+        )
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
             repository=app.state.integration_repository,
@@ -546,6 +565,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             ai_reasoning=app.state.ai_reasoning_service,
             signal_synthesizer=app.state.multi_timeframe_signal_synthesizer,
             signal_synthesis_repository=app.state.multi_timeframe_signal_repository,
+            scenario_forecasting=app.state.scenario_forecasting_service,
             ai_centric_shadow_mode=ai_centric_shadow_mode,
         )
         if integration_config.enabled and integration_config.live_pipeline_enabled:

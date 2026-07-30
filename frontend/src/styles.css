@@ -330,6 +330,7 @@ th,td { padding: 10px; border-bottom: 1px solid var(--line); font-size: 11px; te
 .panel-render-error { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 15px; padding: 13px 15px; border: 1px solid #efcecb; border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: 11px; }
 .panel-render-error strong { display: block; margin-bottom: 3px; font-size: 12px; }
 .panel-render-error p { margin: 0; font-size: 10px; opacity: .85; }
+.scenario-forecast-section { display: grid; gap: 16px; }
 
 .diagnostics-bar { position: sticky; bottom: 0; z-index: 20; border-top: 1px solid var(--line); background: var(--surface); font-size: 11px; }
 .diagnostics-bar__summary { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px clamp(20px,4vw,64px); border: none; background: none; color: var(--muted); font: inherit; cursor: pointer; text-align: left; }

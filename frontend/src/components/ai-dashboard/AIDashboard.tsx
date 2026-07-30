@@ -6,6 +6,7 @@ import { AnalysisHistory, CurrentAnalyticalCycle, SignalHistory } from './Author
 import { DashboardHeader } from './DecisionOverview'
 import { MarketStateSummary, QuantForecastSummary } from './IntelligenceCards'
 import { EmptyState, ErrorState, LoadingSkeleton, Metric, SectionHeader } from './Primitives'
+import { ForwardMarketScenarios } from './ForwardMarketScenarios'
 import { SystemStatusPanel } from './SystemStatusPanel'
 
 export type DashboardView = 'overview' | 'signals' | 'performance' | 'calibration' | 'system'
@@ -41,6 +42,7 @@ export function AIDashboard({ view = 'overview' }: { view?: DashboardView }) {
     {data.loading && !data.latestCycle && !data.intelligence ? <LoadingSkeleton rows={6} /> : <>
       {view === 'overview' && <>
         <ErrorBoundary label="Latest completed cycle"><CurrentAnalyticalCycle cycle={data.latestCycle} /></ErrorBoundary>
+        <ErrorBoundary label="Forward market scenarios"><ForwardMarketScenarios cycle={data.latestCycle} /></ErrorBoundary>
         <div className="ai-card-grid">
           <ErrorBoundary label="Market state"><MarketStateSummary data={data.intelligence} /></ErrorBoundary>
           <ErrorBoundary label="Quant forecast"><QuantForecastSummary forecast={data.quant} calibration={null} unavailableReason={data.latestCycle?.stages.quant_forecast?.reason} /></ErrorBoundary>
