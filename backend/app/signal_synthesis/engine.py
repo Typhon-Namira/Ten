@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from math import fsum
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -58,10 +60,17 @@ _INVALID_ZONE_STATES = {
 class SignalSynthesisConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    engine_version: str = "1.0.0"
-    configuration_version: str = "multi-factor-mtf-1.0"
+    engine_version: str = "1.1.0"
+    configuration_version: str = "multi-factor-mtf-geometry-1.1"
     minimum_execution_confidence: float = Field(default=55, ge=0, le=100)
     minimum_risk_reward: float = Field(default=2.0, gt=0)
+    maximum_entry_distance_percent: float = Field(default=0.003, gt=0, le=0.02)
+    entry_distance_volatility_multiple: float = Field(default=1.5, gt=0, le=10)
+    entry_distance_spread_multiple: float = Field(default=10.0, gt=0, le=100)
+    structural_invalidation_buffer_fraction: float = Field(default=0.05, gt=0, le=0.5)
+    geometry_validity_seconds: int = Field(default=900, ge=60, le=7200)
+    minimum_remaining_validity_seconds: int = Field(default=60, ge=1, le=900)
+    maximum_structure_age_seconds: int = Field(default=14400, ge=60, le=86400)
     correlated_evidence_discount: float = Field(default=0.35, ge=0, le=1)
     strength_thresholds: tuple[float, float, float, float] = (
         40,
@@ -138,6 +147,19 @@ class SignalSynthesisConfig(BaseModel):
         ):
             raise ValueError("structure_zone_scores are incomplete")
         return self
+
+
+@dataclass(frozen=True)
+class _MarketContext:
+    price: float
+    high: float
+    low: float
+    spread: float
+    observed_at: datetime
+
+    @property
+    def candle_range(self) -> float:
+        return self.high - self.low
 
 
 class _Fact:
@@ -240,7 +262,13 @@ class MultiTimeframeSignalSynthesizer:
         blockers: list[str] = []
         if confidence.final_confidence >= self.config.minimum_execution_confidence:
             geometry, geometry_reasons, invalidations = self._geometry(
-                direction, evidence, self.config.minimum_risk_reward
+                direction,
+                timeframe,
+                evidence,
+                self._market_context(state),
+                evaluated_at=state.market_data_boundary,
+                valid_until=state.market_data_boundary
+                + timedelta(seconds=self.config.geometry_validity_seconds),
             )
             blockers.extend(geometry_reasons)
         frame = next(item for item in state.timeframes if item.timeframe == timeframe)
@@ -975,24 +1003,98 @@ class MultiTimeframeSignalSynthesizer:
         return 100.0 if quant_score * ai_score > 0 else 25.0 if quant_score * ai_score < 0 else 50.0
 
     @staticmethod
+    def _market_context(state: UnifiedMarketState) -> _MarketContext | None:
+        frames = {item.timeframe: item for item in state.timeframes}
+        candidates = [
+            item
+            for item in state.evidence
+            if item.source_engine == "market_data"
+            and item.availability == EvidenceAvailability.AVAILABLE
+            and not frames[item.source_timeframe].stale
+        ]
+        if not candidates:
+            return None
+        latest = max(
+            candidates,
+            key=lambda item: (
+                item.source_candle_close_timestamp,
+                item.source_timeframe == "M5",
+            ),
+        )
+        raw = _map(latest.raw_value)
+        price = _num(raw.get("close"))
+        high = _num(raw.get("high"))
+        low = _num(raw.get("low"))
+        if price <= 0 or high < price or low > price or low <= 0:
+            return None
+        return _MarketContext(
+            price=price,
+            high=high,
+            low=low,
+            spread=max(0.0, _num(raw.get("spread"))),
+            observed_at=latest.source_candle_close_timestamp,
+        )
+
     def _geometry(
+        self,
         direction: AnalyticalDirection,
+        timeframe: str,
         evidence: tuple[EvidenceItem, ...],
-        minimum_rr: float,
+        market: _MarketContext | None,
+        *,
+        evaluated_at: datetime,
+        valid_until: datetime,
     ) -> tuple[SignalGeometry | None, tuple[str, ...], tuple[str, ...]]:
-        current = None
         zones: list[tuple[float, float, str, str]] = []
         targets: list[tuple[float, str, str]] = []
         invalidations: list[str] = []
+        expired_structure_seen = False
+        invalid_structure_timestamp_seen = False
         for item in evidence:
             raw = _map(item.raw_value)
-            if item.source_engine == "market_data":
-                current = _num(raw.get("close")) or current
-            elif item.source_engine == "smc":
+            if item.source_engine == "smc":
                 for zone in _items(raw.get("zones")):
                     value = _map(zone)
                     lifecycle = str(value.get("lifecycle_state", "")).lower()
                     if lifecycle not in _ACTIVE_ZONE_STATES:
+                        continue
+                    expires_at = _timestamp(
+                        value.get("expires_at")
+                        or value.get("expiration_timestamp")
+                        or value.get("expiration_time")
+                        or value.get("valid_until")
+                    )
+                    formed_at = _timestamp(
+                        value.get("created_at")
+                        or value.get("confirmation_timestamp")
+                        or value.get("origin_timestamp")
+                        or value.get("detected_at")
+                        or value.get("formed_at")
+                        or value.get("timestamp")
+                    )
+                    if (
+                        formed_at is not None
+                        and formed_at > evaluated_at
+                    ):
+                        invalid_structure_timestamp_seen = True
+                        continue
+                    if (
+                        (expires_at is not None and expires_at <= evaluated_at)
+                        or (
+                            formed_at is not None
+                            and (
+                                evaluated_at - formed_at
+                            ).total_seconds()
+                            > self.config.maximum_structure_age_seconds
+                        )
+                    ):
+                        expired_structure_seen = True
+                        continue
+                    if max(
+                        _num(value.get("fill_percentage")),
+                        _num(value.get("mitigation_percentage")),
+                    ) >= 100:
+                        expired_structure_seen = True
                         continue
                     low, high = _num(value.get("lower_price")), _num(value.get("upper_price"))
                     if low > 0 and high >= low:
@@ -1042,38 +1144,137 @@ class MultiTimeframeSignalSynthesizer:
                     price = (_num(value.get("lower_bound")) + _num(value.get("upper_bound"))) / 2
                     if price:
                         targets.append((price, str(value.get("side")), str(value.get("id"))))
-        if current is None:
+        if market is None:
             return None, ("current_price_unavailable",), tuple(invalidations)
+        if market.observed_at > evaluated_at:
+            return None, ("future_market_context_rejected",), tuple(invalidations)
+        remaining_validity = (valid_until - evaluated_at).total_seconds()
+        if remaining_validity < self.config.minimum_remaining_validity_seconds:
+            return None, ("insufficient_remaining_validity",), tuple(invalidations)
+        current = market.price
+        distance_from_volatility = (
+            market.candle_range * self.config.entry_distance_volatility_multiple
+        )
+        distance_from_spread = (
+            market.spread * self.config.entry_distance_spread_multiple
+        )
+        maximum_entry_distance = min(
+            current * self.config.maximum_entry_distance_percent,
+            max(distance_from_volatility, distance_from_spread),
+        )
+        if maximum_entry_distance <= 0:
+            return None, ("market_reachability_unavailable",), tuple(invalidations)
         if direction == AnalyticalDirection.BUY:
-            entries = [item for item in zones if item[1] <= current and "bullish" in item[2]]
+            entries = [
+                item
+                for item in zones
+                if item[1] <= current + market.spread
+                and current - item[1] <= maximum_entry_distance
+                and "bullish" in item[2]
+            ]
             entry_zone = max(entries, key=lambda item: item[1], default=None)
             entry = entry_zone[1] if entry_zone else current
-            stop = entry_zone[0] if entry_zone and entry_zone[0] < entry else None
-            target = min((item for item in targets if item[0] > entry and item[1] == "buy_side"), default=None)
+            invalidation_buffer = max(
+                market.spread,
+                market.candle_range
+                * self.config.structural_invalidation_buffer_fraction,
+            )
+            stop = (
+                entry_zone[0] - invalidation_buffer
+                if entry_zone and entry_zone[0] < entry
+                else None
+            )
+            target = min(
+                (
+                    item
+                    for item in targets
+                    if item[0] > max(entry, current) + market.spread
+                    and item[1] == "buy_side"
+                ),
+                default=None,
+            )
             if target is None:
-                supply = [item for item in zones if item[0] > entry and "bearish" in item[2]]
+                supply = [
+                    item
+                    for item in zones
+                    if item[0] > max(entry, current) + market.spread
+                    and "bearish" in item[2]
+                ]
                 zone = min(supply, key=lambda item: item[0], default=None)
                 target = (zone[0], "supply", zone[3]) if zone else None
         else:
-            entries = [item for item in zones if item[0] >= current and "bearish" in item[2]]
+            entries = [
+                item
+                for item in zones
+                if item[0] >= current - market.spread
+                and item[0] - current <= maximum_entry_distance
+                and "bearish" in item[2]
+            ]
             entry_zone = min(entries, key=lambda item: item[0], default=None)
             entry = entry_zone[0] if entry_zone else current
-            stop = entry_zone[1] if entry_zone and entry_zone[1] > entry else None
-            target = max((item for item in targets if item[0] < entry and item[1] == "sell_side"), default=None)
+            invalidation_buffer = max(
+                market.spread,
+                market.candle_range
+                * self.config.structural_invalidation_buffer_fraction,
+            )
+            stop = (
+                entry_zone[1] + invalidation_buffer
+                if entry_zone and entry_zone[1] > entry
+                else None
+            )
+            target = max(
+                (
+                    item
+                    for item in targets
+                    if item[0] < min(entry, current) - market.spread
+                    and item[1] == "sell_side"
+                ),
+                default=None,
+            )
             if target is None:
-                demand = [item for item in zones if item[1] < entry and "bullish" in item[2]]
+                demand = [
+                    item
+                    for item in zones
+                    if item[1] < min(entry, current) - market.spread
+                    and "bullish" in item[2]
+                ]
                 zone = max(demand, key=lambda item: item[1], default=None)
                 target = (zone[1], "demand", zone[3]) if zone else None
         if entry_zone is None:
-            return None, ("no_fresh_directionally_aligned_entry_zone",), tuple(invalidations)
+            reason = (
+                "structural_timestamp_invalid"
+                if invalid_structure_timestamp_seen
+                else "structural_setup_expired"
+                if expired_structure_seen
+                else "no_reachable_directionally_aligned_entry_zone"
+            )
+            return None, (reason,), tuple(invalidations)
         if stop is None:
             return None, ("no_structural_invalidation_level",), tuple(invalidations)
         if target is None:
-            return None, ("no_valid_structural_or_liquidity_target",), tuple(invalidations)
-        risk = abs(entry - stop)
-        reward = abs(target[0] - entry)
+            return None, ("target_already_traversed_or_unavailable",), tuple(invalidations)
+        if abs(entry - current) > maximum_entry_distance:
+            return None, ("entry_not_reachable_from_current_market",), tuple(invalidations)
+        if direction == AnalyticalDirection.BUY:
+            if not stop < entry < target[0]:
+                return None, ("invalid_buy_geometry_ordering",), tuple(invalidations)
+            if current >= target[0] or market.high >= target[0]:
+                return None, ("buy_target_already_traversed",), tuple(invalidations)
+            if current <= stop or market.low <= stop:
+                return None, ("buy_structure_already_invalidated",), tuple(invalidations)
+            risk = entry - stop
+            reward = target[0] - entry
+        else:
+            if not target[0] < entry < stop:
+                return None, ("invalid_sell_geometry_ordering",), tuple(invalidations)
+            if current <= target[0] or market.low <= target[0]:
+                return None, ("sell_target_already_traversed",), tuple(invalidations)
+            if current >= stop or market.high >= stop:
+                return None, ("sell_structure_already_invalidated",), tuple(invalidations)
+            risk = stop - entry
+            reward = entry - target[0]
         rr = reward / risk if risk else 0
-        if rr < minimum_rr:
+        if rr < self.config.minimum_risk_reward:
             return None, ("risk_reward_below_minimum",), tuple(invalidations)
         geometry = SignalGeometry(
             entry=entry,
@@ -1081,6 +1282,11 @@ class MultiTimeframeSignalSynthesizer:
             take_profit=target[0],
             risk_reward_ratio=round(rr, 8),
             basis_fact_identifiers=(entry_zone[3], entry_zone[3], target[2]),
+            source_timeframe=timeframe,
+            validated_market_price=current,
+            maximum_entry_distance=maximum_entry_distance,
+            validated_at=evaluated_at,
+            expires_at=valid_until,
         )
         return geometry, (), tuple(invalidations)
 
@@ -1108,6 +1314,21 @@ def _items(value: Any) -> list[Any]:
 
 def _num(value: Any) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def _timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
 
 
 def _percent(value: Any, default: float) -> float:

@@ -11,6 +11,7 @@ from backend.app.core.config import Settings
 from backend.app.ai_reasoning.request_persistence import PersistedAIReasoningRequest
 from backend.app.api.routes.dashboard import (
     _authoritative_signal_projection,
+    _geometry_projection,
     _latest_complete_cycle_lineage,
     _stage_fingerprint,
     _system_stage,
@@ -18,6 +19,7 @@ from backend.app.api.routes.dashboard import (
 from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
 from backend.app.main import create_app
+from backend.app.signal_synthesis import SignalGeometry
 
 
 @pytest.mark.parametrize(
@@ -84,6 +86,32 @@ def test_authoritative_dashboard_preserves_direction_when_execution_is_blocked()
     assert result["risk_reward_ratio"] == 2.0
     assert "blocking_reasons" not in result
     assert "WAIT" not in str(result)
+
+
+def test_historical_geometry_without_live_validation_is_never_marked_valid() -> None:
+    geometry = SignalGeometry(
+        entry=4026,
+        stop_loss=4018,
+        take_profit=4041,
+        risk_reward_ratio=1.875,
+        basis_fact_identifiers=("zone", "invalidation", "target"),
+    )
+    synthesis = SimpleNamespace(
+        combined_signal=SimpleNamespace(
+            geometry=geometry,
+            analytical_direction=SimpleNamespace(value="BUY"),
+        ),
+        timeframe_signals=(),
+    )
+
+    assert (
+        _geometry_projection(
+            synthesis,
+            minimum_risk_reward=2.0,
+            now=datetime.now(UTC),
+        )
+        is None
+    )
 
 
 def test_unhandled_exception_on_get_degrades_to_200_not_500() -> None:

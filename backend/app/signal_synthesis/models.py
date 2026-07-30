@@ -76,11 +76,25 @@ class SignalGeometry(SynthesisModel):
     take_profit: float = Field(gt=0)
     risk_reward_ratio: float = Field(gt=0)
     basis_fact_identifiers: tuple[str, ...] = Field(min_length=3)
+    source_timeframe: str | None = None
+    validated_market_price: float | None = Field(default=None, gt=0)
+    maximum_entry_distance: float | None = Field(default=None, gt=0)
+    validated_at: datetime | None = None
+    expires_at: datetime | None = None
 
     @model_validator(mode="after")
     def coherent(self) -> SignalGeometry:
         if len({self.entry, self.stop_loss, self.take_profit}) != 3:
             raise ValueError("entry, stop loss, and take profit must be distinct")
+        for value in (self.validated_at, self.expires_at):
+            if value is not None and value.tzinfo is None:
+                raise ValueError("geometry timestamps must be timezone-aware")
+        if (
+            self.validated_at is not None
+            and self.expires_at is not None
+            and self.expires_at <= self.validated_at
+        ):
+            raise ValueError("geometry must expire after validation")
         return self
 
 

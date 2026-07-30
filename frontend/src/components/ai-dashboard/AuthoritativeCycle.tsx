@@ -85,7 +85,7 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
     <div className="ai-card-grid">
       <section className="ai-card">
         <SectionHeader eyebrow="Same-cycle structure" title="Structural trade setup" action={<TrendingUp size={19} />} />
-        {setup == null ? <EmptyState title="No validated geometry" detail="The analytical direction remains valid, but no concrete structure passed geometry validation." /> : <>
+        {setup == null ? <EmptyState title="No valid executable structural setup" detail="The analytical direction remains valid, but current price, reachability, structure, validity, or risk/reward did not pass the execution geometry gate." /> : <>
           <div className="health-grid">
             <Metric label="Owner timeframe" value={setup.owner_timeframe} />
             <Metric label="Direction" value={setup.direction} />
