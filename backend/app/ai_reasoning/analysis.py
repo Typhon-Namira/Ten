@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from statistics import fmean, pstdev
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -271,6 +272,7 @@ class AIAnalysisSignal(StrictAnalysisModel):
     cycle_id: UUID
     snapshot_id: UUID
     analysis_id: UUID
+    synthesis_id: UUID | None = None
     instrument: str
     timeframe: str
     signal: AnalysisSignalAction
@@ -292,6 +294,8 @@ class AIAnalysisSignal(StrictAnalysisModel):
     quant_ai_explanation: str = "Quantitative alignment was not evaluated."
     quality_threshold: float = Field(default=0, ge=0, le=100)
     geometry_basis: tuple[str, ...] = ()
+    geometry_owner_timeframe: str | None = None
+    timeframe_summaries: tuple[dict[str, Any], ...] = ()
     valid_from: datetime | None = None
     valid_until: datetime | None = None
     expected_holding_seconds: int | None = Field(default=None, gt=0)

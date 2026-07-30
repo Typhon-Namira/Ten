@@ -178,54 +178,142 @@ def _authoritative_signal_projection(
     decision: Any,
     *,
     lifecycle_status: str,
+    multi_timeframe_signal: Any | None = None,
 ) -> dict[str, Any]:
-    """Project the persisted deterministic decision as the cycle's sole final signal."""
-
+    """Preserve analysis while projecting later lifecycle stages independently."""
     serialized: dict[str, Any] = dict(signal.model_dump(mode="json"))
-    candidate = serialized.get("signal")
-    final_action = decision.final_action.value
-    execution_ready = bool(getattr(decision, "publication_eligible", False))
-    serialized.update(
-        {
-            "candidate_signal": candidate,
-            "signal": final_action,
-            "authoritative_action": final_action,
-            "confidence": decision.overall_confidence,
-            "signal_confidence": decision.overall_confidence,
-            "overall_confidence": decision.overall_confidence,
-            "lifecycle_status": (
-                "HOLD"
-                if final_action == "HOLD"
-                else lifecycle_status
-                if execution_ready
-                else "BLOCKED"
-            ),
-            "execution_eligibility": (
-                "ELIGIBLE" if execution_ready else "INELIGIBLE"
-            ),
-            "execution_status": "READY" if execution_ready else "BLOCKED",
-            "blocking_reasons": [
-                item.reason_code for item in getattr(decision, "blockers", ())
-            ]
-            + [
-                item.reason_code for item in getattr(decision, "warnings", ())
-            ],
-            "reasoning_summary": decision.decision_reason,
-        }
+    combined = (
+        multi_timeframe_signal.combined_signal
+        if multi_timeframe_signal is not None
+        else None
     )
-    if final_action == "HOLD":
+    if combined is not None:
         serialized.update(
             {
-                "entry": None,
-                "stop_loss": None,
-                "take_profit": None,
-                "risk_reward_ratio": None,
-                "valid_from": None,
-                "valid_until": None,
-                "expected_holding_seconds": None,
+                "signal": combined.analytical_direction.value,
+                "signal_confidence": combined.confidence,
+                "confidence": combined.confidence,
+                "strength": combined.strength.value,
+                "bullish_score": combined.bullish_score,
+                "bearish_score": combined.bearish_score,
+                "reasoning_summary": combined.directional_thesis,
+                "execution_eligibility": combined.execution_eligibility.value,
+                "execution_status": combined.execution_status.value,
+                "blocking_reasons": list(combined.blocking_reasons),
+                "entry": combined.geometry.entry if combined.geometry else None,
+                "stop_loss": (
+                    combined.geometry.stop_loss if combined.geometry else None
+                ),
+                "take_profit": (
+                    combined.geometry.take_profit if combined.geometry else None
+                ),
+                "risk_reward_ratio": (
+                    combined.geometry.risk_reward_ratio
+                    if combined.geometry
+                    else None
+                ),
+                "geometry_basis": (
+                    list(combined.geometry.basis_fact_identifiers)
+                    if combined.geometry
+                    else []
+                ),
+                "synthesis_id": (
+                    str(multi_timeframe_signal.synthesis_id)
+                    if multi_timeframe_signal is not None
+                    else None
+                ),
             }
         )
+    serialized.update(
+        {
+            "analytical_direction": serialized["signal"],
+            "final_action": decision.final_action.value,
+            "overall_confidence": decision.overall_confidence,
+            "lifecycle_status": lifecycle_status,
+        }
+    )
     return serialized
+
+
+def _contribution_projection(combined: Any | None) -> dict[str, Any]:
+    families: dict[str, list[Any]] = {}
+    if combined is not None:
+        for item in combined.evidence_breakdown:
+            families.setdefault(item.family, []).append(item)
+
+    def project(name: str, aliases: tuple[str, ...]) -> dict[str, Any]:
+        values = [
+            item
+            for family, items in families.items()
+            if family in aliases
+            for item in items
+        ]
+        if not values:
+            return {
+                "family": name,
+                "status": "no_qualifying_contribution",
+                "normalized_contribution": None,
+                "weighted_contribution": None,
+                "evidence_count": 0,
+            }
+        total_weight = sum(item.effective_weight for item in values)
+        normalized = (
+            sum(item.normalized_score * item.effective_weight for item in values)
+            / total_weight
+            if total_weight
+            else None
+        )
+        return {
+            "family": name,
+            "status": "contributed",
+            "normalized_contribution": normalized,
+            "weighted_contribution": sum(item.weighted_score for item in values),
+            "evidence_count": len(values),
+        }
+
+    return {
+        "trend": project("trend", ("market_structure", "price_action")),
+        "institutional": project(
+            "institutional",
+            ("institutional_flow", "order_blocks", "liquidity"),
+        ),
+        "volume": project("volume", ("volume", "volume_profile")),
+        "evidence": project("evidence", tuple(families)),
+    }
+
+
+def _geometry_projection(
+    multi_timeframe_signal: Any | None,
+    signal: Any,
+    *,
+    minimum_risk_reward: float,
+) -> dict[str, Any] | None:
+    if multi_timeframe_signal is None:
+        return None
+    combined = multi_timeframe_signal.combined_signal
+    if combined.geometry is None:
+        return None
+    owner = next(
+        (
+            item.timeframe
+            for item in multi_timeframe_signal.timeframe_signals
+            if item.geometry == combined.geometry
+        ),
+        "COMBINED",
+    )
+    return {
+        "owner_timeframe": owner,
+        "direction": combined.analytical_direction.value,
+        **combined.geometry.model_dump(mode="json"),
+        "required_minimum_risk_reward": minimum_risk_reward,
+        "validation_status": (
+            "VALID"
+            if combined.geometry.risk_reward_ratio >= minimum_risk_reward
+            else "INVALID"
+        ),
+        "created_at": multi_timeframe_signal.created_at,
+        "expires_at": signal.valid_until,
+    }
 
 
 async def _signal_lifecycle_projection(
@@ -471,6 +559,7 @@ async def _completed_cycle_projection(
         signal,
         decision,
         lifecycle_status=authoritative_lifecycle_status,
+        multi_timeframe_signal=multi_timeframe_signal,
     )
     if signal.schema_version == "1.0":
         serialized_signal["analysis_confidence"] = (
@@ -478,6 +567,59 @@ async def _completed_cycle_projection(
             if analysis.output is not None
             else 0
         )
+    combined_signal = (
+        multi_timeframe_signal.combined_signal
+        if multi_timeframe_signal is not None
+        else None
+    )
+    minimum_rr = float(
+        getattr(
+            getattr(
+                request.app.state.multi_timeframe_signal_synthesizer,
+                "config",
+                None,
+            ),
+            "minimum_risk_reward",
+            2.0,
+        )
+    )
+    quant_predictions = tuple(
+        item
+        for item in getattr(quant, "predictions", ())
+        if item.horizon.timeframe in {"M5", "M15"}
+    )
+    quant_buy = (
+        sum(item.buy_probability for item in quant_predictions)
+        / len(quant_predictions)
+        if quant_predictions
+        else None
+    )
+    quant_sell = (
+        sum(item.sell_probability for item in quant_predictions)
+        / len(quant_predictions)
+        if quant_predictions
+        else None
+    )
+    quant_direction = (
+        "BUY"
+        if quant_buy is not None and quant_sell is not None and quant_buy >= quant_sell
+        else "SELL"
+        if quant_sell is not None
+        else None
+    )
+    analytical_direction = (
+        combined_signal.analytical_direction.value
+        if combined_signal is not None
+        else signal.signal.value
+    )
+    geometry = _geometry_projection(
+        multi_timeframe_signal,
+        signal,
+        minimum_risk_reward=minimum_rr,
+    )
+    guardrail_blockers = [
+        item.model_dump(mode="json") for item in decision.blockers
+    ]
     result = {
         "status": "completed",
         "symbol": signal.instrument,
@@ -522,24 +664,84 @@ async def _completed_cycle_projection(
             else []
         ),
         "signal_lifecycle": authoritative_lifecycle,
-        "guardrail_decision": (
-            {
-                "state": decision.state.value,
-                "readiness": decision.readiness.value,
-                "blockers": [
-                    item.model_dump(mode="json") for item in decision.blockers
-                ],
-                "warnings": [
-                    item.model_dump(mode="json") for item in decision.warnings
-                ],
-            }
-            if decision is not None
-            else None
-        ),
         "final_decision": (
             decision.model_dump(mode="json") if decision is not None else None
         ),
         "publication": publication,
+        "analytical_direction": {
+            "direction": analytical_direction,
+            "confidence": (
+                combined_signal.confidence
+                if combined_signal is not None
+                else signal.signal_confidence
+            ),
+            "strength": (
+                combined_signal.strength.value
+                if combined_signal is not None
+                else signal.strength.value
+            ),
+            "bullish_score": (
+                combined_signal.bullish_score
+                if combined_signal is not None
+                else signal.scoring_components.get("bullish_score")
+            ),
+            "bearish_score": (
+                combined_signal.bearish_score
+                if combined_signal is not None
+                else signal.scoring_components.get("bearish_score")
+            ),
+        },
+        "structural_trade_setup": geometry,
+        "execution_eligibility": {
+            "status": (
+                combined_signal.execution_status.value
+                if combined_signal is not None
+                else signal.execution_status.value
+            ),
+            "blockers": (
+                list(combined_signal.blocking_reasons)
+                if combined_signal is not None
+                else list(signal.blocking_reasons)
+            ),
+        },
+        "confidence_semantics": {
+            "analytical_confidence": (
+                combined_signal.confidence if combined_signal is not None else None
+            ),
+            "ai_interpretation_confidence": (
+                analysis.output.analysis_confidence * 100
+                if analysis.output is not None
+                else None
+            ),
+            "quant_direction": quant_direction,
+            "quant_directional_probability": (
+                max(quant_buy, quant_sell) * 100
+                if quant_buy is not None and quant_sell is not None
+                else None
+            ),
+            "quant_calibration_status": quant.calibration_status.value,
+            "quant_ai_alignment": (
+                "AGREEMENT" if quant_direction == analytical_direction else "DISAGREEMENT"
+                if quant_direction is not None else "UNAVAILABLE"
+            ),
+            "evidence_completeness": (
+                combined_signal.confidence_decomposition.evidence_completeness
+                if combined_signal is not None
+                else None
+            ),
+            "guardrail_confidence": decision.guardrail_confidence,
+            "final_overall_confidence": decision.overall_confidence,
+        },
+        "evidence_contributions": _contribution_projection(combined_signal),
+        "guardrail_decision": {
+            "status": "APPROVED" if decision.publication_eligible else "REJECTED",
+            "state": decision.state.value,
+            "readiness": decision.readiness.value,
+            "blockers": guardrail_blockers,
+            "warnings": [
+                item.model_dump(mode="json") for item in decision.warnings
+            ],
+        },
         "stages": stage_statuses,
         "lineage": {
             "cycle_id": str(signal.cycle_id),

@@ -116,6 +116,29 @@ class Settings(BaseSettings):
     # market_synchronization_history / realtime_candles — high-frequency diagnostic exhaust, not
     # the deterministic OHLCV series (historical_candles is never pruned).
     market_data_history_retention_days: int = Field(default=7, ge=1, le=3650)
+    signal_email_enabled: bool = False
+    signal_email_recipient: str = "tufannamira@gmail.com"
+    email_provider: Literal["smtp"] = "smtp"
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    email_from: str | None = None
+    signal_email_poll_seconds: float = Field(default=10, ge=1, le=300)
+    signal_email_max_attempts: int = Field(default=5, ge=1, le=20)
+
+    @property
+    def signal_email_configuration_errors(self) -> tuple[str, ...]:
+        if not self.signal_email_enabled:
+            return ()
+        required = {
+            "TEN_SMTP_HOST": self.smtp_host,
+            "TEN_EMAIL_FROM": self.email_from,
+        }
+        if self.smtp_username and not self.smtp_password:
+            required["TEN_SMTP_PASSWORD"] = self.smtp_password
+        return tuple(name for name, value in required.items() if not value)
 
     @field_validator("database_url", mode="before")
     @classmethod

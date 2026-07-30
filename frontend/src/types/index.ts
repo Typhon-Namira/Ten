@@ -905,6 +905,48 @@ export interface LatestCompletedCycle {
     reason: string
     blockers?: Record<string, unknown>[]
   }
+  analytical_direction?: {
+    direction: 'BUY' | 'SELL'
+    confidence: number
+    strength: string
+    bullish_score: number | null
+    bearish_score: number | null
+  }
+  structural_trade_setup?: {
+    owner_timeframe: 'M5' | 'M15' | 'COMBINED'
+    direction: 'BUY' | 'SELL'
+    entry: number
+    stop_loss: number
+    take_profit: number
+    risk_reward_ratio: number
+    required_minimum_risk_reward: number
+    basis_fact_identifiers: string[]
+    validation_status: 'VALID' | 'INVALID'
+    created_at: string
+    expires_at: string | null
+  } | null
+  execution_eligibility?: {
+    status: 'READY' | 'BLOCKED'
+    blockers: string[]
+  }
+  confidence_semantics?: {
+    analytical_confidence: number | null
+    ai_interpretation_confidence: number | null
+    quant_direction: 'BUY' | 'SELL' | null
+    quant_directional_probability: number | null
+    quant_calibration_status: string
+    quant_ai_alignment: 'AGREEMENT' | 'DISAGREEMENT' | 'UNAVAILABLE'
+    evidence_completeness: number | null
+    guardrail_confidence: number
+    final_overall_confidence: number
+  }
+  evidence_contributions?: Record<string, {
+    family: string
+    status: 'contributed' | 'no_qualifying_contribution'
+    normalized_contribution: number | null
+    weighted_contribution: number | null
+    evidence_count: number
+  }>
   stages: Record<string, AuthoritativeCycleStage>
   lineage: Record<string, string | null>
   performance: {

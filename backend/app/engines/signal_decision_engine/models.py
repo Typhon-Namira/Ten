@@ -5,6 +5,7 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 import math
+from typing import Any
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -394,6 +395,7 @@ class SignalDecision(DecisionModel):
     risk_evidence: tuple[SignalEvidence, ...] = ()
     source_lineage: SignalSourceLineage | None = None
     publication_eligible: bool = False
+    notification_context: dict[str, Any] | None = None
 
     @field_validator("as_of", "decided_at", "valid_from", "valid_until")
     @classmethod

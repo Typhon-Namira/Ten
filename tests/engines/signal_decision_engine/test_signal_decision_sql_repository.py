@@ -1,6 +1,7 @@
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
@@ -108,4 +109,86 @@ async def test_sql_reads_active_filters_history_and_pruning() -> None:
     assert await repository.prune(NOW, DecisionMode.LIVE, 10) == 0
     assert await repository.prune(NOW + timedelta(days=1), DecisionMode.LIVE, 10) == 1
     db.execute.assert_awaited_once()
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_signal_email_outbox_is_inserted_in_the_decision_transaction_once() -> None:
+    signal_id = uuid4()
+    value = decision().model_copy(
+        update={
+            "notification_context": {
+                "signal_id": str(signal_id),
+                "analysis_id": str(uuid4()),
+                "synthesis_id": str(uuid4()),
+                "cycle_id": str(uuid4()),
+                "direction": "BUY",
+                "combined_confidence": 64.0,
+                "combined_strength": "MODERATE",
+                "entry": 4026.89,
+                "stop_loss": 4018.0,
+                "take_profit": 4045.0,
+                "risk_reward": 2.04,
+                "geometry_owner_timeframe": "M15",
+                "structural_source_ids": ("order-block-1",),
+                "timeframe_summaries": (),
+                "expected_horizon_seconds": 900,
+                "created_at": NOW.isoformat(),
+                "expires_at": (NOW + timedelta(minutes=15)).isoformat(),
+                "execution_status": "READY",
+                "execution_blockers": (),
+                "analytical_thesis": "Validated same-cycle structure.",
+                "current_market_price": 4027.0,
+                "ai_confidence": 62.0,
+                "quant_confidence": 66.0,
+                "quant_ai_alignment": "agreement",
+            }
+        }
+    )
+    db = session()
+    db.execute.side_effect = [
+        InsertResult(value.decision_id),
+        None,
+        None,
+        None,
+    ]
+    repository = SqlAlchemySignalDecisionRepository(
+        FakeSessionFactory(db),
+        signal_email_enabled=True,
+    )
+    repository.find_by_fingerprint = AsyncMock(side_effect=[None, value])  # type: ignore[method-assign]
+
+    assert await repository.save_decision(value) == value
+    assert db.execute.await_count == 4
+    db.commit.assert_awaited_once()
+
+    repository.find_by_fingerprint = AsyncMock(return_value=value)  # type: ignore[method-assign]
+    await repository.save_decision(value)
+    assert db.execute.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_signal_without_complete_geometry_does_not_enqueue_email() -> None:
+    value = decision().model_copy(
+        update={
+            "notification_context": {
+                "signal_id": str(uuid4()),
+                "direction": "SELL",
+                "entry": None,
+                "stop_loss": None,
+                "take_profit": None,
+                "risk_reward": None,
+            }
+        }
+    )
+    db = session()
+    db.execute.side_effect = [InsertResult(value.decision_id), None, None]
+    repository = SqlAlchemySignalDecisionRepository(
+        FakeSessionFactory(db),
+        signal_email_enabled=True,
+    )
+    repository.find_by_fingerprint = AsyncMock(side_effect=[None, value])  # type: ignore[method-assign]
+
+    assert await repository.save_decision(value) == value
+    assert db.execute.await_count == 3
     db.commit.assert_awaited_once()

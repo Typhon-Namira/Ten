@@ -587,6 +587,44 @@ class ConservativeSignalDecisionPolicy:
                 risk_policy_version=self.config.policy_version,
             ),
             publication_eligible=actionable,
+            notification_context=(
+                {
+                    "signal_id": str(analysis_signal.signal_id),
+                    "analysis_id": str(analysis_signal.analysis_id),
+                    "synthesis_id": (
+                        str(analysis_signal.synthesis_id)
+                        if analysis_signal.synthesis_id is not None
+                        else None
+                    ),
+                    "cycle_id": str(analysis_signal.cycle_id),
+                    "direction": analysis_signal.signal.value,
+                    "combined_confidence": analysis_signal.signal_confidence,
+                    "combined_strength": analysis_signal.strength.value,
+                    "entry": analysis_signal.entry,
+                    "stop_loss": analysis_signal.stop_loss,
+                    "take_profit": analysis_signal.take_profit,
+                    "risk_reward": analysis_signal.risk_reward_ratio,
+                    "geometry_owner_timeframe": analysis_signal.geometry_owner_timeframe,
+                    "structural_source_ids": analysis_signal.geometry_basis,
+                    "timeframe_summaries": analysis_signal.timeframe_summaries,
+                    "expected_horizon_seconds": analysis_signal.expected_holding_seconds,
+                    "created_at": analysis_signal.generated_at.isoformat(),
+                    "expires_at": (
+                        analysis_signal.valid_until.isoformat()
+                        if analysis_signal.valid_until is not None
+                        else None
+                    ),
+                    "execution_status": analysis_signal.execution_status.value,
+                    "execution_blockers": analysis_signal.blocking_reasons,
+                    "analytical_thesis": analysis_signal.reasoning_summary,
+                    "current_market_price": decision_input.current_price,
+                    "ai_confidence": analysis_signal.analysis_confidence,
+                    "quant_confidence": analysis_signal.quant_confidence,
+                    "quant_ai_alignment": analysis_signal.quant_ai_alignment.value,
+                }
+                if analysis_signal is not None
+                else None
+            ),
         )
 
     def _threshold_rule(self, add: Callable[..., None], rule_id: str, value: float, observe: float, eligible: float, name: str) -> None:
