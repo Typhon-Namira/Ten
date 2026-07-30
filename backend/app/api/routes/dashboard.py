@@ -284,14 +284,43 @@ def _contribution_projection(combined: Any | None) -> dict[str, Any]:
 
 def _geometry_projection(
     multi_timeframe_signal: Any | None,
-    signal: Any,
     *,
     minimum_risk_reward: float,
+    now: datetime,
 ) -> dict[str, Any] | None:
     if multi_timeframe_signal is None:
         return None
     combined = multi_timeframe_signal.combined_signal
     if combined.geometry is None:
+        return None
+    geometry = combined.geometry
+    validated_price = getattr(geometry, "validated_market_price", None)
+    maximum_distance = getattr(geometry, "maximum_entry_distance", None)
+    validated_at = getattr(geometry, "validated_at", None)
+    expires_at = getattr(geometry, "expires_at", None)
+    if (
+        validated_price is None
+        or maximum_distance is None
+        or validated_at is None
+        or expires_at is None
+        or now >= expires_at
+        or abs(geometry.entry - validated_price) > maximum_distance
+        or geometry.risk_reward_ratio < minimum_risk_reward
+        or (
+            combined.analytical_direction.value == "BUY"
+            and not (
+                geometry.stop_loss < geometry.entry < geometry.take_profit
+                and validated_price < geometry.take_profit
+            )
+        )
+        or (
+            combined.analytical_direction.value == "SELL"
+            and not (
+                geometry.take_profit < geometry.entry < geometry.stop_loss
+                and geometry.take_profit < validated_price
+            )
+        )
+    ):
         return None
     owner = next(
         (
@@ -304,15 +333,15 @@ def _geometry_projection(
     return {
         "owner_timeframe": owner,
         "direction": combined.analytical_direction.value,
-        **combined.geometry.model_dump(mode="json"),
+        **geometry.model_dump(mode="json"),
         "required_minimum_risk_reward": minimum_risk_reward,
         "validation_status": (
             "VALID"
-            if combined.geometry.risk_reward_ratio >= minimum_risk_reward
+            if geometry.risk_reward_ratio >= minimum_risk_reward
             else "INVALID"
         ),
-        "created_at": multi_timeframe_signal.created_at,
-        "expires_at": signal.valid_until,
+        "created_at": validated_at,
+        "expires_at": expires_at,
     }
 
 
@@ -614,8 +643,8 @@ async def _completed_cycle_projection(
     )
     geometry = _geometry_projection(
         multi_timeframe_signal,
-        signal,
         minimum_risk_reward=minimum_rr,
+        now=now,
     )
     guardrail_blockers = [
         item.model_dump(mode="json") for item in decision.blockers
