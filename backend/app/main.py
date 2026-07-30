@@ -93,6 +93,11 @@ from backend.app.signal_synthesis import (
     MultiTimeframeSignalSynthesizer,
     SqlAlchemyMultiTimeframeSignalRepository,
 )
+from backend.app.signal_notifications import (
+    SignalEmailOutboxRepository,
+    SignalEmailWorker,
+    SmtpSignalEmailSender,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -338,7 +343,14 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         decision_repository: SignalDecisionRepository = InMemorySignalDecisionRepository()
         decision_mode = "memory"
         if app.state.database_session_factory is not None:
-            decision_repository = SqlAlchemySignalDecisionRepository(app.state.database_session_factory)
+            decision_repository = SqlAlchemySignalDecisionRepository(
+                app.state.database_session_factory,
+                signal_email_enabled=(
+                    settings.signal_email_enabled
+                    and not settings.signal_email_configuration_errors
+                ),
+                signal_email_recipient=settings.signal_email_recipient,
+            )
             decision_mode = "postgresql"
         app.state.signal_decision_service = SignalDecisionService(
             decision_repository,
@@ -621,6 +633,34 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             ),
         )
         app.state.retention_worker.start()
+        email_configuration_errors = settings.signal_email_configuration_errors
+        if email_configuration_errors:
+            logger.error(
+                "signal_email.configuration.invalid",
+                extra={"missing_variables": email_configuration_errors},
+            )
+        app.state.signal_email_worker = None
+        if (
+            app.state.database_session_factory is not None
+            and settings.signal_email_enabled
+            and not email_configuration_errors
+        ):
+            email_sender = SmtpSignalEmailSender(
+                settings.smtp_host or "",
+                settings.smtp_port,
+                settings.smtp_username,
+                settings.smtp_password,
+                settings.smtp_use_tls,
+                settings.email_from or "",
+            )
+            app.state.signal_email_worker = SignalEmailWorker(
+                SignalEmailOutboxRepository(app.state.database_session_factory),
+                email_sender,
+                enabled=True,
+                poll_seconds=settings.signal_email_poll_seconds,
+                max_attempts=settings.signal_email_max_attempts,
+            )
+            app.state.signal_email_worker.start()
         enabled_workers = [
             name
             for name, enabled in (
@@ -634,6 +674,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 ("replay", replay_config.worker.enabled and replay_config.worker.embedded_api_worker),
                 ("storage_maintenance", app.state.storage_maintenance_worker is not None),
                 ("retention", app.state.retention_worker.enabled),
+                ("signal_email", app.state.signal_email_worker is not None),
             )
             if enabled
         ]
@@ -675,6 +716,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             app.state.pipeline_activity_log.stop()
             if app.state.storage_maintenance_worker is not None:
                 await app.state.storage_maintenance_worker.stop()
+            if app.state.signal_email_worker is not None:
+                await app.state.signal_email_worker.stop()
             await app.state.market_data_worker.stop()
             await app.state.integration_worker.stop()
             await app.state.retention_worker.stop()

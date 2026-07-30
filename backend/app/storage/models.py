@@ -573,6 +573,36 @@ class SignalDecisionReasonRecord(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
 
 
+class SignalEmailOutboxRecord(Base):
+    """Durable, idempotent email notification created with its signal decision."""
+
+    __tablename__ = "signal_email_outbox"
+    __table_args__ = (
+        Index("ux_signal_email_outbox_signal_id", "signal_id", unique=True),
+        Index("ix_signal_email_outbox_claim", "status", "next_retry_at", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    decision_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("signal_decisions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    recipient: Mapped[str] = mapped_column(String(320), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    provider_message_id: Mapped[str | None] = mapped_column(String(256))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ReplaySessionRecord(Base):
     __tablename__ = "replay_sessions"
     __table_args__ = (

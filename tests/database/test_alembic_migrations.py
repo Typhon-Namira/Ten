@@ -52,6 +52,23 @@ def test_multi_timeframe_signal_migration_is_strict_idempotent_and_reversible() 
     assert 'op.drop_table("multi_timeframe_signal_sets")' in source
 
 
+def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
+    source = (
+        ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260730_0015"' in source
+    assert 'down_revision = "20260729_0014"' in source
+    assert '"signal_email_outbox"' in source
+    assert '"ux_signal_email_outbox_signal_id"' in source
+    assert 'ForeignKey("signal_decisions.id", ondelete="CASCADE")' in source
+    assert "PENDING" in source
+    assert "PROCESSING" in source
+    assert "SENT" in source
+    assert "FAILED" in source
+    assert 'op.drop_table("signal_email_outbox")' in source
+
+
 def test_initial_migration_renders_every_model_as_postgresql_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEN_DATABASE_URL", "postgresql+asyncpg://ten:ten@localhost:5432/ten")
     output = StringIO()

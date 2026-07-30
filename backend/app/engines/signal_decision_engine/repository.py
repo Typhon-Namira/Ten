@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -10,11 +11,27 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.batching import bounded_insert_chunks
-from backend.app.storage.models import SignalDecisionReasonRecord, SignalDecisionRecord, SignalDecisionRuleRecord
+from backend.app.storage.models import (
+    SignalDecisionReasonRecord,
+    SignalDecisionRecord,
+    SignalDecisionRuleRecord,
+    SignalEmailOutboxRecord,
+)
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .exceptions import SignalDecisionPersistenceError
 from .models import DecisionDirection, DecisionMode, DecisionState, SignalDecision, stable_id
+
+
+def _notification_expiration(notification: Mapping[str, object] | None) -> datetime | None:
+    if notification is None or not notification.get("expires_at"):
+        return None
+    try:
+        return datetime.fromisoformat(
+            str(notification["expires_at"]).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=UTC)
 
 
 class SignalDecisionRepository(ABC):
@@ -168,8 +185,16 @@ class InMemorySignalDecisionRepository(SignalDecisionRepository):
 
 
 class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSessionRepository):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        signal_email_enabled: bool = False,
+        signal_email_recipient: str = "tufannamira@gmail.com",
+    ) -> None:
         ScopedSessionRepository.__init__(self, session_factory)
+        self.signal_email_enabled = signal_email_enabled
+        self.signal_email_recipient = signal_email_recipient
 
     @scoped_session
     async def save_decision(self, decision: SignalDecision) -> SignalDecision:
@@ -234,6 +259,57 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
             if reasons:
                 for chunk in bounded_insert_chunks(reasons):
                     await self.session.execute(insert(SignalDecisionReasonRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
+            notification = decision.notification_context
+            notification_expires_at = _notification_expiration(notification)
+            if (
+                self.signal_email_enabled
+                and decision.mode == DecisionMode.LIVE
+                and notification is not None
+                and notification.get("direction") in {"BUY", "SELL"}
+                and all(
+                    notification.get(field) is not None
+                    for field in ("entry", "stop_loss", "take_profit", "risk_reward")
+                )
+                and float(notification["risk_reward"]) > 0
+                and decision.decided_at < decision.valid_until
+                and (
+                    notification_expires_at is None
+                    or decision.decided_at < notification_expires_at
+                )
+            ):
+                now = datetime.now(UTC)
+                payload = {
+                    **notification,
+                    "symbol": decision.instrument,
+                    "market_time": decision.as_of.isoformat(),
+                    "decision_id": str(decision.decision_id),
+                    "guardrail_status": (
+                        "APPROVED" if decision.publication_eligible else "REJECTED"
+                    ),
+                    "publication_status": (
+                        "ELIGIBLE" if decision.publication_eligible else "INELIGIBLE"
+                    ),
+                    "blockers": [
+                        item.reason_code
+                        for item in (*decision.blockers, *decision.warnings)
+                    ],
+                }
+                await self.session.execute(
+                    insert(SignalEmailOutboxRecord)
+                    .values(
+                        id=stable_id("signal-email", notification["signal_id"]),
+                        signal_id=UUID(str(notification["signal_id"])),
+                        decision_id=decision.decision_id,
+                        recipient=self.signal_email_recipient,
+                        status="PENDING",
+                        payload=payload,
+                        attempt_count=0,
+                        next_retry_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_nothing(index_elements=["signal_id"])
+                )
             await self.session.commit()
             return await self.find_by_fingerprint(decision.input_fingerprint, decision.mode) or decision
         except Exception as exc:

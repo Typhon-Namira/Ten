@@ -58,17 +58,37 @@ class DeterministicAnalysisSignalGenerator:
         candidate = AnalysisSignalAction(combined.analytical_direction.value)
         geometry = combined.geometry
         analysis_confidence = analysis.output.analysis_confidence * 100
-        quant_confidence = combined.confidence_decomposition.quant_ai_alignment
+        predictions = tuple(
+            item for item in quant.predictions
+            if item.horizon.timeframe in {"M5", "M15"}
+        )
+        buy_probability = (
+            sum(item.buy_probability for item in predictions) / len(predictions)
+            if predictions else 0.0
+        )
+        sell_probability = (
+            sum(item.sell_probability for item in predictions) / len(predictions)
+            if predictions else 0.0
+        )
+        quant_direction = (
+            AnalysisSignalAction.BUY
+            if buy_probability >= sell_probability
+            else AnalysisSignalAction.SELL
+        )
+        quant_confidence = (
+            buy_probability if candidate == AnalysisSignalAction.BUY else sell_probability
+        ) * 100
         alignment = (
             QuantAIAlignment.AGREEMENT
-            if quant_confidence >= 75
+            if predictions and quant_direction == candidate
             else QuantAIAlignment.DISAGREEMENT
-            if quant_confidence < 50
-            else QuantAIAlignment.NEUTRAL
+            if predictions
+            else QuantAIAlignment.QUANT_UNAVAILABLE
         )
         alignment_explanation = (
-            f"Persisted M5/M15 synthesis reports {quant_confidence:.1f}% "
-            "Quant/AI alignment; disagreement is retained in confidence."
+            f"Quant direction {quant_direction.value if predictions else 'unavailable'} "
+            f"at {quant_confidence:.1f}% directional probability versus Combined "
+            f"{candidate.value}; calibration is {quant.calibration_status.value}."
         )
         rounded_confidence = round(combined.confidence)
         holding_seconds = 900
@@ -80,6 +100,25 @@ class DeterministicAnalysisSignalGenerator:
                 for item in combined.evidence_breakdown
                 if item.directional_contribution.value == candidate.value
             )
+        )
+        geometry_owner = next(
+            (
+                item.timeframe
+                for item in bundle.timeframe_signals
+                if geometry is not None and item.geometry == geometry
+            ),
+            None,
+        )
+        timeframe_summaries = tuple(
+            {
+                "timeframe": item.timeframe,
+                "direction": item.analytical_direction.value,
+                "confidence": item.confidence,
+                "strength": item.strength.value,
+                "execution_status": item.execution_status.value,
+                "blocking_reasons": item.blocking_reasons,
+            }
+            for item in bundle.timeframe_signals
         )
         components = {
             "bullish_score": combined.bullish_score,
@@ -98,6 +137,7 @@ class DeterministicAnalysisSignalGenerator:
             cycle_id=analysis.cycle_id,
             snapshot_id=analysis.market_snapshot_id,
             analysis_id=analysis.analysis_id,
+            synthesis_id=bundle.synthesis_id,
             instrument=analysis.symbol,
             timeframe=analysis.timeframe,
             signal=candidate,
@@ -119,6 +159,8 @@ class DeterministicAnalysisSignalGenerator:
             quant_ai_explanation=alignment_explanation,
             quality_threshold=self.quality_threshold,
             geometry_basis=geometry.basis_fact_identifiers if geometry else (),
+            geometry_owner_timeframe=geometry_owner,
+            timeframe_summaries=timeframe_summaries,
             valid_from=valid_from,
             valid_until=valid_until,
             expected_holding_seconds=holding_seconds,

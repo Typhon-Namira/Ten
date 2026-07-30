@@ -76,12 +76,13 @@ def test_authoritative_dashboard_preserves_direction_when_execution_is_blocked()
         lifecycle_status="CURRENT",
     )
 
-    assert result["candidate_signal"] == "SELL"
     assert result["signal"] == "SELL"
-    assert result["authoritative_action"] == "SELL"
-    assert result["lifecycle_status"] == "BLOCKED"
-    assert result["execution_status"] == "BLOCKED"
-    assert result["blocking_reasons"] == ["risk_hard_block"]
+    assert result["analytical_direction"] == "SELL"
+    assert result["final_action"] == "SELL"
+    assert result["lifecycle_status"] == "CURRENT"
+    assert result["entry"] == 2400.0
+    assert result["risk_reward_ratio"] == 2.0
+    assert "blocking_reasons" not in result
     assert "WAIT" not in str(result)
 
 

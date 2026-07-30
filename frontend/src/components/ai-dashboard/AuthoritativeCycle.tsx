@@ -26,11 +26,23 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
   const decision = cycle.final_decision
   const lifecycle = cycle.signal_lifecycle
   const matrix = cycle.timeframe_matrix ?? []
+  const direction = cycle.analytical_direction
+  const setup = cycle.structural_trade_setup
+  const execution = cycle.execution_eligibility
+  const confidence = cycle.confidence_semantics
+  const isCurrent = lifecycle?.remaining_validity_seconds == null || lifecycle.remaining_validity_seconds > 0
+  const contribution = (name: string) => {
+    const item = cycle.evidence_contributions?.[name]
+    return item?.status === 'contributed' && item.weighted_contribution != null
+      ? `${item.weighted_contribution.toFixed(2)} weighted (${item.evidence_count} facts)`
+      : 'No qualifying contribution'
+  }
   return <>
     <section className="ai-card ai-card--wide authoritative-signal">
-      <SectionHeader eyebrow="Latest completed coherent cycle" title="Current analytical signal" action={<TrendingUp size={19} />} />
+      <SectionHeader eyebrow="Latest completed coherent cycle" title={isCurrent ? 'Current analytical signal' : 'Latest completed analytical signal'} action={<TrendingUp size={19} />} />
+      {!isCurrent ? <p className="reasoning-copy"><strong>No currently valid signal.</strong> This completed signal has expired and is shown for audit only.</p> : null}
       <div className="authoritative-signal__hero">
-        <StatusBadge tone={signalTone(signal.signal)}>{signal.signal}</StatusBadge>
+        <StatusBadge tone={signalTone(direction?.direction ?? signal.signal)}>{direction?.direction ?? signal.signal}</StatusBadge>
         <div><strong>{signal.signal_confidence.toFixed(0)}% signal confidence · {humanize(signal.strength)}</strong><small>{signal.reasoning_summary}</small></div>
         <div className="authoritative-signal__time">
           <Clock3 size={14} />
@@ -40,26 +52,28 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
         </div>
       </div>
       <div className="health-grid">
-        <Metric label="Entry" value={formatPrice(signal.entry)} />
-        <Metric label="Stop loss" value={formatPrice(signal.stop_loss)} />
-        <Metric label="Take profit" value={formatPrice(signal.take_profit)} />
-        <Metric label="Risk / reward" value={signal.risk_reward_ratio?.toFixed(2) ?? 'Not applicable'} />
-        <Metric label="Signal status" value={humanize(lifecycle?.status ?? signal.lifecycle_status)} />
+        <Metric label="Bullish score" value={direction?.bullish_score?.toFixed(2) ?? 'Not available'} />
+        <Metric label="Bearish score" value={direction?.bearish_score?.toFixed(2) ?? 'Not available'} />
+        <Metric label="Lifecycle" value={humanize(lifecycle?.status ?? signal.lifecycle_status)} />
         <Metric label="Signal age" value={formatDuration(lifecycle?.signal_age_seconds)} />
         <Metric label="Remaining validity" value={formatDuration(lifecycle?.remaining_validity_seconds)} />
         <Metric label="Expected horizon" value={formatDuration(signal.expected_holding_seconds)} />
       </div>
       <div className="health-grid">
-        <Metric label="Analysis confidence" value={`${signal.analysis_confidence.toFixed(0)}%`} />
-        <Metric label="Quant confidence" value={signal.quant_confidence == null ? 'Not available' : `${signal.quant_confidence.toFixed(0)}%`} />
-        <Metric label="Guardrail confidence" value={decision == null ? 'Pending' : `${decision.guardrail_confidence.toFixed(0)}%`} />
-        <Metric label="Overall confidence" value={`${(decision?.overall_confidence ?? signal.overall_confidence).toFixed(0)}%`} />
-        <Metric label="Trend score" value={`${(signal.scoring_components.trend_alignment ?? 0).toFixed(0)}%`} />
-        <Metric label="Institutional score" value={`${(signal.scoring_components.institutional_flow ?? 0).toFixed(0)}%`} />
-        <Metric label="Evidence score" value={`${(signal.scoring_components.signal_quality ?? 0).toFixed(0)}%`} />
-        <Metric label="Risk score" value={decision == null ? 'Pending' : `${decision.market_risk_score.toFixed(0)}%`} />
+        <Metric label="AI interpretation confidence" value={confidence?.ai_interpretation_confidence == null ? 'Not available' : `${confidence.ai_interpretation_confidence.toFixed(0)}%`} />
+        <Metric label="Quant direction / probability" value={confidence?.quant_directional_probability == null ? 'Not available' : `${confidence.quant_direction} ${confidence.quant_directional_probability.toFixed(0)}%`} />
+        <Metric label="Quant calibration" value={humanize(confidence?.quant_calibration_status ?? 'not available')} />
+        <Metric label="Quant / AI direction" value={humanize(confidence?.quant_ai_alignment ?? 'unavailable')} />
+        <Metric label="Evidence completeness" value={confidence?.evidence_completeness == null ? 'Not available' : `${confidence.evidence_completeness.toFixed(0)}%`} />
+        <Metric label="Guardrail confidence" value={confidence == null ? 'Pending' : `${confidence.guardrail_confidence.toFixed(0)}%`} />
+        <Metric label="Final overall confidence" value={confidence == null ? 'Pending' : `${confidence.final_overall_confidence.toFixed(0)}%`} />
       </div>
-      <p className="reasoning-copy"><strong>Quant vs AI: {humanize(signal.quant_ai_alignment)}.</strong> {signal.quant_ai_explanation}</p>
+      <div className="health-grid">
+        <Metric label="Trend contribution" value={contribution('trend')} />
+        <Metric label="Institutional contribution" value={contribution('institutional')} />
+        <Metric label="Volume contribution" value={contribution('volume')} />
+        <Metric label="All evidence contribution" value={contribution('evidence')} />
+      </div>
       {lifecycle?.outcome ? <p className="reasoning-copy">Actual RR {lifecycle.outcome.actual_risk_reward?.toFixed(2) ?? 'pending'} · MFE {formatPrice(lifecycle.outcome.maximum_favorable_excursion)} · MAE {formatPrice(lifecycle.outcome.maximum_adverse_excursion)} · Entry {lifecycle.outcome.entry_reached ? 'reached' : 'not reached'}</p> : null}
       <div className="cycle-lineage">
         <span>Cycle <code>{cycle.cycle_id}</code></span>
@@ -68,6 +82,29 @@ export function CurrentAnalyticalCycle({ cycle }: { cycle: LatestCompletedCycle 
         <span>Decision <code>{cycle.decision_id ?? 'pending'}</code></span>
       </div>
     </section>
+    <div className="ai-card-grid">
+      <section className="ai-card">
+        <SectionHeader eyebrow="Same-cycle structure" title="Structural trade setup" action={<TrendingUp size={19} />} />
+        {setup == null ? <EmptyState title="No validated geometry" detail="The analytical direction remains valid, but no concrete structure passed geometry validation." /> : <>
+          <div className="health-grid">
+            <Metric label="Owner timeframe" value={setup.owner_timeframe} />
+            <Metric label="Direction" value={setup.direction} />
+            <Metric label="Entry" value={formatPrice(setup.entry)} />
+            <Metric label="Stop loss" value={formatPrice(setup.stop_loss)} />
+            <Metric label="Take profit" value={formatPrice(setup.take_profit)} />
+            <Metric label="Risk / reward" value={`${setup.risk_reward_ratio.toFixed(2)} / required ${setup.required_minimum_risk_reward.toFixed(2)}`} />
+            <Metric label="Geometry validation" value={setup.validation_status} />
+            <Metric label="Expires" value={setup.expires_at ? new Date(setup.expires_at).toLocaleString() : 'Not available'} />
+          </div>
+          <p className="reasoning-copy">Structural sources: {setup.basis_fact_identifiers.join(', ')}</p>
+        </>}
+      </section>
+      <section className="ai-card">
+        <SectionHeader eyebrow="Independent gating" title="Execution eligibility" action={<ShieldCheck size={19} />} />
+        <StatusBadge tone={execution?.status === 'READY' ? 'positive' : 'negative'}>{execution?.status ?? 'BLOCKED'}</StatusBadge>
+        <p className="reasoning-copy">{execution?.blockers.map(humanize).join(' · ') || 'No execution blockers'}</p>
+      </section>
+    </div>
     {matrix.length ? <section className="ai-card ai-card--wide">
       <SectionHeader eyebrow="Independent point-in-time synthesis" title="Multi-timeframe signal matrix" action={<Activity size={19} />} />
       <div className="authoritative-table">
