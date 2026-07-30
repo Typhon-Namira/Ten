@@ -70,7 +70,6 @@ class SignalSynthesisConfig(BaseModel):
     structural_invalidation_buffer_fraction: float = Field(default=0.05, gt=0, le=0.5)
     geometry_validity_seconds: int = Field(default=900, ge=60, le=7200)
     minimum_remaining_validity_seconds: int = Field(default=60, ge=1, le=900)
-    maximum_structure_age_seconds: int = Field(default=14400, ge=60, le=86400)
     correlated_evidence_discount: float = Field(default=0.35, ge=0, le=1)
     strength_thresholds: tuple[float, float, float, float] = (
         40,
@@ -1072,22 +1071,10 @@ class MultiTimeframeSignalSynthesizer:
                         or value.get("formed_at")
                         or value.get("timestamp")
                     )
-                    if (
-                        formed_at is not None
-                        and formed_at > evaluated_at
-                    ):
+                    if formed_at is not None and formed_at > evaluated_at:
                         invalid_structure_timestamp_seen = True
                         continue
-                    if (
-                        (expires_at is not None and expires_at <= evaluated_at)
-                        or (
-                            formed_at is not None
-                            and (
-                                evaluated_at - formed_at
-                            ).total_seconds()
-                            > self.config.maximum_structure_age_seconds
-                        )
-                    ):
+                    if expires_at is not None and expires_at <= evaluated_at:
                         expired_structure_seen = True
                         continue
                     if max(

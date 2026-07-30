@@ -444,6 +444,9 @@ async def test_geometry_uses_only_active_zone_and_liquidity_fact_identifiers() -
                 "mitigation_percentage": 0,
                 "quality_score": 100,
                 "source_candle_ids": ["entry-source"],
+                "origin_timestamp": (
+                    state.market_data_boundary - timedelta(hours=6)
+                ).isoformat(),
             }
         ],
     )
@@ -734,8 +737,8 @@ async def test_expired_historical_structure_never_becomes_active_geometry() -> N
                 "lifecycle_state": "active",
                 "lower_price": 3298,
                 "upper_price": 3300,
-                "created_at": (
-                    state.market_data_boundary - timedelta(hours=6)
+                "expiration_timestamp": (
+                    state.market_data_boundary - timedelta(seconds=1)
                 ).isoformat(),
             }
         ],
