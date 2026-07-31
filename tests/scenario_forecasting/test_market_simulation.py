@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from uuid import uuid4
 from unittest.mock import AsyncMock
@@ -538,3 +539,128 @@ async def test_newer_m5_state_does_not_hide_latest_recoverable_m15_state() -> No
     )
 
     assert latest_m15 == m15_state
+
+
+@pytest.mark.asyncio
+async def test_scenario_waits_until_exact_authoritative_analysis_is_committed() -> None:
+    state, quant, synthesis = await scenario_inputs()
+    repository = InMemoryMarketSimulationRepository()
+    ai_repository = AsyncMock()
+    ai_repository.analysis_for_state.return_value = None
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(),
+        ai_analysis_repository=ai_repository,
+        ai_lookup_retry_delays_seconds=(),
+    )
+
+    result = await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M15",
+        evaluated_at=state.market_data_boundary,
+    )
+
+    assert result is None
+    attempt = await repository.attempt_at_cutoff(
+        state.instrument, state.market_data_boundary
+    )
+    assert attempt is not None
+    assert attempt.status == SimulationAttemptStatus.WAITING_FOR_AI_ANALYSIS
+    assert attempt.started_at is None
+    assert repository.simulations == {}
+    ai_repository.analysis_for_state.assert_awaited_once_with(state.state_id)
+
+
+@pytest.mark.asyncio
+async def test_delayed_analysis_resumes_same_idempotent_attempt_to_success() -> None:
+    state, quant, synthesis = await scenario_inputs()
+    analysis = aligned_analysis(state, quant)
+    synthesis = synthesis.model_copy(update={"analysis_id": analysis.analysis_id})
+    repository = InMemoryMarketSimulationRepository()
+    ai_repository = AsyncMock()
+    ai_repository.analysis_for_state.return_value = None
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(
+            MarketSimulationConfig(
+                primary_scenario_threshold=0,
+                email_scenario_threshold=0,
+            )
+        ),
+        ai_analysis_repository=ai_repository,
+        ai_lookup_retry_delays_seconds=(),
+    )
+
+    await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M15",
+        evaluated_at=state.market_data_boundary,
+    )
+    waiting = await repository.latest_attempt(state.instrument)
+    assert waiting is not None
+    ai_repository.analysis_for_state.return_value = analysis
+
+    recovered = await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M15",
+        evaluated_at=state.market_data_boundary + timedelta(seconds=2),
+    )
+
+    assert recovered is not None
+    terminal = await repository.latest_attempt(state.instrument)
+    assert terminal is not None
+    assert terminal.attempt_id == waiting.attempt_id
+    assert terminal.status == SimulationAttemptStatus.SUCCESS
+    assert terminal.ai_analysis_id == analysis.analysis_id
+    assert terminal.ai_analysis_cutoff == state.market_data_boundary
+    assert len(repository.attempts) == 1
+    assert len(repository.simulations) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_workers_create_only_one_simulation_for_cutoff() -> None:
+    state, quant, synthesis = await scenario_inputs()
+    analysis = aligned_analysis(state, quant)
+    synthesis = synthesis.model_copy(update={"analysis_id": analysis.analysis_id})
+    repository = InMemoryMarketSimulationRepository()
+    ai_repository = AsyncMock()
+    ai_repository.analysis_for_state.return_value = analysis
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(
+            MarketSimulationConfig(
+                primary_scenario_threshold=0,
+                email_scenario_threshold=0,
+            )
+        ),
+        ai_analysis_repository=ai_repository,
+        ai_lookup_retry_delays_seconds=(),
+    )
+
+    results = await asyncio.gather(
+        *(
+            service.process(
+                state,
+                quant,
+                synthesis,
+                trigger_timeframe="M15",
+                evaluated_at=state.market_data_boundary,
+            )
+            for _ in range(2)
+        )
+    )
+
+    assert sum(item is not None for item in results) >= 1
+    assert len(repository.attempts) == 1
+    assert len(repository.simulations) == 1
+    attempt = await repository.latest_attempt(state.instrument)
+    assert attempt is not None and attempt.status == SimulationAttemptStatus.SUCCESS

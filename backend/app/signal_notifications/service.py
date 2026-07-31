@@ -3,21 +3,98 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
+from hashlib import sha256
 import logging
 import smtplib
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.app.storage.models import SignalEmailOutboxRecord
+from backend.app.storage.models import (
+    PrimaryScenarioSelectionRecord,
+    SignalDecisionRecord,
+    SignalEmailOutboxRecord,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class SignalEmailSender(Protocol):
     async def send(self, payload: dict[str, Any], recipient: str) -> str | None: ...
+
+
+def primary_email_outbox_values(
+    decision: Any,
+    recipient: str,
+    now: datetime,
+) -> dict[str, Any] | None:
+    notification = decision.notification_context
+    if not (
+        getattr(getattr(decision, "mode", None), "value", None) == "live"
+        and decision.publication_eligible
+        and notification is not None
+        and notification.get("primary_scenario_id") is not None
+        and notification.get("direction") in {"BUY", "SELL"}
+        and all(
+            notification.get(field) is not None
+            for field in ("entry", "stop_loss", "take_profit", "risk_reward")
+        )
+        and float(notification["risk_reward"]) > 0
+        and float(notification.get("primary_scenario_score", 100))
+        >= float(notification.get("email_threshold", 0))
+        and decision.decided_at < decision.valid_until
+        and now < decision.valid_until
+    ):
+        return None
+    expires_at = notification.get("expires_at")
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    if isinstance(expires_at, datetime) and (
+        decision.decided_at >= expires_at or now >= expires_at
+    ):
+        return None
+    payload = {
+        **notification,
+        "symbol": decision.instrument,
+        "market_time": decision.as_of.isoformat(),
+        "decision_id": str(decision.decision_id),
+        "guardrail_status": "APPROVED",
+        "publication_status": "ELIGIBLE",
+        "blockers": [
+            item.reason_code for item in (*decision.blockers, *decision.warnings)
+        ],
+    }
+    deduplication_key = sha256(
+        "|".join(
+            str(value)
+            for value in (
+                decision.instrument,
+                notification.get("market_cutoff", decision.as_of.isoformat()),
+                notification["primary_scenario_id"],
+                notification["direction"],
+                notification["entry"],
+                notification["stop_loss"],
+                notification["take_profit"],
+            )
+        ).encode()
+    ).hexdigest()
+    return {
+        "id": uuid5(NAMESPACE_URL, f"ten:primary-scenario-email:{deduplication_key}"),
+        "signal_id": UUID(str(notification["signal_id"])),
+        "primary_scenario_id": UUID(str(notification["primary_scenario_id"])),
+        "deduplication_key": deduplication_key,
+        "decision_id": decision.decision_id,
+        "recipient": recipient,
+        "status": "PENDING",
+        "payload": payload,
+        "attempt_count": 0,
+        "next_retry_at": now,
+        "created_at": now,
+        "updated_at": now,
+    }
 
 
 def render_signal_email(payload: dict[str, Any]) -> tuple[str, str]:
@@ -101,7 +178,10 @@ class SmtpSignalEmailSender:
             message["From"] = self.sender
             message["To"] = recipient
             message["Subject"] = subject
-            message["Message-ID"] = f"<ten-signal-{payload['signal_id']}@ten.local>"
+            message_id = (
+                f"<ten-primary-scenario-{payload['primary_scenario_id']}@ten.local>"
+            )
+            message["Message-ID"] = message_id
             message.set_content(body)
             with smtplib.SMTP(self.host, self.port, timeout=30) as client:
                 if self.use_tls:
@@ -109,7 +189,9 @@ class SmtpSignalEmailSender:
                 if self.username:
                     client.login(self.username, self.password or "")
                 response = client.send_message(message)
-            return None if not response else str(response)
+            if response:
+                raise RuntimeError("SMTP rejected one or more recipients")
+            return message_id
 
         return await asyncio.to_thread(send_sync)
 
@@ -117,6 +199,116 @@ class SmtpSignalEmailSender:
 class SignalEmailOutboxRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
+
+    async def enqueue_decision(self, decision: Any, recipient: str) -> bool:
+        now = datetime.now(UTC)
+        values = primary_email_outbox_values(decision, recipient, now)
+        if values is None:
+            return False
+        async with self.session_factory() as session, session.begin():
+            inserted = (
+                await session.execute(
+                    insert(SignalEmailOutboxRecord)
+                    .values(**values)
+                    .on_conflict_do_nothing()
+                    .returning(SignalEmailOutboxRecord.id)
+                )
+            ).scalar_one_or_none()
+        logger.info(
+            "signal_email.triggered" if inserted is not None else "signal_email.duplicate",
+            extra={
+                "scenario_id": str(values["primary_scenario_id"]),
+                "cutoff": values["payload"].get("market_cutoff"),
+                "email_trigger_time": now.isoformat(),
+                "recipient": recipient,
+                "event_id": str(values["id"]),
+                "delivery_state": "QUEUED" if inserted is not None else "ALREADY_QUEUED",
+            },
+        )
+        return inserted is not None
+
+    async def reconcile_eligible_decisions(
+        self,
+        recipient: str,
+        *,
+        limit: int = 500,
+    ) -> int:
+        from backend.app.engines.signal_decision_engine.models import SignalDecision
+
+        async with self.session_factory() as session:
+            records = tuple(
+                (
+                    await session.scalars(
+                        select(SignalDecisionRecord)
+                        .where(
+                            SignalDecisionRecord.mode == "live",
+                            SignalDecisionRecord.state == "eligible",
+                        )
+                        .order_by(SignalDecisionRecord.decided_at.desc())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        inserted = 0
+        for record in records:
+            try:
+                decision = SignalDecision.model_validate(record.payload)
+                inserted += int(await self.enqueue_decision(decision, recipient))
+            except Exception as exc:
+                logger.warning(
+                    "signal_email.reconciliation.skipped",
+                    extra={
+                        "decision_id": str(record.id),
+                        "failure_reason": type(exc).__name__,
+                    },
+                )
+        return inserted
+
+    async def for_primary_scenario(
+        self, primary_scenario_id: UUID
+    ) -> SignalEmailOutboxRecord | None:
+        async with self.session_factory() as session:
+            return (
+                await session.scalars(
+                    select(SignalEmailOutboxRecord)
+                    .where(
+                        SignalEmailOutboxRecord.primary_scenario_id
+                        == primary_scenario_id
+                    )
+                    .order_by(SignalEmailOutboxRecord.created_at.desc())
+                    .limit(1)
+                )
+            ).first()
+
+    async def delivery_summary(self) -> dict[str, int]:
+        async with self.session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        SignalEmailOutboxRecord.status,
+                        func.count(SignalEmailOutboxRecord.id),
+                    ).group_by(SignalEmailOutboxRecord.status)
+                )
+            ).all()
+            statuses = {str(status): int(count) for status, count in rows}
+            eligible_scenarios = int(
+                (
+                    await session.scalar(
+                        select(func.count(PrimaryScenarioSelectionRecord.selection_id))
+                        .where(
+                            PrimaryScenarioSelectionRecord.signal_eligible.is_(True)
+                        )
+                    )
+                )
+                or 0
+            )
+        return {
+            "eligible_scenarios": eligible_scenarios,
+            "triggered": sum(statuses.values()),
+            "delivered": statuses.get("SENT", 0),
+            "failed": statuses.get("FAILED", 0)
+            + statuses.get("PERMANENTLY_FAILED", 0),
+        }
 
     async def claim(self, *, limit: int, now: datetime) -> tuple[SignalEmailOutboxRecord, ...]:
         async with self.session_factory() as session, session.begin():
@@ -178,7 +370,7 @@ class SignalEmailOutboxRepository:
                     SignalEmailOutboxRecord.status == "PROCESSING",
                 )
                 .values(
-                    status="FAILED",
+                    status="PERMANENTLY_FAILED" if terminal else "FAILED",
                     attempt_count=attempt_count,
                     next_retry_at=next_retry_at,
                     processing_started_at=None,
@@ -234,11 +426,31 @@ class SignalEmailWorker:
     async def _deliver(self, event: SignalEmailOutboxRecord) -> None:
         attempt = event.attempt_count
         try:
+            logger.info(
+                "signal_email.sending",
+                extra={
+                    "event_id": str(event.id),
+                    "scenario_id": str(event.primary_scenario_id),
+                    "cutoff": event.payload.get("market_cutoff"),
+                    "recipient": event.recipient,
+                    "attempt": attempt,
+                    "delivery_state": "SENDING",
+                },
+            )
             message_id = await self.sender.send(event.payload, event.recipient)
             await self.repository.mark_sent(event.id, message_id, datetime.now(UTC))
             logger.info(
                 "signal_email.sent",
-                extra={"event_id": str(event.id), "signal_id": str(event.signal_id)},
+                extra={
+                    "event_id": str(event.id),
+                    "signal_id": str(event.signal_id),
+                    "scenario_id": str(event.primary_scenario_id),
+                    "cutoff": event.payload.get("market_cutoff"),
+                    "recipient": event.recipient,
+                    "provider_response": "accepted",
+                    "message_id": message_id,
+                    "delivery_state": "DELIVERED",
+                },
             )
         except Exception as exc:
             terminal = attempt >= self.max_attempts
@@ -253,4 +465,19 @@ class SignalEmailWorker:
                     else datetime.now(UTC) + timedelta(seconds=delay)
                 ),
                 terminal=terminal,
+            )
+            logger.warning(
+                "signal_email.failed",
+                extra={
+                    "event_id": str(event.id),
+                    "scenario_id": str(event.primary_scenario_id),
+                    "cutoff": event.payload.get("market_cutoff"),
+                    "recipient": event.recipient,
+                    "success": False,
+                    "failure_reason": type(exc).__name__,
+                    "attempt": attempt,
+                    "delivery_state": (
+                        "PERMANENTLY_FAILED" if terminal else "RETRY_SCHEDULED"
+                    ),
+                },
             )

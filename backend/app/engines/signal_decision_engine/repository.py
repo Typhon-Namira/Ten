@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
 from datetime import UTC, datetime
-from hashlib import sha256
+import logging
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -19,20 +18,12 @@ from backend.app.storage.models import (
     SignalEmailOutboxRecord,
 )
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
+from backend.app.signal_notifications.service import primary_email_outbox_values
 
 from .exceptions import SignalDecisionPersistenceError
 from .models import DecisionDirection, DecisionMode, DecisionState, SignalDecision, stable_id
 
-
-def _notification_expiration(notification: Mapping[str, object] | None) -> datetime | None:
-    if notification is None or not notification.get("expires_at"):
-        return None
-    try:
-        return datetime.fromisoformat(
-            str(notification["expires_at"]).replace("Z", "+00:00")
-        )
-    except (TypeError, ValueError):
-        return datetime.min.replace(tzinfo=UTC)
+logger = logging.getLogger(__name__)
 
 
 class SignalDecisionRepository(ABC):
@@ -260,82 +251,44 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
             if reasons:
                 for chunk in bounded_insert_chunks(reasons):
                     await self.session.execute(insert(SignalDecisionReasonRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
-            notification = decision.notification_context
-            notification_expires_at = _notification_expiration(notification)
-            if (
-                self.signal_email_enabled
-                and decision.mode == DecisionMode.LIVE
-                and decision.publication_eligible
-                and notification is not None
-                and notification.get("primary_scenario_id") is not None
-                and notification.get("direction") in {"BUY", "SELL"}
-                and all(
-                    notification.get(field) is not None
-                    for field in ("entry", "stop_loss", "take_profit", "risk_reward")
+            email_values = (
+                primary_email_outbox_values(
+                    decision,
+                    self.signal_email_recipient,
+                    datetime.now(UTC),
                 )
-                and float(notification["risk_reward"]) > 0
-                and float(notification.get("primary_scenario_score", 100))
-                >= float(notification.get("email_threshold", 0))
-                and decision.decided_at < decision.valid_until
-                and (
-                    notification_expires_at is None
-                    or decision.decided_at < notification_expires_at
-                )
-            ):
-                now = datetime.now(UTC)
-                payload = {
-                    **notification,
-                    "symbol": decision.instrument,
-                    "market_time": decision.as_of.isoformat(),
-                    "decision_id": str(decision.decision_id),
-                    "guardrail_status": (
-                        "APPROVED" if decision.publication_eligible else "REJECTED"
-                    ),
-                    "publication_status": (
-                        "ELIGIBLE" if decision.publication_eligible else "INELIGIBLE"
-                    ),
-                    "blockers": [
-                        item.reason_code
-                        for item in (*decision.blockers, *decision.warnings)
-                    ],
-                }
-                deduplication_key = sha256(
-                    "|".join(
-                        str(value)
-                        for value in (
-                            decision.instrument,
-                            notification.get("market_cutoff", decision.as_of.isoformat()),
-                            notification.get("primary_scenario_id", notification["signal_id"]),
-                            notification["direction"],
-                            notification["entry"],
-                            notification["stop_loss"],
-                            notification["take_profit"],
-                        )
-                    ).encode()
-                ).hexdigest()
-                await self.session.execute(
-                    insert(SignalEmailOutboxRecord)
-                    .values(
-                        id=stable_id("signal-email", notification["signal_id"]),
-                        signal_id=UUID(str(notification["signal_id"])),
-                        primary_scenario_id=(
-                            UUID(str(notification["primary_scenario_id"]))
-                            if notification.get("primary_scenario_id")
-                            else None
-                        ),
-                        deduplication_key=deduplication_key,
-                        decision_id=decision.decision_id,
-                        recipient=self.signal_email_recipient,
-                        status="PENDING",
-                        payload=payload,
-                        attempt_count=0,
-                        next_retry_at=now,
-                        created_at=now,
-                        updated_at=now,
+                if self.signal_email_enabled
+                else None
+            )
+            email_inserted = None
+            if email_values is not None:
+                email_inserted = (
+                    await self.session.execute(
+                        insert(SignalEmailOutboxRecord)
+                        .values(**email_values)
+                        .on_conflict_do_nothing()
+                        .returning(SignalEmailOutboxRecord.id)
                     )
-                    .on_conflict_do_nothing()
-                )
+                ).scalar_one_or_none()
             await self.session.commit()
+            if email_values is not None:
+                logger.info(
+                    "signal_email.triggered"
+                    if email_inserted is not None
+                    else "signal_email.duplicate",
+                    extra={
+                        "scenario_id": str(email_values["primary_scenario_id"]),
+                        "cutoff": email_values["payload"].get("market_cutoff"),
+                        "email_trigger_time": email_values["created_at"].isoformat(),
+                        "recipient": email_values["recipient"],
+                        "event_id": str(email_values["id"]),
+                        "delivery_state": (
+                            "QUEUED"
+                            if email_inserted is not None
+                            else "ALREADY_QUEUED"
+                        ),
+                    },
+                )
             return await self.find_by_fingerprint(decision.input_fingerprint, decision.mode) or decision
         except Exception as exc:
             await self.session.rollback()

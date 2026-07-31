@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -30,6 +30,7 @@ from .simulation_models import (
     CandidateScenarioOutcome,
     MarketSimulationCycle,
     PrimaryScenarioSelection,
+    SimulationAttemptStatus,
 )
 
 
@@ -37,6 +38,17 @@ class MarketSimulationRepository(Protocol):
     async def save_attempt(
         self, attempt: AuthoritativeSimulationAttempt
     ) -> AuthoritativeSimulationAttempt: ...
+
+    async def claim_attempt(
+        self,
+        attempt: AuthoritativeSimulationAttempt,
+        *,
+        started_at: datetime,
+    ) -> tuple[AuthoritativeSimulationAttempt, bool]: ...
+
+    async def attempt_at_cutoff(
+        self, instrument: str, market_cutoff: datetime
+    ) -> AuthoritativeSimulationAttempt | None: ...
 
     async def latest_attempt(
         self, instrument: str
@@ -101,10 +113,67 @@ class InMemoryMarketSimulationRepository:
     ) -> AuthoritativeSimulationAttempt:
         async with self._lock:
             existing = self.attempts.get(attempt.attempt_id)
-            if existing is not None and existing.status.terminal:
+            if (
+                existing is not None
+                and existing.status.terminal
+                and not (
+                    existing.status == SimulationAttemptStatus.BLOCKED
+                    and existing.failure_type
+                    in {"AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING"}
+                )
+            ):
                 return existing
             self.attempts[attempt.attempt_id] = attempt
             return attempt
+
+    async def claim_attempt(
+        self,
+        attempt: AuthoritativeSimulationAttempt,
+        *,
+        started_at: datetime,
+    ) -> tuple[AuthoritativeSimulationAttempt, bool]:
+        async with self._lock:
+            existing = self.attempts.get(attempt.attempt_id)
+            if existing is not None and (
+                existing.status == SimulationAttemptStatus.RUNNING
+                or (
+                    existing.status.terminal
+                    and not (
+                        existing.status == SimulationAttemptStatus.BLOCKED
+                        and existing.failure_type
+                        in {"AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING"}
+                    )
+                )
+            ):
+                return existing, False
+            source = existing or attempt
+            running = attempt.model_copy(
+                update={
+                    "status": SimulationAttemptStatus.RUNNING,
+                    "started_at": started_at,
+                    "retry_count": source.retry_count,
+                    "completed_at": None,
+                    "failure_stage": None,
+                    "failure_type": None,
+                    "failure_message": None,
+                }
+            )
+            self.attempts[attempt.attempt_id] = running
+            return running, True
+
+    async def attempt_at_cutoff(
+        self, instrument: str, market_cutoff: datetime
+    ) -> AuthoritativeSimulationAttempt | None:
+        async with self._lock:
+            return next(
+                (
+                    item
+                    for item in self.attempts.values()
+                    if item.instrument == instrument
+                    and item.market_cutoff == market_cutoff
+                ),
+                None,
+            )
 
     async def latest_attempt(
         self, instrument: str
@@ -190,6 +259,7 @@ class SqlAlchemyMarketSimulationRepository(ScopedSessionRepository):
     ) -> AuthoritativeSimulationAttempt:
         values = {
             "attempt_id": attempt.attempt_id,
+            "correlation_id": attempt.correlation_id,
             "instrument": attempt.instrument,
             "timeframe": attempt.timeframe,
             "market_cutoff": attempt.market_cutoff,
@@ -208,6 +278,13 @@ class SqlAlchemyMarketSimulationRepository(ScopedSessionRepository):
             "failure_message": attempt.failure_message,
             "skip_reason": attempt.skip_reason,
             "retry_count": attempt.retry_count,
+            "market_state_id": attempt.market_state_id,
+            "snapshot_id": attempt.snapshot_id,
+            "quantitative_forecast_id": attempt.quantitative_forecast_id,
+            "ai_analysis_id": attempt.ai_analysis_id,
+            "ai_analysis_cutoff": attempt.ai_analysis_cutoff,
+            "ai_analysis_committed_at": attempt.ai_analysis_committed_at,
+            "dependency_lookup_result": attempt.dependency_lookup_result,
         }
         await self.session.execute(
             insert(AuthoritativeSimulationAttemptRecord)
@@ -233,7 +310,12 @@ class SqlAlchemyMarketSimulationRepository(ScopedSessionRepository):
                     }
                 },
                 where=AuthoritativeSimulationAttemptRecord.status.in_(
-                    ("SCHEDULED", "RUNNING", "FAILED")
+                    (
+                        "SCHEDULED",
+                        "WAITING_FOR_AI_ANALYSIS",
+                        "RUNNING",
+                        "FAILED",
+                    )
                 ),
             )
         )
@@ -245,6 +327,125 @@ class SqlAlchemyMarketSimulationRepository(ScopedSessionRepository):
             AuthoritativeSimulationAttempt.model_validate(record.payload)
             if record is not None
             else attempt
+        )
+
+    @scoped_session
+    async def claim_attempt(
+        self,
+        attempt: AuthoritativeSimulationAttempt,
+        *,
+        started_at: datetime,
+    ) -> tuple[AuthoritativeSimulationAttempt, bool]:
+        await self.session.execute(
+            insert(AuthoritativeSimulationAttemptRecord)
+            .values(
+                attempt_id=attempt.attempt_id,
+                correlation_id=attempt.correlation_id,
+                instrument=attempt.instrument,
+                timeframe=attempt.timeframe,
+                market_cutoff=attempt.market_cutoff,
+                simulation_version=attempt.simulation_version,
+                status=attempt.status.value,
+                payload=attempt.model_dump(mode="json"),
+                scheduled_at=attempt.scheduled_at,
+                candidate_count=0,
+                retry_count=attempt.retry_count,
+                market_state_id=attempt.market_state_id,
+                snapshot_id=attempt.snapshot_id,
+                quantitative_forecast_id=attempt.quantitative_forecast_id,
+                ai_analysis_id=attempt.ai_analysis_id,
+                ai_analysis_cutoff=attempt.ai_analysis_cutoff,
+                ai_analysis_committed_at=attempt.ai_analysis_committed_at,
+                dependency_lookup_result=attempt.dependency_lookup_result,
+            )
+            .on_conflict_do_nothing()
+        )
+        running = attempt.model_copy(
+            update={
+                "status": SimulationAttemptStatus.RUNNING,
+                "started_at": started_at,
+                "completed_at": None,
+                "failure_stage": None,
+                "failure_type": None,
+                "failure_message": None,
+            }
+        )
+        claimed = (
+            await self.session.execute(
+                update(AuthoritativeSimulationAttemptRecord)
+                .where(
+                    AuthoritativeSimulationAttemptRecord.attempt_id
+                    == attempt.attempt_id,
+                    or_(
+                        AuthoritativeSimulationAttemptRecord.status.in_(
+                            (
+                                "SCHEDULED",
+                                "WAITING_FOR_AI_ANALYSIS",
+                                "FAILED",
+                            )
+                        ),
+                        (
+                            AuthoritativeSimulationAttemptRecord.status
+                            == "BLOCKED"
+                        )
+                        & AuthoritativeSimulationAttemptRecord.failure_type.in_(
+                            ("AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING")
+                        ),
+                    ),
+                )
+                .values(
+                    status=SimulationAttemptStatus.RUNNING.value,
+                    payload=running.model_dump(mode="json"),
+                    started_at=started_at,
+                    completed_at=None,
+                    failure_stage=None,
+                    failure_type=None,
+                    failure_message=None,
+                    correlation_id=running.correlation_id,
+                    market_state_id=running.market_state_id,
+                    snapshot_id=running.snapshot_id,
+                    quantitative_forecast_id=running.quantitative_forecast_id,
+                    ai_analysis_id=running.ai_analysis_id,
+                    ai_analysis_cutoff=running.ai_analysis_cutoff,
+                    ai_analysis_committed_at=running.ai_analysis_committed_at,
+                    dependency_lookup_result=running.dependency_lookup_result,
+                )
+                .returning(AuthoritativeSimulationAttemptRecord.attempt_id)
+            )
+        ).scalar_one_or_none()
+        await self.session.commit()
+        record = await self.session.get(
+            AuthoritativeSimulationAttemptRecord, attempt.attempt_id
+        )
+        current = (
+            AuthoritativeSimulationAttempt.model_validate(record.payload)
+            if record is not None
+            else running
+        )
+        return current, claimed is not None
+
+    @scoped_session
+    async def attempt_at_cutoff(
+        self, instrument: str, market_cutoff: datetime
+    ) -> AuthoritativeSimulationAttempt | None:
+        record = (
+            await self.session.scalars(
+                select(AuthoritativeSimulationAttemptRecord)
+                .where(
+                    AuthoritativeSimulationAttemptRecord.instrument == instrument,
+                    AuthoritativeSimulationAttemptRecord.market_cutoff
+                    == market_cutoff,
+                )
+                .order_by(
+                    AuthoritativeSimulationAttemptRecord.scheduled_at.desc()
+                )
+                .limit(1)
+            )
+        ).first()
+        return (
+            AuthoritativeSimulationAttempt.model_validate(record.payload)
+            if record is not None
+            else None
         )
 
     @scoped_session

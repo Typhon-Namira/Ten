@@ -584,6 +584,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             market_state_repository=app.state.unified_market_state_repository,
             quant_repository=app.state.quant_forecast_repository,
             synthesis_repository=app.state.multi_timeframe_signal_repository,
+            ai_analysis_repository=app.state.ai_reasoning_repository,
             recovery_max_age_seconds=settings.scenario_recovery_max_age_seconds,
         )
         app.state.integration_service = FullSystemIntegrationService(
@@ -702,6 +703,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 extra={"missing_variables": email_configuration_errors},
             )
         app.state.signal_email_worker = None
+        app.state.signal_email_outbox_repository = None
         if (
             app.state.database_session_factory is not None
             and settings.signal_email_enabled
@@ -715,8 +717,21 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 settings.smtp_use_tls,
                 settings.email_from or "",
             )
+            app.state.signal_email_outbox_repository = SignalEmailOutboxRepository(
+                app.state.database_session_factory
+            )
+            reconciled = await app.state.signal_email_outbox_repository.reconcile_eligible_decisions(
+                settings.signal_email_recipient
+            )
+            logger.info(
+                "signal_email.startup.reconciled",
+                extra={
+                    "recipient": settings.signal_email_recipient,
+                    "newly_queued": reconciled,
+                },
+            )
             app.state.signal_email_worker = SignalEmailWorker(
-                SignalEmailOutboxRepository(app.state.database_session_factory),
+                app.state.signal_email_outbox_repository,
                 email_sender,
                 enabled=True,
                 poll_seconds=settings.signal_email_poll_seconds,

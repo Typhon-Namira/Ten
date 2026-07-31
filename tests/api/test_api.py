@@ -25,7 +25,20 @@ from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
 from backend.app.main import create_app
 from backend.app.signal_synthesis import SignalGeometry
+from backend.app.scenario_forecasting import InMemoryScenarioForecastRepository
+from backend.app.scenario_forecasting.simulation_engine import (
+    MarketSimulationConfig,
+    MarketSimulationEngine,
+)
+from backend.app.scenario_forecasting.simulation_repository import (
+    InMemoryMarketSimulationRepository,
+)
+from backend.app.scenario_forecasting.simulation_service import (
+    MarketSimulationService,
+)
 from tests.ai_reasoning.test_ai_reasoning_lifecycle import state_and_quant
+from tests.scenario_forecasting.test_scenario_forecasting import scenario_inputs
+from tests.signal_synthesis.test_multi_timeframe_signal import aligned_analysis
 
 
 @pytest.mark.parametrize(
@@ -567,6 +580,78 @@ def test_stage_four_is_blocked_without_exact_authoritative_m15_analysis() -> Non
     assert datetime.fromisoformat(
         stage["details"]["attempted_cutoff"].replace("Z", "+00:00")
     ) == state.market_data_boundary
+
+
+def test_dashboard_recovery_supersedes_waiting_attempt_and_reads_are_stable() -> None:
+    app = create_app()
+    state, quant, synthesis = asyncio.run(scenario_inputs())
+    state = state.model_copy(update={"trigger_timeframe": "M15"})
+    analysis = aligned_analysis(state, quant)
+    synthesis = synthesis.model_copy(update={"analysis_id": analysis.analysis_id})
+    simulation_repository = InMemoryMarketSimulationRepository()
+    simulation_service = MarketSimulationService(
+        simulation_repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(
+            MarketSimulationConfig(
+                primary_scenario_threshold=0,
+                email_scenario_threshold=0,
+            )
+        ),
+    )
+    waiting = asyncio.run(
+        simulation_service.record_waiting_cutoff(
+            instrument=state.instrument,
+            market_cutoff=state.market_data_boundary,
+            server_time=state.market_data_boundary,
+            reason="AI_ANALYSIS_PENDING",
+            market_state_id=state.state_id,
+            quantitative_forecast_id=quant.result_id,
+        )
+    )
+
+    with TestClient(app) as client:
+        app.state.market_simulation_repository = simulation_repository
+        asyncio.run(app.state.unified_market_state_repository.save_state(state))
+        asyncio.run(app.state.quant_forecast_repository.save_result(quant))
+        asyncio.run(app.state.ai_reasoning_repository.save_analysis(analysis))
+        waiting_reads = [
+            client.get("/api/dashboard/system-status?instrument=XAUUSD")
+            for _ in range(2)
+        ]
+        recovered = asyncio.run(
+            simulation_service.process(
+                state,
+                quant,
+                synthesis,
+                trigger_timeframe="M15",
+                evaluated_at=state.market_data_boundary + timedelta(seconds=2),
+            )
+        )
+        recovered_read = client.get(
+            "/api/dashboard/system-status?instrument=XAUUSD"
+        )
+
+    assert recovered is not None
+    waiting_stages = [
+        next(
+            item
+            for item in response.json()["stages"]
+            if item["id"] == "candidate_generation"
+        )
+        for response in waiting_reads
+    ]
+    assert all(item["status"] == "running" for item in waiting_stages)
+    assert {item["record_id"] for item in waiting_stages} == {
+        str(waiting.attempt_id)
+    }
+    recovered_stage = next(
+        item
+        for item in recovered_read.json()["stages"]
+        if item["id"] == "candidate_generation"
+    )
+    assert recovered_stage["status"] == "healthy"
+    assert recovered_stage["record_id"] == str(waiting.attempt_id)
 
 
 def test_dashboard_reports_exact_storage_circuit_breaker_reason() -> None:

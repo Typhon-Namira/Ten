@@ -46,6 +46,7 @@ class ScenarioSignalAction(StrEnum):
 
 class SimulationAttemptStatus(StrEnum):
     SCHEDULED = "SCHEDULED"
+    WAITING_FOR_AI_ANALYSIS = "WAITING_FOR_AI_ANALYSIS"
     RUNNING = "RUNNING"
     SUCCESS = "SUCCESS"
     NO_SIGNAL = "NO_SIGNAL"
@@ -56,11 +57,16 @@ class SimulationAttemptStatus(StrEnum):
 
     @property
     def terminal(self) -> bool:
-        return self not in {self.SCHEDULED, self.RUNNING}
+        return self not in {
+            self.SCHEDULED,
+            self.WAITING_FOR_AI_ANALYSIS,
+            self.RUNNING,
+        }
 
 
 class AuthoritativeSimulationAttempt(SimulationModel):
     attempt_id: UUID
+    correlation_id: UUID | None = None
     instrument: str
     timeframe: str = "M15"
     market_cutoff: datetime
@@ -89,6 +95,13 @@ class AuthoritativeSimulationAttempt(SimulationModel):
     failure_message: str | None = None
     skip_reason: str | None = None
     retry_count: int = Field(default=0, ge=0)
+    market_state_id: UUID | None = None
+    snapshot_id: UUID | None = None
+    quantitative_forecast_id: UUID | None = None
+    ai_analysis_id: UUID | None = None
+    ai_analysis_cutoff: datetime | None = None
+    ai_analysis_committed_at: datetime | None = None
+    dependency_lookup_result: str | None = None
 
     @field_validator(
         "market_cutoff",
@@ -101,6 +114,8 @@ class AuthoritativeSimulationAttempt(SimulationModel):
         "scheduled_at",
         "started_at",
         "completed_at",
+        "ai_analysis_cutoff",
+        "ai_analysis_committed_at",
     )
     @classmethod
     def attempt_times_are_aware(cls, value: datetime | None) -> datetime | None:
