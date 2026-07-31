@@ -122,6 +122,21 @@ def test_authoritative_simulation_attempt_migration_is_idempotent_and_reversible
     assert 'op.drop_table("authoritative_simulation_attempts")' in source
 
 
+def test_ai_reasoning_gate_decision_migration_is_traceable_and_reversible() -> None:
+    source = (
+        ROOT
+        / "migrations/versions/20260731_0019_ai_reasoning_gate_decisions.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260731_0019"' in source
+    assert 'down_revision = "20260731_0018"' in source
+    assert '"ai_reasoning_gate_decisions"' in source
+    assert "ix_ai_reasoning_gate_decision_boundary" in source
+    assert "ix_ai_reasoning_gate_decisions_market_state_id" in source
+    assert 'ondelete="SET NULL"' in source
+    assert 'op.drop_table("ai_reasoning_gate_decisions")' in source
+
+
 def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     source = (
         ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"

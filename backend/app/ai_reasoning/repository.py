@@ -21,6 +21,7 @@ from backend.app.storage.models import (
     AIMarketForecastRecord,
     AIReasoningRequestRecord,
     AIReasoningCycleLockRecord,
+    AIReasoningGateDecisionRecord,
     AISetupFamilyVersionRecord,
     AISignalProposalRecord,
     LLMStructuredOutputFailureRecord,
@@ -34,6 +35,7 @@ from backend.app.storage.models import (
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .llm_context import build_llm_analysis_context
+from .gate import AIReasoningGateDecision
 from .analysis import (
     AIAnalysisSignal,
     AIAnalysisSignalOutcome,
@@ -102,6 +104,16 @@ def analysis_signal_payload_hash(value: AIAnalysisSignal) -> str:
 
 
 class AIReasoningRepository(Protocol):
+    async def save_gate_decision(
+        self, value: AIReasoningGateDecision
+    ) -> AIReasoningGateDecision: ...
+
+    async def latest_gate_decision(
+        self,
+        instrument: str,
+        attempted_cutoff: datetime | None = None,
+    ) -> AIReasoningGateDecision | None: ...
+
     async def claim_reasoning_cycle(
         self,
         idempotency_key: str,
@@ -241,7 +253,32 @@ class InMemoryAIReasoningRepository:
         self.outcomes: dict[object, SignalOutcome] = {}
         self.memory: dict[object, MarketMemoryEntry] = {}
         self.reasoning_cycles: dict[str, dict[str, object]] = {}
+        self.gate_decisions: dict[object, AIReasoningGateDecision] = {}
         self._lock = asyncio.Lock()
+
+    async def save_gate_decision(
+        self, value: AIReasoningGateDecision
+    ) -> AIReasoningGateDecision:
+        async with self._lock:
+            self.gate_decisions[value.decision_id] = value
+        return value
+
+    async def latest_gate_decision(
+        self,
+        instrument: str,
+        attempted_cutoff: datetime | None = None,
+    ) -> AIReasoningGateDecision | None:
+        async with self._lock:
+            values = [
+                item
+                for item in self.gate_decisions.values()
+                if item.instrument == instrument
+                and (
+                    attempted_cutoff is None
+                    or item.attempted_cutoff == attempted_cutoff
+                )
+            ]
+        return max(values, key=lambda item: item.created_at, default=None)
 
     async def claim_reasoning_cycle(
         self,
@@ -767,6 +804,70 @@ class InMemoryAIReasoningRepository:
 class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         super().__init__(session_factory)
+
+    @scoped_session
+    async def save_gate_decision(
+        self, value: AIReasoningGateDecision
+    ) -> AIReasoningGateDecision:
+        await self.session.execute(
+            insert(AIReasoningGateDecisionRecord)
+            .values(
+                decision_id=value.decision_id,
+                instrument=value.instrument,
+                trigger_timeframe=value.trigger_timeframe,
+                attempted_cutoff=value.attempted_cutoff,
+                analysis_lookup_cutoff=value.analysis_lookup_cutoff,
+                market_state_id=value.market_state_id,
+                snapshot_id=value.snapshot_id,
+                gate_decision=value.gate_decision,
+                gate_skip_reason=value.gate_skip_reason,
+                existing_analysis_id=value.existing_analysis_id,
+                analysis_created_at=value.analysis_created_at,
+                analysis_market_cutoff=value.analysis_market_cutoff,
+                payload=value.model_dump(mode="json"),
+                created_at=value.created_at,
+            )
+            .on_conflict_do_update(
+                index_elements=["decision_id"],
+                set_={
+                    "gate_decision": value.gate_decision,
+                    "gate_skip_reason": value.gate_skip_reason,
+                    "existing_analysis_id": value.existing_analysis_id,
+                    "analysis_created_at": value.analysis_created_at,
+                    "analysis_market_cutoff": value.analysis_market_cutoff,
+                    "payload": value.model_dump(mode="json"),
+                    "created_at": value.created_at,
+                },
+            )
+        )
+        await self.session.commit()
+        return value
+
+    @scoped_session
+    async def latest_gate_decision(
+        self,
+        instrument: str,
+        attempted_cutoff: datetime | None = None,
+    ) -> AIReasoningGateDecision | None:
+        query = select(AIReasoningGateDecisionRecord).where(
+            AIReasoningGateDecisionRecord.instrument == instrument
+        )
+        if attempted_cutoff is not None:
+            query = query.where(
+                AIReasoningGateDecisionRecord.attempted_cutoff
+                == attempted_cutoff
+            )
+        record = (
+            await self.session.scalars(
+                query.order_by(AIReasoningGateDecisionRecord.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        return (
+            AIReasoningGateDecision.model_validate(record.payload)
+            if record is not None
+            else None
+        )
 
     @scoped_session
     async def claim_reasoning_cycle(

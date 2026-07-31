@@ -624,6 +624,54 @@ async def test_validated_ai_cycle_persists_the_multi_timeframe_matrix_before_dec
 
 
 @pytest.mark.asyncio
+async def test_startup_recovery_regenerates_exact_m15_analysis_before_synthesis() -> None:
+    state, quant = await state_and_quant(trigger=Timeframe.M15)
+    current_analysis = aligned_analysis(state, quant)
+    synthesis_repository = InMemoryMultiTimeframeSignalRepository()
+    process_calls: list[object] = []
+
+    class RecoveryReasoningRepository:
+        async def analysis_for_state(self, _state_id: object) -> None:
+            return None
+
+    class RecoveryReasoning:
+        repository = RecoveryReasoningRepository()
+
+        async def process(self, current_state: object, current_quant: object) -> object:
+            process_calls.append(current_state)
+            return SimpleNamespace(analysis=current_analysis)
+
+        async def record_gate_decision(self, **_: object) -> None:
+            return None
+
+    bus, integration_repository = InMemoryEventBus(), InMemoryIntegrationRepository()
+    coordinator = service(bus, integration_repository)
+    coordinator.clock = lambda: state.market_data_boundary + timedelta(seconds=5)
+    coordinator.unified_market_state = SimpleNamespace(
+        repository=SimpleNamespace(
+            latest_state=lambda *_args, **_kwargs: asyncio.sleep(0, result=state)
+        )
+    )
+    coordinator.quantitative_forecasting = SimpleNamespace(
+        repository=SimpleNamespace(
+            result_for_state=lambda _state_id: asyncio.sleep(0, result=quant)
+        )
+    )
+    coordinator.ai_reasoning = RecoveryReasoning()
+    coordinator.signal_synthesizer = MultiTimeframeSignalSynthesizer()
+    coordinator.signal_synthesis_repository = synthesis_repository
+
+    recovered = await coordinator.recover_authoritative_ai_analysis("XAUUSD")
+
+    assert recovered is True
+    assert process_calls == [state]
+    synthesis = await synthesis_repository.for_state(state.state_id)
+    assert synthesis is not None
+    assert synthesis.analysis_id == current_analysis.analysis_id
+    assert synthesis.market_timestamp == state.market_data_boundary
+
+
+@pytest.mark.asyncio
 async def test_degraded_volume_evidence_continues_through_unified_state_quant_and_ai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

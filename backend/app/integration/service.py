@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 import logging
 import os
@@ -86,6 +86,165 @@ class FullSystemIntegrationService:
         self.last_signal_published_at: datetime | None = None
         self.storage_exhausted_until: datetime | None = None
 
+    async def recover_authoritative_ai_analysis(self, instrument: str) -> bool:
+        """Retrieve or regenerate the latest eligible M15 analysis before simulation recovery."""
+
+        if (
+            self.unified_market_state is None
+            or self.quantitative_forecasting is None
+            or self.ai_reasoning is None
+            or self.signal_synthesizer is None
+            or self.signal_synthesis_repository is None
+        ):
+            return False
+        state = await self.unified_market_state.repository.latest_state(
+            instrument,
+            trigger_timeframe="M15",
+        )
+        if state is None:
+            return False
+        recovery_max_age = getattr(
+            self.market_simulation,
+            "recovery_max_age_seconds",
+            7200,
+        )
+        if (
+            self.clock().astimezone(UTC) - state.market_data_boundary
+        ).total_seconds() > recovery_max_age:
+            await self.ai_reasoning.record_gate_decision(
+                state=state,
+                attempted_cutoff=state.market_data_boundary,
+                gate_decision="SKIPPED",
+                gate_skip_reason="recovery_lookback_exceeded",
+                details={"recovery": True, "maximum_age_seconds": recovery_max_age},
+            )
+            return False
+        quant = await self.quantitative_forecasting.repository.result_for_state(
+            state.state_id
+        )
+        if quant is None:
+            quant = await self.quantitative_forecasting.forecast(state)
+        if quant is None:
+            await self.ai_reasoning.record_gate_decision(
+                state=state,
+                attempted_cutoff=state.market_data_boundary,
+                gate_decision="SKIPPED",
+                gate_skip_reason="quantitative_forecast_not_ready",
+                details={"recovery": True},
+            )
+            return False
+        analysis = await self.ai_reasoning.repository.analysis_for_state(
+            state.state_id
+        )
+        exact_match = bool(
+            analysis is not None
+            and analysis.market_snapshot_id == state.state_id
+            and analysis.analysis_timestamp == state.market_data_boundary
+            and analysis.validation_passed
+        )
+        logger.info(
+            "ai_reasoning.recovery.lookup",
+            extra={
+                "instrument": instrument,
+                "attempted_cutoff": state.market_data_boundary.isoformat(),
+                "analysis_lookup_cutoff": state.market_data_boundary.isoformat(),
+                "market_state_id": str(state.state_id),
+                "snapshot_id": str(state.state_id),
+                "gate_decision": "REUSED" if exact_match else "REGENERATE",
+                "gate_skip_reason": None,
+                "existing_analysis_id": (
+                    str(analysis.analysis_id) if analysis is not None else None
+                ),
+                "analysis_created_at": (
+                    analysis.created_at.isoformat() if analysis is not None else None
+                ),
+                "analysis_market_cutoff": (
+                    analysis.analysis_timestamp.isoformat()
+                    if analysis is not None
+                    else None
+                ),
+            },
+        )
+        if not exact_match:
+            validated = await self.ai_reasoning.process(state, quant)
+            analysis = validated.analysis if validated is not None else (
+                await self.ai_reasoning.repository.analysis_for_state(
+                    state.state_id
+                )
+            )
+        if (
+            analysis is None
+            or analysis.market_snapshot_id != state.state_id
+            or analysis.analysis_timestamp != state.market_data_boundary
+            or not analysis.validation_passed
+        ):
+            return False
+        synthesis = await self.signal_synthesis_repository.for_state(state.state_id)
+        if synthesis is None:
+            synthesis = self.signal_synthesizer.synthesize(state, quant, analysis)
+            await self.signal_synthesis_repository.save(synthesis)
+        return True
+
+    async def _skip_ai_reasoning_gate(
+        self,
+        *,
+        context: Mapping[str, object],
+        instrument: str,
+        attempted_cutoff: datetime,
+        skip_reason: str,
+        reason_code: str,
+        state: Any | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        existing_analysis = (
+            await self.ai_reasoning.repository.analysis_for_state(state.state_id)
+            if self.ai_reasoning is not None and state is not None
+            else None
+        )
+        payload = {
+            **context,
+            "attempted_cutoff": attempted_cutoff.isoformat(),
+            "analysis_lookup_cutoff": attempted_cutoff.isoformat(),
+            "market_state_id": (
+                str(state.state_id) if state is not None else None
+            ),
+            "snapshot_id": str(state.state_id) if state is not None else None,
+            "gate_decision": "SKIPPED",
+            "skip_reason": skip_reason,
+            "gate_skip_reason": skip_reason,
+            "reason_code": reason_code,
+            "existing_analysis_id": (
+                str(existing_analysis.analysis_id)
+                if existing_analysis is not None
+                else None
+            ),
+            "analysis_created_at": (
+                existing_analysis.created_at.isoformat()
+                if existing_analysis is not None
+                else None
+            ),
+            "analysis_market_cutoff": (
+                existing_analysis.analysis_timestamp.isoformat()
+                if existing_analysis is not None
+                else None
+            ),
+            "provider_call_made": False,
+            "details": details or {},
+        }
+        logger.info("ai_reasoning.gate.skipped", extra=payload)
+        if self.ai_reasoning is not None:
+            await self.ai_reasoning.record_gate_decision(
+                state=state,
+                instrument=instrument,
+                attempted_cutoff=attempted_cutoff,
+                gate_decision="SKIPPED",
+                gate_skip_reason=skip_reason,
+                existing_analysis=existing_analysis,
+                details=details,
+                trigger_timeframe=context.get("timeframe")
+                if isinstance(context.get("timeframe"), str)
+                else None,
+            )
     async def start(self) -> None:
         if self._unsubscribe is None:
             self._unsubscribe = self.event_bus.subscribe(NewCandle, self._on_candle)
@@ -314,28 +473,21 @@ class FullSystemIntegrationService:
             }
             logger.info("ai_reasoning.gate.entered", extra=gate_context)
             if not self.ai_centric_shadow_mode:
-                logger.info(
-                    "ai_reasoning.gate.skipped",
-                    extra={
-                        **gate_context,
-                        "skip_reason": "ai_centric_shadow_mode_disabled",
-                        "reason_code": "disabled",
-                        "snapshot_id": None,
-                        "cycle_id": str(envelope.correlation_id),
-                        "details": {},
-                    },
+                await self._skip_ai_reasoning_gate(
+                    context=gate_context,
+                    instrument=symbol,
+                    attempted_cutoff=boundary,
+                    skip_reason="ai_centric_shadow_mode_disabled",
+                    reason_code="disabled",
                 )
             elif self.unified_market_state is None:
-                logger.info(
-                    "ai_reasoning.gate.skipped",
-                    extra={
-                        **gate_context,
-                        "skip_reason": "unified_market_state_service_unavailable",
-                        "reason_code": "missing_prerequisite",
-                        "snapshot_id": None,
-                        "cycle_id": str(envelope.correlation_id),
-                        "details": {"prerequisite": "unified_market_state"},
-                    },
+                await self._skip_ai_reasoning_gate(
+                    context=gate_context,
+                    instrument=symbol,
+                    attempted_cutoff=boundary,
+                    skip_reason="unified_market_state_service_unavailable",
+                    reason_code="missing_prerequisite",
+                    details={"prerequisite": "unified_market_state"},
                 )
             else:
                 # Phase 1 is observational only.  A shadow-state capture failure is logged but can
@@ -344,44 +496,36 @@ class FullSystemIntegrationService:
                     failure_stage = "unified_market_state"
                     market_state = await self.unified_market_state.capture_cycle(envelope, dict(outputs))
                     if market_state is None:
-                        logger.info(
-                            "ai_reasoning.gate.skipped",
-                            extra={
-                                **gate_context,
-                                "skip_reason": "synchronized_market_state_not_ready",
-                                "reason_code": "missing_prerequisite",
-                                "snapshot_id": None,
-                                "cycle_id": str(envelope.correlation_id),
-                                "details": {"prerequisite": "synchronized_market_state"},
-                            },
+                        await self._skip_ai_reasoning_gate(
+                            context=gate_context,
+                            instrument=symbol,
+                            attempted_cutoff=boundary,
+                            skip_reason="synchronized_market_state_not_ready",
+                            reason_code="missing_prerequisite",
+                            details={"prerequisite": "synchronized_market_state"},
                         )
                     elif self.quantitative_forecasting is None:
-                        logger.info(
-                            "ai_reasoning.gate.skipped",
-                            extra={
-                                **gate_context,
-                                "skip_reason": "quantitative_forecasting_service_unavailable",
-                                "reason_code": "missing_prerequisite",
-                                "snapshot_id": str(market_state.state_id),
-                                "cycle_id": str(market_state.cycle_id),
-                                "details": {"prerequisite": "quantitative_forecasting"},
-                            },
+                        await self._skip_ai_reasoning_gate(
+                            context=gate_context,
+                            instrument=symbol,
+                            attempted_cutoff=boundary,
+                            skip_reason="quantitative_forecasting_service_unavailable",
+                            reason_code="missing_prerequisite",
+                            state=market_state,
+                            details={"prerequisite": "quantitative_forecasting"},
                         )
                     else:
                         failure_stage = "quantitative_forecast"
                         quantitative_forecast = await self.quantitative_forecasting.forecast(market_state)
                         if quantitative_forecast is None:
-                            logger.info(
-                                "ai_reasoning.gate.skipped",
-                                extra={
-                                    **gate_context,
-                                    "market_state_id": str(getattr(market_state, "state_id", "unknown")),
-                                    "skip_reason": "quantitative_forecast_not_ready",
-                                    "reason_code": "missing_prerequisite",
-                                    "snapshot_id": str(market_state.state_id),
-                                    "cycle_id": str(market_state.cycle_id),
-                                    "details": {"prerequisite": "quantitative_forecast"},
-                                },
+                            await self._skip_ai_reasoning_gate(
+                                context=gate_context,
+                                instrument=symbol,
+                                attempted_cutoff=boundary,
+                                skip_reason="quantitative_forecast_not_ready",
+                                reason_code="missing_prerequisite",
+                                state=market_state,
+                                details={"prerequisite": "quantitative_forecast"},
                             )
                         elif (
                             hasattr(market_state, "timeframes")
@@ -391,36 +535,23 @@ class FullSystemIntegrationService:
                             )
                             is not None
                         ):
-                            logger.info(
-                                "ai_reasoning.gate.skipped",
-                                extra={
-                                    **gate_context,
-                                    "market_state_id": str(
-                                        getattr(market_state, "state_id", "unknown")
-                                    ),
-                                    "skip_reason": eligibility_reason.value,
-                                    "reason_code": eligibility_reason.value,
-                                    "snapshot_id": str(market_state.state_id),
-                                    "cycle_id": str(market_state.cycle_id),
-                                    "details": {},
-                                    "provider_call_made": False,
-                                },
+                            await self._skip_ai_reasoning_gate(
+                                context=gate_context,
+                                instrument=symbol,
+                                attempted_cutoff=boundary,
+                                skip_reason=eligibility_reason.value,
+                                reason_code=eligibility_reason.value,
+                                state=market_state,
                             )
                         elif self.ai_reasoning is None:
-                            logger.info(
-                                "ai_reasoning.gate.skipped",
-                                extra={
-                                    **gate_context,
-                                    "market_state_id": str(getattr(market_state, "state_id", "unknown")),
-                                    "quantitative_forecast_id": str(
-                                        getattr(quantitative_forecast, "result_id", "unknown")
-                                    ),
-                                    "skip_reason": "ai_reasoning_service_unavailable",
-                                    "reason_code": "missing_prerequisite",
-                                    "snapshot_id": str(market_state.state_id),
-                                    "cycle_id": str(market_state.cycle_id),
-                                    "details": {"prerequisite": "ai_reasoning_service"},
-                                },
+                            await self._skip_ai_reasoning_gate(
+                                context=gate_context,
+                                instrument=symbol,
+                                attempted_cutoff=boundary,
+                                skip_reason="ai_reasoning_service_unavailable",
+                                reason_code="missing_prerequisite",
+                                state=market_state,
+                                details={"prerequisite": "ai_reasoning_service"},
                             )
                         else:
                             failure_stage = "ai_reasoning"

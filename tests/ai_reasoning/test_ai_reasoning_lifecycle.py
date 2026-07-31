@@ -66,8 +66,9 @@ async def state_and_quant(
     boundary: datetime = BOUNDARY,
     *,
     trigger: Timeframe = Timeframe.M5,
+    knowledge_delay_seconds: int = 5,
 ):
-    now = boundary + timedelta(seconds=5)
+    now = boundary + timedelta(seconds=knowledge_delay_seconds)
     state_service = UnifiedMarketStateService(
         InMemoryUnifiedMarketStateRepository(),
         clock=lambda: now,
@@ -577,6 +578,83 @@ async def test_controlled_twenty_minute_simulation_has_four_provider_calls() -> 
     assert metrics["eligible_five_minute_cycles"] == 4
     assert metrics["skipped_before_provider_call"] == 16
     assert metrics["groq_calls"] == 4
+
+
+@pytest.mark.asyncio
+async def test_m5_and_m15_at_same_cutoff_have_independent_durable_claims() -> None:
+    repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
+    service = build_service(repository, provider, now=BOUNDARY + timedelta(seconds=10))
+    m5_state, m5_quant = await state_and_quant(
+        BOUNDARY,
+        trigger=Timeframe.M5,
+        knowledge_delay_seconds=5,
+    )
+    m15_state, m15_quant = await state_and_quant(
+        BOUNDARY,
+        trigger=Timeframe.M15,
+        knowledge_delay_seconds=6,
+    )
+
+    m5_result = await service.process(m5_state, m5_quant)
+    m15_result = await service.process(m15_state, m15_quant)
+
+    assert m5_result is not None
+    assert m15_result is not None
+    assert provider.calls == 2
+    assert await repository.analysis_for_state(m5_state.state_id) is not None
+    assert await repository.analysis_for_state(m15_state.state_id) is not None
+    claim_scopes = {
+        item["analysis_timeframe"] for item in repository.reasoning_cycles.values()
+    }
+    assert claim_scopes == {"M5_M15:M5", "M5_M15:M15"}
+
+
+@pytest.mark.asyncio
+async def test_four_consecutive_m15_cutoffs_each_persist_authoritative_analysis() -> None:
+    repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
+    state_ids = []
+
+    for offset in range(0, 60, 15):
+        boundary = BOUNDARY + timedelta(minutes=offset)
+        state, quant = await state_and_quant(boundary, trigger=Timeframe.M15)
+        state_ids.append(state.state_id)
+        service = build_service(
+            repository,
+            provider,
+            now=boundary + timedelta(seconds=5),
+        )
+        assert await service.process(state, quant) is not None
+
+    assert provider.calls == 4
+    assert all(
+        [await repository.analysis_for_state(state_id) for state_id in state_ids]
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_skip_reason_is_persisted_for_exact_market_cutoff() -> None:
+    state, quant = await state_and_quant(BOUNDARY, trigger=Timeframe.M15)
+    state = state.model_copy(
+        update={
+            "timeframes": tuple(
+                frame.model_copy(update={"stale": True})
+                if frame.timeframe == "M15"
+                else frame
+                for frame in state.timeframes
+            )
+        }
+    )
+    repository, provider = InMemoryAIReasoningRepository(), ValidProvider()
+
+    assert await build_service(repository, provider).process(state, quant) is None
+
+    decision = await repository.latest_gate_decision("XAUUSD", BOUNDARY)
+    assert decision is not None
+    assert decision.gate_decision == "SKIPPED"
+    assert decision.gate_skip_reason == "market_data_stale"
+    assert decision.market_state_id == state.state_id
+    assert decision.analysis_market_cutoff is None
+    assert provider.calls == 0
 
 
 @pytest.mark.asyncio
