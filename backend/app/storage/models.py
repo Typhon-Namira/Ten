@@ -1193,6 +1193,42 @@ class AIReasoningCycleLockRecord(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AIReasoningGateDecisionRecord(Base):
+    """Durable authoritative gate result, including pre-provider skips."""
+
+    __tablename__ = "ai_reasoning_gate_decisions"
+    __table_args__ = (
+        Index(
+            "ix_ai_reasoning_gate_decision_boundary",
+            "instrument",
+            "attempted_cutoff",
+        ),
+    )
+
+    decision_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    trigger_timeframe: Mapped[str | None] = mapped_column(String(16), index=True)
+    attempted_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    analysis_lookup_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    market_state_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="SET NULL"),
+        index=True,
+    )
+    snapshot_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), index=True)
+    gate_decision: Mapped[str] = mapped_column(String(32), index=True)
+    gate_skip_reason: Mapped[str | None] = mapped_column(String(96), index=True)
+    existing_analysis_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_analyses.analysis_id", ondelete="SET NULL"),
+        index=True,
+    )
+    analysis_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    analysis_market_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class AIMarketForecastRecord(Base):
     __tablename__ = "ai_market_forecasts"
 

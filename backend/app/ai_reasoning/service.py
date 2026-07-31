@@ -39,6 +39,7 @@ from .cadence import (
     five_minute_window_start,
     synchronized_cycle_eligibility,
 )
+from .gate import AIReasoningGateDecision
 from .config import AIReasoningConfig
 from .llm_context import LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION, build_llm_analysis_context
 from .memory import MarketMemory
@@ -145,6 +146,64 @@ class AIReasoningService:
     def enabled(self) -> bool:
         return self.shadow_enabled
 
+    async def record_gate_decision(
+        self,
+        *,
+        state: UnifiedMarketState | None,
+        attempted_cutoff: datetime,
+        gate_decision: str,
+        gate_skip_reason: str | None = None,
+        existing_analysis: AIMarketAnalysis | None = None,
+        details: Mapping[str, object] | None = None,
+        trigger_timeframe: str | None = None,
+        instrument: str | None = None,
+    ) -> AIReasoningGateDecision:
+        """Persist one exact-cutoff AI gate decision for operational diagnosis."""
+
+        created_at = self.clock().astimezone(UTC)
+        cutoff = attempted_cutoff.astimezone(UTC)
+        market_state_id = state.state_id if state is not None else None
+        trigger = trigger_timeframe or (
+            state.trigger_timeframe if state is not None else None
+        )
+        decision = AIReasoningGateDecision(
+            decision_id=uuid5(
+                NAMESPACE_URL,
+                "|".join(
+                    (
+                        "ten:ai-reasoning-gate",
+                        state.instrument if state is not None else instrument or "unknown",
+                        cutoff.isoformat(),
+                        str(market_state_id),
+                        gate_decision,
+                        gate_skip_reason or "none",
+                    )
+                ),
+            ),
+            instrument=state.instrument if state is not None else instrument or "unknown",
+            trigger_timeframe=trigger,
+            attempted_cutoff=cutoff,
+            analysis_lookup_cutoff=cutoff,
+            market_state_id=market_state_id,
+            snapshot_id=market_state_id,
+            gate_decision=gate_decision,
+            gate_skip_reason=gate_skip_reason,
+            existing_analysis_id=(
+                existing_analysis.analysis_id if existing_analysis is not None else None
+            ),
+            analysis_created_at=(
+                existing_analysis.created_at if existing_analysis is not None else None
+            ),
+            analysis_market_cutoff=(
+                existing_analysis.analysis_timestamp
+                if existing_analysis is not None
+                else None
+            ),
+            details=dict(details or {}),
+            created_at=created_at,
+        )
+        return await self.repository.save_gate_decision(decision)
+
     async def process(
         self,
         state: UnifiedMarketState,
@@ -159,11 +218,19 @@ class AIReasoningService:
             "instrument": state.instrument,
             "trigger": "integration_worker",
             "artifact_type": "ai_market_analysis",
+            "attempted_cutoff": state.market_data_boundary.isoformat(),
+            "analysis_lookup_cutoff": state.market_data_boundary.isoformat(),
+            "snapshot_id": str(state.state_id),
+            "trigger_timeframe": state.trigger_timeframe,
         }
         self.metrics["scheduler_ticks"] += 1
         logger.info("ai_reasoning.worker.received", extra=worker_context)
         if not self.enabled:
-            self._skip(AIAnalysisSkipReason.AI_DISABLED, worker_context)
+            await self._skip(
+                AIAnalysisSkipReason.AI_DISABLED,
+                worker_context,
+                state=state,
+            )
             return None
         state = UnifiedMarketState.model_validate(state.model_dump(mode="python"))
         quant = QuantForecastResult.model_validate(quant.model_dump(mode="python"))
@@ -171,10 +238,30 @@ class AIReasoningService:
         window_start = five_minute_window_start(boundary)
         eligibility_failure = self._eligibility_failure(state, boundary, window_start)
         if eligibility_failure is not None:
-            self._skip(eligibility_failure, worker_context, window_start=window_start)
+            await self._skip(
+                eligibility_failure,
+                worker_context,
+                state=state,
+                window_start=window_start,
+            )
             return None
         self.metrics["eligible_five_minute_cycles"] += 1
         self.last_eligible_cycle_at = self.clock().astimezone(UTC)
+        existing_for_state = await self.repository.analysis_for_state(state.state_id)
+        if (
+            existing_for_state is not None
+            and existing_for_state.analysis_timestamp == boundary
+            and existing_for_state.market_snapshot_id == state.state_id
+        ):
+            self.metrics["analyses_reused"] += 1
+            await self._skip(
+                AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS,
+                worker_context,
+                state=state,
+                existing_analysis=existing_for_state,
+                window_start=window_start,
+            )
+            return await self._validated_analysis(existing_for_state, state, quant)
         contract_version = ":".join(
             (
                 LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION,
@@ -182,9 +269,12 @@ class AIReasoningService:
                 self.config.reasoning_policy_version,
             )
         )
+        claim_timeframe = (
+            f"{AI_ANALYSIS_TIMEFRAME}:{state.trigger_timeframe.upper()}"
+        )
         idempotency_key = reasoning_cycle_idempotency_key(
             state.instrument,
-            AI_ANALYSIS_TIMEFRAME,
+            claim_timeframe,
             window_start,
             state.state_hash,
             contract_version,
@@ -196,7 +286,7 @@ class AIReasoningService:
             state.schema_version,
             contract_version,
             self.clock(),
-            analysis_timeframe=AI_ANALYSIS_TIMEFRAME,
+            analysis_timeframe=claim_timeframe,
             five_minute_window_start=window_start,
             market_state_hash=state.state_hash,
             analysis_contract_version=contract_version,
@@ -205,9 +295,11 @@ class AIReasoningService:
             cached = await self.repository.analysis_for_reasoning_cycle(idempotency_key)
             if cached is not None:
                 self.metrics["analyses_reused"] += 1
-                self._skip(
+                await self._skip(
                     AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS,
                     worker_context,
+                    state=state,
+                    existing_analysis=cached,
                     window_start=window_start,
                     idempotency_key=idempotency_key,
                 )
@@ -222,9 +314,11 @@ class AIReasoningService:
                 if duplicate is not None
                 else AIAnalysisSkipReason.CYCLE_ALREADY_CLAIMED
             )
-            self._skip(
+            await self._skip(
                 reason,
                 worker_context,
+                state=state,
+                existing_analysis=duplicate,
                 window_start=window_start,
                 idempotency_key=idempotency_key,
             )
@@ -233,6 +327,16 @@ class AIReasoningService:
                 if duplicate is not None
                 else None
             )
+
+        await self.record_gate_decision(
+            state=state,
+            attempted_cutoff=boundary,
+            gate_decision="PROCEED",
+            details={
+                "idempotency_key": idempotency_key,
+                "analysis_timeframe": claim_timeframe,
+            },
+        )
 
         try:
             recent_memory = await self.repository.recent_memory(
@@ -427,9 +531,10 @@ class AIReasoningService:
             )
             self._consume_provider_metrics(provider_delta)
             if exc.details.phase == "request_validation":
-                self._skip(
+                await self._skip(
                     AIAnalysisSkipReason.REQUEST_PREFLIGHT_FAILED,
                     worker_context,
+                    state=state,
                     window_start=window_start,
                     idempotency_key=idempotency_key,
                 )
@@ -1027,11 +1132,13 @@ class AIReasoningService:
             return AIAnalysisSkipReason.CYCLE_NOT_COMPLETE
         return None
 
-    def _skip(
+    async def _skip(
         self,
         reason: AIAnalysisSkipReason,
         context: Mapping[str, object],
         *,
+        state: UnifiedMarketState,
+        existing_analysis: AIMarketAnalysis | None = None,
         window_start: datetime | None = None,
         idempotency_key: str | None = None,
     ) -> None:
@@ -1043,6 +1150,25 @@ class AIReasoningService:
             AIAnalysisSkipReason.DUPLICATE_MARKET_STATE,
         }:
             self.metrics["deduplicated_before_provider_call"] += 1
+        gate_decision = (
+            "REUSED"
+            if reason == AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS
+            and existing_analysis is not None
+            else "SKIPPED"
+        )
+        persisted = await self.record_gate_decision(
+            state=state,
+            attempted_cutoff=state.market_data_boundary,
+            gate_decision=gate_decision,
+            gate_skip_reason=reason.value,
+            existing_analysis=existing_analysis,
+            details={
+                "idempotency_key": idempotency_key,
+                "five_minute_window_start": (
+                    window_start.isoformat() if window_start else None
+                ),
+            },
+        )
         logger.info(
             "ai_reasoning.gate.skipped",
             extra={
@@ -1066,6 +1192,26 @@ class AIReasoningService:
                 "idempotency_key": idempotency_key,
                 "provider_call_made": False,
                 "snapshot_id": context.get("market_state_id"),
+                "attempted_cutoff": persisted.attempted_cutoff.isoformat(),
+                "analysis_lookup_cutoff": (
+                    persisted.analysis_lookup_cutoff.isoformat()
+                ),
+                "gate_decision": persisted.gate_decision,
+                "existing_analysis_id": (
+                    str(persisted.existing_analysis_id)
+                    if persisted.existing_analysis_id is not None
+                    else None
+                ),
+                "analysis_created_at": (
+                    persisted.analysis_created_at.isoformat()
+                    if persisted.analysis_created_at is not None
+                    else None
+                ),
+                "analysis_market_cutoff": (
+                    persisted.analysis_market_cutoff.isoformat()
+                    if persisted.analysis_market_cutoff is not None
+                    else None
+                ),
                 "details": {
                     "skip_reason": reason.value,
                 },

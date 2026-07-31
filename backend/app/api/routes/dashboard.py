@@ -1836,19 +1836,11 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
     now = datetime.now(UTC)
     symbol = canonical_symbol(instrument)
     flags = request.app.state.engine_registry.context.feature_flags
-    completed_pair = (
-        await request.app.state.ai_reasoning_repository.latest_completed_analysis_cycle(
-            symbol
-        )
-    )
-    completed_analysis = completed_pair[0] if completed_pair else None
-    completed_signal = completed_pair[1] if completed_pair else None
-    state = (
-        await request.app.state.unified_market_state_repository.get_state(
-            completed_signal.snapshot_id
-        )
-        if completed_signal is not None
-        else await request.app.state.unified_market_state_repository.latest_state(symbol)
+    # Scenario health is anchored to the latest authoritative M15 state.  A completed
+    # legacy/M5 analysis is never allowed to make the authoritative AI stage healthy.
+    state = await request.app.state.unified_market_state_repository.latest_state(
+        symbol,
+        trigger_timeframe="M15",
     )
     latest_live_state = (
         await request.app.state.unified_market_state_repository.latest_state(symbol)
@@ -1927,12 +1919,23 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         await request.app.state.quant_forecast_repository.result_for_state(state.state_id)
         if state is not None else None
     )
-    analysis = completed_analysis or (
-        await request.app.state.ai_reasoning_repository.analysis_for_state(state.state_id)
+    analysis = (
+        await request.app.state.ai_reasoning_repository.analysis_for_state(
+            state.state_id
+        )
         if state is not None
         else None
     )
-    analysis_signal = completed_signal or (
+    if (
+        analysis is not None
+        and state is not None
+        and (
+            analysis.market_snapshot_id != state.state_id
+            or analysis.analysis_timestamp != state.market_data_boundary
+        )
+    ):
+        analysis = None
+    analysis_signal = (
         await request.app.state.ai_reasoning_repository.signal_for_analysis(
             analysis.analysis_id
         )
@@ -1965,12 +1968,33 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         timestamp=getattr(quant, "generated_at", None), record_id=getattr(quant, "result_id", None),
     )
     reasoning_enabled = flags.is_enabled(FeatureFlag.AI_CENTRIC_SHADOW_MODE)
+    gate_decision = (
+        await request.app.state.ai_reasoning_repository.latest_gate_decision(
+            symbol,
+            state.market_data_boundary,
+        )
+        if state is not None
+        else None
+    )
     stages["ai_reasoning"] = _system_stage(
         "ai_reasoning", "AI Market Analysis",
-        "disabled" if not reasoning_enabled else "blocked" if quant is None else "running" if analysis is None else "failed" if not analysis.validation_passed or analysis_signal is None else "healthy",
-        "ai_centric_shadow_mode_disabled" if not reasoning_enabled else "awaiting_quant_forecast" if quant is None else "analysis_in_progress" if analysis is None else "structured_output_invalid" if not analysis.validation_passed else "analysis_signal_persistence_missing" if analysis_signal is None else "analysis_and_signal_persisted",
+        "disabled" if not reasoning_enabled else "blocked" if quant is None or analysis is None else "failed" if not analysis.validation_passed else "healthy",
+        "ai_centric_shadow_mode_disabled" if not reasoning_enabled else "awaiting_quant_forecast" if quant is None else (getattr(gate_decision, "gate_skip_reason", None) or "authoritative_ai_analysis_missing") if analysis is None else "structured_output_invalid" if not analysis.validation_passed else "authoritative_ai_analysis_persisted",
         timestamp=getattr(analysis, "analysis_timestamp", None), record_id=getattr(analysis, "analysis_id", None),
         details={
+            "attempted_cutoff": getattr(state, "market_data_boundary", None),
+            "analysis_lookup_cutoff": getattr(state, "market_data_boundary", None),
+            "market_state_id": getattr(state, "state_id", None),
+            "snapshot_id": getattr(state, "state_id", None),
+            "gate_decision": getattr(gate_decision, "gate_decision", None),
+            "gate_skip_reason": getattr(gate_decision, "gate_skip_reason", None),
+            "existing_analysis_id": getattr(
+                gate_decision, "existing_analysis_id", None
+            ),
+            "analysis_created_at": getattr(analysis, "created_at", None),
+            "analysis_market_cutoff": getattr(
+                analysis, "analysis_timestamp", None
+            ),
             "signal_id": getattr(analysis_signal, "signal_id", None),
             "candidate_signal": getattr(getattr(analysis_signal, "signal", None), "value", None),
             "signal": getattr(getattr(signal_decision, "final_action", None), "value", None),

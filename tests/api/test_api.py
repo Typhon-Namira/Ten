@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,6 +9,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import Settings
+from backend.app.core.feature_flags import (
+    FeatureFlag,
+    FeatureFlagSettings,
+)
 from backend.app.ai_reasoning.request_persistence import PersistedAIReasoningRequest
 from backend.app.api.routes.dashboard import (
     _authoritative_signal_projection,
@@ -20,6 +25,7 @@ from backend.app.engines.market_data_engine import Candle, Timeframe
 from backend.app.integration import CanonicalEventEnvelope
 from backend.app.main import create_app
 from backend.app.signal_synthesis import SignalGeometry
+from tests.ai_reasoning.test_ai_reasoning_lifecycle import state_and_quant
 
 
 @pytest.mark.parametrize(
@@ -534,6 +540,33 @@ def test_dashboard_system_status_is_one_authoritative_thirteen_stage_contract() 
     assert all(item["status"] in valid for item in body["stages"])
     assert all(item["status"] != "unavailable" for item in body["stages"])
     assert {"current_decision", "storage", "failure_history"} <= set(body)
+
+
+def test_stage_four_is_blocked_without_exact_authoritative_m15_analysis() -> None:
+    app = create_app()
+    state, quant = asyncio.run(state_and_quant(trigger=Timeframe.M15))
+
+    with TestClient(app) as client:
+        app.state.engine_registry.context.feature_flags._settings = FeatureFlagSettings(
+            flags={FeatureFlag.AI_CENTRIC_SHADOW_MODE: True}
+        )
+        asyncio.run(app.state.unified_market_state_repository.save_state(state))
+        asyncio.run(app.state.quant_forecast_repository.save_result(quant))
+        response = client.get(
+            "/api/dashboard/system-status",
+            params={"instrument": "XAUUSD"},
+        )
+
+    assert response.status_code == 200
+    stage = next(
+        item for item in response.json()["stages"] if item["id"] == "ai_reasoning"
+    )
+    assert stage["status"] == "blocked"
+    assert stage["reason"] == "authoritative_ai_analysis_missing"
+    assert stage["details"]["market_state_id"] == str(state.state_id)
+    assert datetime.fromisoformat(
+        stage["details"]["attempted_cutoff"].replace("Z", "+00:00")
+    ) == state.market_data_boundary
 
 
 def test_dashboard_reports_exact_storage_circuit_breaker_reason() -> None:

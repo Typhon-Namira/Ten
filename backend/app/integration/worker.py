@@ -43,6 +43,20 @@ class IntegrationWorker:
 
     async def run(self) -> None:
         simulation = getattr(self.service, "market_simulation", None)
+        if hasattr(self.service, "recover_authoritative_ai_analysis"):
+            for configured in self.service.config.instruments:
+                try:
+                    await self.service.recover_authoritative_ai_analysis(
+                        configured.instrument_id
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "ai_reasoning.recovery.failed",
+                        extra={
+                            "instrument": configured.instrument_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
         if simulation is not None and hasattr(simulation, "recover_latest"):
             for configured in self.service.config.instruments:
                 try:
