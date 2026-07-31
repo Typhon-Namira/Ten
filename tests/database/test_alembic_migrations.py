@@ -137,6 +137,22 @@ def test_ai_reasoning_gate_decision_migration_is_traceable_and_reversible() -> N
     assert 'op.drop_table("ai_reasoning_gate_decisions")' in source
 
 
+def test_scenario_waiting_and_email_delivery_migration_is_reversible() -> None:
+    source = (
+        ROOT
+        / "migrations/versions/20260731_0020_scenario_waiting_and_email_delivery.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260731_0020"' in source
+    assert 'down_revision = "20260731_0019"' in source
+    assert "WAITING_FOR_AI_ANALYSIS" in source
+    assert "PERMANENTLY_FAILED" in source
+    assert "COMMITTED" in source
+    assert "ai_analysis_id" in source
+    assert "quantitative_forecast_id" in source
+    assert "op.drop_column" in source
+
+
 def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     source = (
         ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"

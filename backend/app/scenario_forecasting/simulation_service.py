@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from backend.app.engines.market_data_engine.models import Candle
+from backend.app.ai_reasoning.gate import AIReasoningGateDecision
 from backend.app.market_state import UnifiedMarketState
 from backend.app.quant_forecasting.models import QuantForecastResult
 from backend.app.signal_synthesis.models import MultiTimeframeSignalSet
@@ -37,7 +39,10 @@ class MarketSimulationService:
         market_state_repository: Any | None = None,
         quant_repository: Any | None = None,
         synthesis_repository: Any | None = None,
+        ai_analysis_repository: Any | None = None,
         recovery_max_age_seconds: int = 7200,
+        ai_lookup_retry_delays_seconds: tuple[float, ...] = (0.1, 0.5, 1.0),
+        maximum_ai_wait_recoveries: int = 6,
     ) -> None:
         self.repository = repository
         self.historical_repository = historical_repository
@@ -45,7 +50,10 @@ class MarketSimulationService:
         self.market_state_repository = market_state_repository
         self.quant_repository = quant_repository
         self.synthesis_repository = synthesis_repository
+        self.ai_analysis_repository = ai_analysis_repository
         self.recovery_max_age_seconds = recovery_max_age_seconds
+        self.ai_lookup_retry_delays_seconds = ai_lookup_retry_delays_seconds
+        self.maximum_ai_wait_recoveries = maximum_ai_wait_recoveries
 
     async def recover_latest(
         self, instrument: str, *, now: datetime | None = None
@@ -77,11 +85,17 @@ class MarketSimulationService:
                 },
             )
             return None
-        existing = await self.repository.latest_attempt(instrument)
+        existing = await self.repository.attempt_at_cutoff(
+            instrument, state.market_data_boundary
+        )
         if (
             existing is not None
-            and existing.market_cutoff >= state.market_data_boundary
             and existing.status.terminal
+            and not (
+                existing.status == SimulationAttemptStatus.BLOCKED
+                and existing.failure_type
+                in {"AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING"}
+            )
         ):
             return await self.repository.at_cutoff(
                 instrument, state.market_data_boundary
@@ -92,14 +106,18 @@ class MarketSimulationService:
             reason = (
                 "QUANT_FORECAST_MISSING"
                 if quant is None
-                else "SYNTHESIS_MISSING"
+                else "WAITING_FOR_AI_ANALYSIS"
             )
-            await self.record_blocked_cutoff(
+            await self.record_waiting_cutoff(
                 instrument=instrument,
                 market_cutoff=state.market_data_boundary,
                 server_time=evaluated_at,
                 reason=reason,
                 failure_stage="startup_recovery",
+                market_state_id=state.state_id,
+                quantitative_forecast_id=(
+                    quant.result_id if quant is not None else None
+                ),
             )
             return None
         logger.info(
@@ -132,6 +150,7 @@ class MarketSimulationService:
         candle_close_time: datetime | None = None,
         m5_cutoff: datetime | None = None,
         synchronization_status: str = "UNAVAILABLE",
+        correlation_id: UUID | None = None,
         **updates: object,
     ) -> AuthoritativeSimulationAttempt:
         version = self.engine.config.configuration_version
@@ -142,6 +161,7 @@ class MarketSimulationService:
                 f"ten:authoritative-simulation-attempt:{instrument}:M15:"
                 f"{market_cutoff.astimezone(UTC).isoformat()}:{version}",
             ),
+            correlation_id=correlation_id,
             instrument=instrument,
             market_cutoff=market_cutoff,
             simulation_version=version,
@@ -164,6 +184,53 @@ class MarketSimulationService:
             **updates,
         )
 
+    async def record_waiting_cutoff(
+        self,
+        *,
+        instrument: str,
+        market_cutoff: datetime,
+        server_time: datetime,
+        reason: str,
+        provider_timestamp: datetime | None = None,
+        candle_open_time: datetime | None = None,
+        candle_close_time: datetime | None = None,
+        failure_stage: str | None = None,
+        correlation_id: UUID | None = None,
+        market_state_id: UUID | None = None,
+        quantitative_forecast_id: UUID | None = None,
+        lookup_result: str | None = None,
+    ) -> AuthoritativeSimulationAttempt:
+        existing = await self.repository.attempt_at_cutoff(
+            instrument, market_cutoff
+        )
+        attempt = self._attempt(
+            instrument=instrument,
+            market_cutoff=market_cutoff,
+            server_time=server_time,
+            status=SimulationAttemptStatus.WAITING_FOR_AI_ANALYSIS,
+            eligibility_result=True,
+            eligibility_reason="completed_m15_candle",
+            provider_timestamp=provider_timestamp,
+            candle_open_time=candle_open_time,
+            candle_close_time=candle_close_time,
+            synchronization_status="WAITING_FOR_AI_ANALYSIS",
+            correlation_id=correlation_id,
+            failure_stage=failure_stage or "authoritative_ai_analysis_lookup",
+            failure_type=reason,
+            failure_message=reason,
+            retry_count=(existing.retry_count + 1 if existing is not None else 0),
+            market_state_id=market_state_id,
+            snapshot_id=market_state_id,
+            quantitative_forecast_id=quantitative_forecast_id,
+            dependency_lookup_result=lookup_result or reason,
+        )
+        persisted = await self.repository.save_attempt(attempt)
+        logger.info(
+            "market_simulation.cycle.waiting_for_ai_analysis",
+            extra=persisted.model_dump(mode="json"),
+        )
+        return persisted
+
     async def record_blocked_cutoff(
         self,
         *,
@@ -175,7 +242,24 @@ class MarketSimulationService:
         candle_open_time: datetime | None = None,
         candle_close_time: datetime | None = None,
         failure_stage: str | None = None,
+        correlation_id: UUID | None = None,
+        market_state_id: UUID | None = None,
+        quantitative_forecast_id: UUID | None = None,
     ) -> AuthoritativeSimulationAttempt:
+        if reason in {"AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING"}:
+            return await self.record_waiting_cutoff(
+                instrument=instrument,
+                market_cutoff=market_cutoff,
+                server_time=server_time,
+                reason=reason,
+                provider_timestamp=provider_timestamp,
+                candle_open_time=candle_open_time,
+                candle_close_time=candle_close_time,
+                failure_stage=failure_stage,
+                correlation_id=correlation_id,
+                market_state_id=market_state_id,
+                quantitative_forecast_id=quantitative_forecast_id,
+            )
         attempt = self._attempt(
             instrument=instrument,
             market_cutoff=market_cutoff,
@@ -187,6 +271,7 @@ class MarketSimulationService:
             candle_open_time=candle_open_time,
             candle_close_time=candle_close_time,
             synchronization_status="BLOCKED",
+            correlation_id=correlation_id,
             completed_at=server_time,
             failure_stage=failure_stage,
             failure_type=reason,
@@ -208,6 +293,7 @@ class MarketSimulationService:
         trigger_timeframe: str,
         candles: tuple[Candle, ...] = (),
         evaluated_at: datetime | None = None,
+        correlation_id: UUID | None = None,
     ) -> PrimaryScenarioSelection | None:
         if trigger_timeframe == "M5":
             logger.info(
@@ -247,6 +333,153 @@ class MarketSimulationService:
                 extra=skipped.model_dump(mode="json"),
             )
             return None
+        authoritative_analysis = None
+        lookup_result = "repository_not_configured"
+        lookup_error: Exception | None = None
+        if self.ai_analysis_repository is not None:
+            for delay in (0.0, *self.ai_lookup_retry_delays_seconds):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    authoritative_analysis = (
+                        await self.ai_analysis_repository.analysis_for_state(
+                            state.state_id
+                        )
+                    )
+                    lookup_error = None
+                except Exception as exc:
+                    lookup_error = exc
+                    lookup_result = "DATABASE_LOOKUP_FAILURE"
+                    continue
+                if authoritative_analysis is not None:
+                    lookup_result = "FOUND"
+                    break
+                lookup_result = "NOT_FOUND"
+        analysis_cutoff = getattr(
+            authoritative_analysis, "analysis_timestamp", None
+        )
+        analysis_id = getattr(authoritative_analysis, "analysis_id", None)
+        if self.ai_analysis_repository is None:
+            analysis_cutoff = state.market_data_boundary
+            analysis_id = synthesis.analysis_id
+        exact_analysis = bool(
+            self.ai_analysis_repository is None
+            or (
+                authoritative_analysis is not None
+                and authoritative_analysis.market_snapshot_id == state.state_id
+                and analysis_cutoff == state.market_data_boundary
+                and authoritative_analysis.validation_passed
+                and analysis_id == synthesis.analysis_id
+            )
+        )
+        gate_decision = None
+        gate_lookup = getattr(
+            self.ai_analysis_repository, "latest_gate_decision", None
+        )
+        if callable(gate_lookup):
+            candidate_gate = await gate_lookup(
+                state.instrument, state.market_data_boundary
+            )
+            if isinstance(candidate_gate, AIReasoningGateDecision):
+                gate_decision = candidate_gate
+        analysis_commit_time = (
+            gate_decision.created_at
+            if gate_decision is not None
+            and gate_decision.gate_decision == "COMMITTED"
+            and gate_decision.existing_analysis_id == analysis_id
+            else None
+        )
+        logger.info(
+            "market_simulation.authoritative_ai.lookup",
+            extra={
+                "correlation_id": str(correlation_id) if correlation_id else None,
+                "eligible_m15_cutoff": state.market_data_boundary.isoformat(),
+                "market_state_id": str(state.state_id),
+                "snapshot_id": str(state.state_id),
+                "quant_forecast_id": str(quant.result_id),
+                "ai_analysis_id": str(analysis_id) if analysis_id else None,
+                "ai_analysis_cutoff": (
+                    analysis_cutoff.isoformat() if analysis_cutoff else None
+                ),
+                "transaction_commit_time": analysis_commit_time,
+                "lookup_result": lookup_result,
+                "cutoff_match": exact_analysis,
+            },
+        )
+        if not exact_analysis:
+            existing_attempt = await self.repository.attempt_at_cutoff(
+                state.instrument, state.market_data_boundary
+            )
+            permanently_invalid = bool(
+                authoritative_analysis is not None
+                and not authoritative_analysis.validation_passed
+            )
+            cutoff_mismatch = bool(
+                authoritative_analysis is not None
+                and (
+                    authoritative_analysis.market_snapshot_id != state.state_id
+                    or analysis_cutoff != state.market_data_boundary
+                    or analysis_id != synthesis.analysis_id
+                )
+            )
+            gate_skip_reason = getattr(
+                gate_decision, "gate_skip_reason", None
+            )
+            gate_permanently_skipped = bool(
+                getattr(gate_decision, "gate_decision", None) == "SKIPPED"
+                and gate_skip_reason
+                not in {
+                    "analysis_already_exists",
+                    "cycle_already_claimed",
+                    "duplicate_market_state",
+                }
+            )
+            exhausted = bool(
+                existing_attempt is not None
+                and existing_attempt.retry_count >= self.maximum_ai_wait_recoveries
+            )
+            reason = (
+                "DATABASE_LOOKUP_FAILURE"
+                if lookup_error is not None
+                else "AI_GENERATION_FAILURE"
+                if permanently_invalid
+                else "AI_ANALYSIS_CUTOFF_MISMATCH"
+                if cutoff_mismatch
+                else f"AI_GATE_SKIPPED:{gate_skip_reason}"
+                if gate_permanently_skipped
+                else "AI_ANALYSIS_PERMANENTLY_MISSING"
+                if exhausted
+                else "AI_ANALYSIS_PENDING"
+            )
+            if (
+                permanently_invalid
+                or cutoff_mismatch
+                or gate_permanently_skipped
+                or exhausted
+            ):
+                await self.record_blocked_cutoff(
+                    instrument=state.instrument,
+                    market_cutoff=state.market_data_boundary,
+                    server_time=now,
+                    reason=reason,
+                    failure_stage="authoritative_ai_analysis_validation",
+                    correlation_id=correlation_id,
+                    market_state_id=state.state_id,
+                    quantitative_forecast_id=quant.result_id,
+                )
+            else:
+                await self.record_waiting_cutoff(
+                    instrument=state.instrument,
+                    market_cutoff=state.market_data_boundary,
+                    server_time=now,
+                    reason=reason,
+                    failure_stage="authoritative_ai_analysis_lookup",
+                    correlation_id=correlation_id,
+                    market_state_id=state.state_id,
+                    quantitative_forecast_id=quant.result_id,
+                    lookup_result=lookup_result,
+                )
+            return None
         scheduled = self._attempt(
             instrument=state.instrument,
             market_cutoff=state.market_data_boundary,
@@ -259,27 +492,34 @@ class MarketSimulationService:
             candle_close_time=m15.source_candle_close_at,
             m5_cutoff=m5.source_candle_close_at,
             synchronization_status="SYNCHRONIZED",
+            correlation_id=correlation_id,
+            market_state_id=state.state_id,
+            snapshot_id=state.state_id,
+            quantitative_forecast_id=quant.result_id,
+            ai_analysis_id=analysis_id,
+            ai_analysis_cutoff=analysis_cutoff,
+            ai_analysis_committed_at=analysis_commit_time,
+            dependency_lookup_result=lookup_result,
         )
-        existing = await self.repository.save_attempt(scheduled)
-        if existing.status.terminal:
+        running, claimed = await self.repository.claim_attempt(
+            scheduled,
+            started_at=now,
+        )
+        if not claimed:
             logger.info(
                 "market_simulation.cycle.duplicate",
-                extra=existing.model_dump(mode="json"),
+                extra=running.model_dump(mode="json"),
             )
             return await self.repository.at_cutoff(
                 state.instrument, state.market_data_boundary
             )
-        running = scheduled.model_copy(
-            update={
-                "status": SimulationAttemptStatus.RUNNING,
-                "started_at": now,
-                "retry_count": existing.retry_count,
-            }
-        )
-        await self.repository.save_attempt(running)
         logger.info(
             "market_simulation.cycle.running",
-            extra=running.model_dump(mode="json"),
+            extra={
+                **running.model_dump(mode="json"),
+                "scenario_attempt_id": str(running.attempt_id),
+                "scenario_start_time": running.started_at,
+            },
         )
         if evaluated_at is not None:
             await self._evaluate_expired(state.instrument, candles, evaluated_at)
@@ -302,7 +542,7 @@ class MarketSimulationService:
             failed = running.model_copy(
                 update={
                     "status": SimulationAttemptStatus.FAILED,
-                    "completed_at": datetime.now(UTC),
+                    "completed_at": now,
                     "failure_stage": "simulation_or_persistence",
                     "failure_type": type(exc).__name__,
                     "failure_message": str(exc)[:1000] or type(exc).__name__,
@@ -330,7 +570,7 @@ class MarketSimulationService:
         terminal = running.model_copy(
             update={
                 "status": terminal_status,
-                "completed_at": datetime.now(UTC),
+                "completed_at": now,
                 "candidate_count": simulation.candidate_count,
                 "simulation_cycle_id": simulation.simulation_cycle_id,
                 "primary_scenario_id": selection.primary_candidate_id,

@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -193,3 +193,54 @@ async def test_publication_blocked_signal_does_not_enqueue_email_even_with_geome
     assert await repository.save_decision(value) == value
     assert db.execute.await_count == 3
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_eligible_primary_scenario_enqueues_exactly_one_email() -> None:
+    now = datetime.now(UTC)
+    signal_id = uuid4()
+    scenario_id = uuid4()
+    value = decision().model_copy(
+        update={
+            "mode": DecisionMode.LIVE,
+            "publication_eligible": True,
+            "decided_at": now,
+            "as_of": now,
+            "valid_from": now,
+            "valid_until": now + timedelta(minutes=15),
+            "notification_context": {
+                "signal_id": str(signal_id),
+                "primary_scenario_id": str(scenario_id),
+                "direction": "BUY",
+                "primary_scenario_score": 82.0,
+                "email_threshold": 60.0,
+                "market_cutoff": now.isoformat(),
+                "entry": 4050.0,
+                "stop_loss": 4045.0,
+                "take_profit": 4060.0,
+                "risk_reward": 2.0,
+                "expires_at": (now + timedelta(minutes=15)).isoformat(),
+            },
+        }
+    )
+    db = session()
+    email_id = uuid4()
+    db.execute.side_effect = [
+        InsertResult(value.decision_id),
+        None,
+        None,
+        InsertResult(email_id),
+    ]
+    repository = SqlAlchemySignalDecisionRepository(
+        FakeSessionFactory(db),
+        signal_email_enabled=True,
+        signal_email_recipient="operator@example.com",
+    )
+    repository.find_by_fingerprint = AsyncMock(side_effect=[None, value])  # type: ignore[method-assign]
+
+    assert await repository.save_decision(value) == value
+    assert db.execute.await_count == 4
+
+    repository.find_by_fingerprint = AsyncMock(return_value=value)  # type: ignore[method-assign]
+    assert await repository.save_decision(value) == value
+    assert db.execute.await_count == 4

@@ -2024,14 +2024,47 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         request.app.state, "market_simulation_repository", None
     )
     latest_attempt = (
-        await simulation_repository.latest_attempt(symbol)
+        await simulation_repository.attempt_at_cutoff(
+            symbol, state.market_data_boundary
+        )
+        if simulation_repository is not None and state is not None
+        else await simulation_repository.latest_attempt(symbol)
         if simulation_repository is not None
         else None
     )
     latest_primary = (
-        await simulation_repository.latest(symbol)
-        if simulation_repository is not None
+        await simulation_repository.at_cutoff(
+            symbol, latest_attempt.market_cutoff
+        )
+        if simulation_repository is not None and latest_attempt is not None
         else None
+    )
+    logger.info(
+        "dashboard.authoritative_attempt.selected",
+        extra={
+            "instrument": symbol,
+            "eligible_m15_cutoff": (
+                state.market_data_boundary.isoformat() if state is not None else None
+            ),
+            "dashboard_selected_attempt_id": (
+                str(latest_attempt.attempt_id)
+                if latest_attempt is not None
+                else None
+            ),
+            "attempt_status": (
+                latest_attempt.status.value if latest_attempt is not None else None
+            ),
+            "market_state_id": str(state.state_id) if state is not None else None,
+            "ai_analysis_id": (
+                str(latest_attempt.ai_analysis_id)
+                if latest_attempt is not None
+                and latest_attempt.ai_analysis_id is not None
+                else None
+            ),
+            "lookup_result": getattr(
+                latest_attempt, "dependency_lookup_result", None
+            ),
+        },
     )
     attempt_status = (
         latest_attempt.status.value if latest_attempt is not None else "PENDING"
@@ -2083,8 +2116,49 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         else "blocked"
         if attempt_status in {"BLOCKED", "SKIPPED"}
         else "running"
-        if attempt_status in {"SCHEDULED", "RUNNING", "PENDING"}
+        if attempt_status
+        in {"SCHEDULED", "WAITING_FOR_AI_ANALYSIS", "RUNNING", "PENDING"}
         else "healthy"
+    )
+    email_repository = getattr(
+        request.app.state, "signal_email_outbox_repository", None
+    )
+    email_record = (
+        await email_repository.for_primary_scenario(
+            latest_primary.primary_candidate_id
+        )
+        if email_repository is not None
+        and latest_primary is not None
+        and latest_primary.primary_candidate_id is not None
+        else None
+    )
+    email_status = getattr(email_record, "status", None)
+    email_summary = (
+        await email_repository.delivery_summary()
+        if email_repository is not None
+        else {
+            "eligible_scenarios": 0,
+            "triggered": 0,
+            "delivered": 0,
+            "failed": 0,
+        }
+    )
+    email_stage_status, email_reason = (
+        ("disabled", "signal_email_disabled")
+        if not settings.signal_email_enabled
+        else ("blocked", "no_email_without_eligible_primary")
+        if latest_primary is None or not latest_primary.signal_eligible
+        else ("failed", "signal_email_not_triggered")
+        if email_record is None
+        else ("running", "signal_email_queued")
+        if email_status == "PENDING"
+        else ("running", "signal_email_sending")
+        if email_status == "PROCESSING"
+        else ("healthy", "signal_email_delivered")
+        if email_status == "SENT"
+        else ("degraded", "signal_email_retry_scheduled")
+        if email_status == "FAILED"
+        else ("failed", "signal_email_permanently_failed")
     )
     scenario_stages = {
         "market_data": stages["market_data"],
@@ -2178,18 +2252,26 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         "email": _system_stage(
             "email",
             "Email",
-            "disabled"
-            if not settings.signal_email_enabled
-            else "healthy"
-            if latest_primary is not None and latest_primary.signal_eligible
-            else "blocked",
-            (
-                "signal_email_disabled"
-                if not settings.signal_email_enabled
-                else "primary_scenario_email_eligible"
-                if latest_primary is not None and latest_primary.signal_eligible
-                else "no_email_without_eligible_primary"
+            email_stage_status,
+            email_reason,
+            timestamp=(
+                getattr(email_record, "sent_at", None)
+                or getattr(email_record, "updated_at", None)
             ),
+            record_id=getattr(email_record, "id", None),
+            details={
+                "scenario_id": getattr(
+                    latest_primary, "primary_candidate_id", None
+                ),
+                "delivery_state": email_status or "NOT_TRIGGERED",
+                "recipient": getattr(email_record, "recipient", None),
+                "message_id": getattr(
+                    email_record, "provider_message_id", None
+                ),
+                "attempt_count": getattr(email_record, "attempt_count", 0),
+                "failure_reason": getattr(email_record, "last_error", None),
+                **email_summary,
+            },
         ),
         "outcome": _system_stage(
             "outcome",

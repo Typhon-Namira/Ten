@@ -373,6 +373,13 @@ async def test_valid_analysis_persists_one_deterministic_analysis_signal() -> No
     assert repository.forecasts == {}
     assert repository.proposals == {}
     assert repository.signals == {}
+    commit = await repository.latest_gate_decision(
+        state.instrument, state.market_data_boundary
+    )
+    assert commit is not None
+    assert commit.gate_decision == "COMMITTED"
+    assert commit.existing_analysis_id == result.analysis.analysis_id
+    assert commit.analysis_market_cutoff == state.market_data_boundary
 
 
 def test_reasoning_health_is_idle_before_an_eligible_cycle() -> None:

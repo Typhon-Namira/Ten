@@ -598,7 +598,7 @@ class SignalEmailOutboxRecord(Base):
         index=True,
     )
     recipient: Mapped[str] = mapped_column(String(320), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_retry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1607,6 +1607,7 @@ class AuthoritativeSimulationAttemptRecord(Base):
     )
 
     attempt_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    correlation_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), index=True)
     instrument: Mapped[str] = mapped_column(String(32), index=True)
     timeframe: Mapped[str] = mapped_column(String(8), index=True)
     market_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -1637,6 +1638,25 @@ class AuthoritativeSimulationAttemptRecord(Base):
     failure_message: Mapped[str | None] = mapped_column(String(1000))
     skip_reason: Mapped[str | None] = mapped_column(String(128))
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    market_state_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="SET NULL"),
+        index=True,
+    )
+    snapshot_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), index=True)
+    quantitative_forecast_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quantitative_forecasts.result_id", ondelete="SET NULL"),
+        index=True,
+    )
+    ai_analysis_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_analyses.analysis_id", ondelete="SET NULL"),
+        index=True,
+    )
+    ai_analysis_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ai_analysis_committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dependency_lookup_result: Mapped[str | None] = mapped_column(String(64))
 
 
 class CandidateMarketScenarioRecord(Base):

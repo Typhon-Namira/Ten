@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
+
 import pytest
 
 from backend.app.core.config import Settings
-from backend.app.signal_notifications.service import render_signal_email
+from backend.app.signal_notifications.service import SignalEmailWorker, render_signal_email
 
 
 def payload(*, blocked: bool = False) -> dict[str, object]:
@@ -107,3 +112,34 @@ def test_email_configuration_validation_is_safe_and_secret_free() -> None:
         "TEN_SMTP_PASSWORD",
     )
     assert "user" not in repr(settings.signal_email_configuration_errors)
+
+
+@pytest.mark.asyncio
+async def test_claimed_primary_scenario_email_is_dispatched_once_and_marked_sent() -> None:
+    repository = SimpleNamespace(mark_sent=AsyncMock(), mark_failed=AsyncMock())
+    sender = SimpleNamespace(send=AsyncMock(return_value="<provider-message-id>"))
+    worker = SignalEmailWorker(
+        repository,
+        sender,
+        enabled=True,
+        poll_seconds=10,
+        max_attempts=5,
+    )
+    event = SimpleNamespace(
+        id=uuid4(),
+        signal_id=uuid4(),
+        primary_scenario_id=uuid4(),
+        recipient="operator@example.com",
+        status="PROCESSING",
+        attempt_count=1,
+        payload={
+            "primary_scenario_id": str(uuid4()),
+            "market_cutoff": datetime.now(UTC).isoformat(),
+        },
+    )
+
+    await worker._deliver(event)
+
+    sender.send.assert_awaited_once_with(event.payload, event.recipient)
+    repository.mark_sent.assert_awaited_once()
+    repository.mark_failed.assert_not_awaited()

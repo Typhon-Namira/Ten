@@ -660,6 +660,16 @@ class AIReasoningService:
                 },
             )
             return None
+        commit_decision = await self.record_gate_decision(
+            state=state,
+            attempted_cutoff=analysis.analysis_timestamp,
+            gate_decision="COMMITTED",
+            existing_analysis=analysis,
+            details={
+                "transaction_commit_time": self.clock().isoformat(),
+                "idempotency_key": idempotency_key,
+            },
+        )
         if analysis.status != AnalysisStatus.AVAILABLE:
             await self.repository.complete_analysis_cycle(
                 idempotency_key,
@@ -722,6 +732,8 @@ class AIReasoningService:
                 **worker_context,
                 "request_id": str(request.request_id),
                 "analysis_id": str(analysis.analysis_id),
+                "ai_analysis_cutoff": analysis.analysis_timestamp.isoformat(),
+                "transaction_commit_time": commit_decision.created_at.isoformat(),
                 "status": analysis.status.value,
             },
         )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import logging
 
 from .service import FullSystemIntegrationService
@@ -26,6 +26,41 @@ class IntegrationWorker:
         # against future changes reintroducing an unguarded path, and against a genuine
         # `BaseException` the loop deliberately does not swallow.
         self.last_fatal_error: str | None = None
+        self._next_waiting_recovery_at: datetime | None = None
+
+    async def _recover_waiting_simulations(self) -> None:
+        now = datetime.now(UTC)
+        if (
+            self._next_waiting_recovery_at is not None
+            and now < self._next_waiting_recovery_at
+        ):
+            return
+        self._next_waiting_recovery_at = now + timedelta(seconds=10)
+        simulation = getattr(self.service, "market_simulation", None)
+        if simulation is None:
+            return
+        for configured in self.service.config.instruments:
+            attempt = await simulation.repository.latest_attempt(
+                configured.instrument_id
+            )
+            if (
+                attempt is None
+                or attempt.status.value != "WAITING_FOR_AI_ANALYSIS"
+            ):
+                continue
+            logger.info(
+                "market_simulation.waiting.recovery.started",
+                extra={
+                    "instrument": configured.instrument_id,
+                    "market_cutoff": attempt.market_cutoff.isoformat(),
+                    "scenario_attempt_id": str(attempt.attempt_id),
+                    "retry_count": attempt.retry_count,
+                },
+            )
+            await self.service.recover_authoritative_ai_analysis(
+                configured.instrument_id
+            )
+            await simulation.recover_latest(configured.instrument_id, now=now)
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -74,6 +109,7 @@ class IntegrationWorker:
             logger.info("worker.heartbeat", extra={"worker": "integration"})
             try:
                 processed = await self.service.process_outbox_once()
+                await self._recover_waiting_simulations()
                 if self.service.last_batch_failures:
                     self.last_error = "IntegrationBatchItemFailed"
                     self.consecutive_failures += self.service.last_batch_failures

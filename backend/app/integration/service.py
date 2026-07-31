@@ -606,6 +606,7 @@ class FullSystemIntegrationService:
                                         trigger_timeframe=timeframe.value,
                                         candles=tuple(candles),
                                         evaluated_at=self.clock(),
+                                        correlation_id=envelope.correlation_id,
                                     )
                                 if self.market_simulation is not None:
                                     failure_stage = "market_simulation"
@@ -631,7 +632,7 @@ class FullSystemIntegrationService:
                     if market_state is None
                     else "QUANT_FORECAST_MISSING"
                     if quantitative_forecast is None
-                    else "AI_ANALYSIS_MISSING"
+                    else "AI_ANALYSIS_PENDING"
                     if validated_analysis is None
                     else "SYNTHESIS_MISSING"
                     if synthesis is None
@@ -649,7 +650,11 @@ class FullSystemIntegrationService:
                         "timezone": "UTC",
                         "eligibility_result": True,
                         "eligibility_reason": "completed_final_m15_candle",
-                        "simulation_result": "BLOCKED",
+                        "simulation_result": (
+                            "WAITING_FOR_AI_ANALYSIS"
+                            if reason == "AI_ANALYSIS_PENDING"
+                            else "BLOCKED"
+                        ),
                         "simulation_reason": reason,
                     },
                 )
@@ -662,6 +667,15 @@ class FullSystemIntegrationService:
                     candle_open_time=payload.open_time,
                     candle_close_time=payload.close_time,
                     failure_stage=failure_stage,
+                    correlation_id=envelope.correlation_id,
+                    market_state_id=(
+                        market_state.state_id if market_state is not None else None
+                    ),
+                    quantitative_forecast_id=(
+                        quantitative_forecast.result_id
+                        if quantitative_forecast is not None
+                        else None
+                    ),
                 )
             failure_stage = "evidence_assembly"
             evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]

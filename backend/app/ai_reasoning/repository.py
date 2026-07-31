@@ -10,7 +10,7 @@ import logging
 from typing import Protocol
 
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -278,7 +278,15 @@ class InMemoryAIReasoningRepository:
                     or item.attempted_cutoff == attempted_cutoff
                 )
             ]
-        return max(values, key=lambda item: item.created_at, default=None)
+        priority = {"SKIPPED": 1, "PROCEED": 2, "REUSED": 3, "COMMITTED": 4}
+        return max(
+            values,
+            key=lambda item: (
+                item.created_at,
+                priority.get(item.gate_decision, 0),
+            ),
+            default=None,
+        )
 
     async def claim_reasoning_cycle(
         self,
@@ -859,7 +867,15 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             )
         record = (
             await self.session.scalars(
-                query.order_by(AIReasoningGateDecisionRecord.created_at.desc())
+                query.order_by(
+                    AIReasoningGateDecisionRecord.created_at.desc(),
+                    case(
+                        (AIReasoningGateDecisionRecord.gate_decision == "COMMITTED", 4),
+                        (AIReasoningGateDecisionRecord.gate_decision == "REUSED", 3),
+                        (AIReasoningGateDecisionRecord.gate_decision == "PROCEED", 2),
+                        else_=1,
+                    ).desc(),
+                )
                 .limit(1)
             )
         ).first()
