@@ -48,6 +48,44 @@ class IntegrationWorker:
                 or attempt.status.value != "WAITING_FOR_AI_ANALYSIS"
             ):
                 continue
+            reasoning = getattr(self.service, "ai_reasoning", None)
+            claim = (
+                await reasoning.repository.claim_for_cutoff(
+                    configured.instrument_id, attempt.market_cutoff
+                )
+                if reasoning is not None
+                else None
+            )
+            if claim is not None and claim.status == "FAILED_SCHEMA":
+                await simulation.record_blocked_cutoff(
+                    instrument=configured.instrument_id,
+                    market_cutoff=attempt.market_cutoff,
+                    server_time=now,
+                    reason="AI_SCHEMA_VALIDATION_FAILED",
+                    market_state_id=attempt.market_state_id,
+                    quantitative_forecast_id=attempt.quantitative_forecast_id,
+                    correlation_id=attempt.correlation_id,
+                )
+                continue
+            if (
+                claim is not None
+                and claim.status == "WAITING_PROVIDER"
+                and claim.next_retry_at is not None
+                and now < claim.next_retry_at
+            ):
+                logger.info(
+                    "ai_reasoning.recovery.deferred",
+                    extra={
+                        "instrument": configured.instrument_id,
+                        "market_cutoff": attempt.market_cutoff.isoformat(),
+                        "claim_id": str(claim.claim_id),
+                        "next_retry_at": claim.next_retry_at.isoformat(),
+                        "remaining_seconds": (
+                            claim.next_retry_at - now
+                        ).total_seconds(),
+                    },
+                )
+                continue
             logger.info(
                 "market_simulation.waiting.recovery.started",
                 extra={

@@ -63,6 +63,9 @@ class AIAnalysisSkipReason(StrEnum):
     MARKET_DATA_STALE = "market_data_stale"
     AI_DISABLED = "ai_disabled"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PROVIDER_COOLDOWN = "provider_cooldown"
+    TERMINAL_SCHEMA_FAILURE = "terminal_schema_failure"
+    TERMINAL_PROVIDER_FAILURE = "terminal_provider_failure"
     REQUEST_PREFLIGHT_FAILED = "request_preflight_failed"
 
 
@@ -260,6 +263,7 @@ class AIReasoningService:
         analysis_id: object | None,
         status: str,
         failure_reason: str | None = None,
+        next_retry_at: datetime | None = None,
     ) -> None:
         now = self.clock().astimezone(UTC)
         await self.repository.complete_analysis_cycle(
@@ -270,6 +274,7 @@ class AIReasoningService:
             now,
             claim_id=claim.claim_id,
             failure_reason=failure_reason,
+            next_retry_at=next_retry_at,
         )
         task = self._claim_heartbeats.pop(claim.idempotency_key, None)
         self._active_claims.pop(claim.idempotency_key, None)
@@ -282,6 +287,8 @@ class AIReasoningService:
             "FAILED": "ai_reasoning.claim.failed",
             "RELEASED": "ai_reasoning.claim.released",
             "EXPIRED": "ai_reasoning.claim.expired",
+            "WAITING_PROVIDER": "ai_reasoning.provider.waiting",
+            "FAILED_SCHEMA": "ai_reasoning.claim.failed",
         }.get(status, "ai_reasoning.claim.released")
         logger.info(
             event,
@@ -290,9 +297,26 @@ class AIReasoningService:
                 analysis_id=str(analysis_id) if analysis_id else None,
                 status=status,
                 failure_reason=failure_reason,
+                next_retry_at=(next_retry_at.isoformat() if next_retry_at else None),
                 released_at=now.isoformat(),
                 claim_duration_seconds=max(0.0, (now - claim.claimed_at).total_seconds()),
             ),
+        )
+
+    def _provider_retry_deadline(self) -> datetime:
+        """Return the provider pool's durable retry boundary, with a safe floor."""
+
+        now = self.clock().astimezone(UTC)
+        raw = self.provider.metadata().get("next_retry_at")
+        if isinstance(raw, str):
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                parsed = None
+            if parsed is not None and parsed.tzinfo is not None and parsed > now:
+                return parsed.astimezone(UTC)
+        return now + timedelta(
+            seconds=max(60.0, self.config.provider_backoff_max_seconds)
         )
 
     async def record_gate_decision(
@@ -465,6 +489,12 @@ class AIReasoningService:
             reason = (
                 AIAnalysisSkipReason.DUPLICATE_MARKET_STATE
                 if duplicate is not None
+                else AIAnalysisSkipReason.PROVIDER_COOLDOWN
+                if claim.outcome == "PROVIDER_COOLDOWN"
+                else AIAnalysisSkipReason.TERMINAL_SCHEMA_FAILURE
+                if claim.outcome == "TERMINAL_SCHEMA_FAILURE"
+                else AIAnalysisSkipReason.TERMINAL_PROVIDER_FAILURE
+                if claim.outcome == "TERMINAL_PROVIDER_FAILURE"
                 else AIAnalysisSkipReason.ACTIVE_CLAIM
             )
             await self._skip(
@@ -786,12 +816,37 @@ class AIReasoningService:
                     provider_delta[f"{account_id}_{key}"] = sum(values)
 
         if provider_failure is not None:
+            schema_terminal = terminal_status == "FAILED_SCHEMA" or bool(
+                str(provider_failure["terminal"].get("phase") or "").startswith(
+                    "schema_correction_"
+                )
+            )
+            retryable_provider_failure = failure_state in {
+                "quota_exhausted",
+                "token_quota_exhausted",
+                "rate_limited",
+                "provider_unavailable",
+                "request_timeout",
+            }
+            claim_status = (
+                "FAILED_SCHEMA"
+                if schema_terminal
+                else "WAITING_PROVIDER"
+                if retryable_provider_failure
+                else "FAILED"
+            )
+            next_retry_at = (
+                self._provider_retry_deadline()
+                if claim_status == "WAITING_PROVIDER"
+                else None
+            )
             await self._complete_claim(
                 claim,
                 request_id=request.request_id,
                 analysis_id=None,
-                status="FAILED",
+                status=claim_status,
                 failure_reason=failure_state,
+                next_retry_at=next_retry_at,
             )
             self.failed_requests += 1
             self.last_validation_passed = False
@@ -1396,6 +1451,11 @@ class AIReasoningService:
                 "claimed_at": claim.claimed_at.isoformat() if claim is not None else None,
                 "heartbeat_at": claim.heartbeat_at.isoformat() if claim is not None else None,
                 "lease_expires_at": claim.lease_expires_at.isoformat() if claim is not None else None,
+                "next_retry_at": (
+                    claim.next_retry_at.isoformat()
+                    if claim is not None and claim.next_retry_at is not None
+                    else None
+                ),
             },
         )
         logger.info(
@@ -1413,6 +1473,9 @@ class AIReasoningService:
                     AIAnalysisSkipReason.MARKET_DATA_STALE: "stale_data",
                     AIAnalysisSkipReason.AI_DISABLED: "disabled",
                     AIAnalysisSkipReason.PROVIDER_UNAVAILABLE: "missing_prerequisite",
+                    AIAnalysisSkipReason.PROVIDER_COOLDOWN: "provider_cooldown",
+                    AIAnalysisSkipReason.TERMINAL_SCHEMA_FAILURE: "schema_validation_error",
+                    AIAnalysisSkipReason.TERMINAL_PROVIDER_FAILURE: "provider_failure",
                     AIAnalysisSkipReason.REQUEST_PREFLIGHT_FAILED: "invalid_state",
                 }[reason],
                 "five_minute_window_start": (
@@ -1423,6 +1486,11 @@ class AIReasoningService:
                 "claim_status": claim.status if claim is not None else None,
                 "lease_expires_at": (
                     claim.lease_expires_at.isoformat() if claim is not None else None
+                ),
+                "next_retry_at": (
+                    claim.next_retry_at.isoformat()
+                    if claim is not None and claim.next_retry_at is not None
+                    else None
                 ),
                 "provider_call_made": False,
                 "snapshot_id": context.get("market_state_id"),

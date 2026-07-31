@@ -87,6 +87,7 @@ class AIReasoningClaim:
     status: str
     analysis_id: UUID | None = None
     failure_reason: str | None = None
+    next_retry_at: datetime | None = None
     released_at: datetime | None = None
     expired_claim_count: int = 0
 
@@ -108,6 +109,7 @@ def _claim_from_mapping(value: Mapping[str, object], *, acquired: bool, outcome:
         status=str(value["status"]),
         analysis_id=(UUID(str(value["analysis_id"])) if value.get("analysis_id") else None),
         failure_reason=(str(value["failure_reason"]) if value.get("failure_reason") else None),
+        next_retry_at=value.get("next_retry_at"),  # type: ignore[arg-type]
         released_at=value.get("released_at"),  # type: ignore[arg-type]
         expired_claim_count=int(str(value.get("expired_claim_count") or 0)),
     )
@@ -130,6 +132,7 @@ def _claim_from_record(value: AIReasoningCycleLockRecord, *, acquired: bool, out
         status=value.status,
         analysis_id=value.analysis_id,
         failure_reason=value.failure_reason,
+        next_retry_at=value.next_retry_at,
         released_at=value.released_at,
         expired_claim_count=value.expired_claim_count,
     )
@@ -209,7 +212,7 @@ class AIReasoningRepository(Protocol):
     async def release_reasoning_cycle(
         self, idempotency_key: str, claim_id: UUID, released_at: datetime,
         *, status: str = "RELEASED", failure_reason: str | None = None,
-        analysis_id: UUID | None = None,
+        analysis_id: UUID | None = None, next_retry_at: datetime | None = None,
     ) -> bool: ...
     async def claim_for_cutoff(
         self, instrument: str, market_cutoff: datetime,
@@ -237,6 +240,7 @@ class AIReasoningRepository(Protocol):
         *,
         claim_id: UUID | None = None,
         failure_reason: str | None = None,
+        next_retry_at: datetime | None = None,
     ) -> None: ...
     async def analysis_for_market_state_hash(
         self,
@@ -432,6 +436,23 @@ class InMemoryAIReasoningRepository:
                     and lease_expires_at > claimed_at
                 ):
                     return _claim_from_mapping(existing, acquired=False, outcome="ACTIVE_CLAIM")
+                next_retry_at = existing.get("next_retry_at")
+                if (
+                    existing.get("status") == "WAITING_PROVIDER"
+                    and isinstance(next_retry_at, datetime)
+                    and next_retry_at > claimed_at
+                ):
+                    return _claim_from_mapping(
+                        existing, acquired=False, outcome="PROVIDER_COOLDOWN"
+                    )
+                if existing.get("status") == "FAILED_SCHEMA":
+                    return _claim_from_mapping(
+                        existing, acquired=False, outcome="TERMINAL_SCHEMA_FAILURE"
+                    )
+                if existing.get("status") == "FAILED":
+                    return _claim_from_mapping(
+                        existing, acquired=False, outcome="TERMINAL_PROVIDER_FAILURE"
+                    )
                 expired_count = int(str(existing.get("expired_claim_count") or 0)) + 1
                 previous_claim_id = existing.get("claim_id")
                 existing.update(
@@ -442,6 +463,7 @@ class InMemoryAIReasoningRepository:
                     lease_expires_at=claimed_at + timedelta(seconds=lease_seconds),
                     status="ACTIVE_CLAIM",
                     failure_reason=None,
+                    next_retry_at=None,
                     released_at=None,
                     expired_claim_count=expired_count,
                     previous_claim_id=previous_claim_id,
@@ -492,7 +514,7 @@ class InMemoryAIReasoningRepository:
     async def release_reasoning_cycle(
         self, idempotency_key: str, claim_id: UUID, released_at: datetime,
         *, status: str = "RELEASED", failure_reason: str | None = None,
-        analysis_id: UUID | None = None,
+        analysis_id: UUID | None = None, next_retry_at: datetime | None = None,
     ) -> bool:
         async with self._lock:
             cycle = self.reasoning_cycles.get(idempotency_key)
@@ -502,6 +524,7 @@ class InMemoryAIReasoningRepository:
                 status=status,
                 analysis_id=analysis_id,
                 failure_reason=failure_reason,
+                next_retry_at=next_retry_at,
                 released_at=released_at,
                 completed_at=released_at,
                 claimed_by=None,
@@ -604,6 +627,7 @@ class InMemoryAIReasoningRepository:
         *,
         claim_id: UUID | None = None,
         failure_reason: str | None = None,
+        next_retry_at: datetime | None = None,
     ) -> None:
         async with self._lock:
             cycle = self.reasoning_cycles[idempotency_key]
@@ -618,6 +642,7 @@ class InMemoryAIReasoningRepository:
                 claimed_by=None,
                 lease_expires_at=completed_at,
                 failure_reason=failure_reason,
+                next_retry_at=next_retry_at,
             )
 
     async def analysis_for_market_state_hash(
@@ -1127,6 +1152,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 claimed_at=claimed_at,
                 heartbeat_at=claimed_at,
                 lease_expires_at=lease_expires_at,
+                next_retry_at=None,
                 expired_claim_count=0,
             )
             .on_conflict_do_nothing()
@@ -1166,7 +1192,11 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             .where(
                 AIReasoningCycleLockRecord.idempotency_key == existing.idempotency_key,
                 or_(
-                    AIReasoningCycleLockRecord.status.in_(("FAILED", "RELEASED", "EXPIRED")),
+                    AIReasoningCycleLockRecord.status.in_(("RELEASED", "EXPIRED")),
+                    (
+                        (AIReasoningCycleLockRecord.status == "WAITING_PROVIDER")
+                        & (AIReasoningCycleLockRecord.next_retry_at <= claimed_at)
+                    ),
                     (
                         (AIReasoningCycleLockRecord.status == "ACTIVE_CLAIM")
                         & (AIReasoningCycleLockRecord.lease_expires_at <= claimed_at)
@@ -1183,6 +1213,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 lease_expires_at=lease_expires_at,
                 status="ACTIVE_CLAIM",
                 failure_reason=None,
+                next_retry_at=None,
                 released_at=None,
                 completed_at=None,
                 expired_claim_count=AIReasoningCycleLockRecord.expired_claim_count + 1,
@@ -1199,6 +1230,14 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             if existing.status in {"COMMITTED", "RECOVERED"} and existing.analysis_id is not None
             else "STALE_CLAIM"
             if existing.status == "ACTIVE_CLAIM" and existing.lease_expires_at <= claimed_at
+            else "PROVIDER_COOLDOWN"
+            if existing.status == "WAITING_PROVIDER"
+            and existing.next_retry_at is not None
+            and existing.next_retry_at > claimed_at
+            else "TERMINAL_SCHEMA_FAILURE"
+            if existing.status == "FAILED_SCHEMA"
+            else "TERMINAL_PROVIDER_FAILURE"
+            if existing.status == "FAILED"
             else "ACTIVE_CLAIM"
         )
         return _claim_from_record(existing, acquired=False, outcome=outcome)
@@ -1228,7 +1267,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
     async def release_reasoning_cycle(
         self, idempotency_key: str, claim_id: UUID, released_at: datetime,
         *, status: str = "RELEASED", failure_reason: str | None = None,
-        analysis_id: UUID | None = None,
+        analysis_id: UUID | None = None, next_retry_at: datetime | None = None,
     ) -> bool:
         result = await self.session.execute(
             update(AIReasoningCycleLockRecord)
@@ -1240,6 +1279,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 status=status,
                 analysis_id=analysis_id,
                 failure_reason=failure_reason,
+                next_retry_at=next_retry_at,
                 released_at=released_at,
                 completed_at=released_at,
                 claimed_by=None,
@@ -1383,6 +1423,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         *,
         claim_id: UUID | None = None,
         failure_reason: str | None = None,
+        next_retry_at: datetime | None = None,
     ) -> None:
         statement = update(AIReasoningCycleLockRecord).where(
             AIReasoningCycleLockRecord.idempotency_key == idempotency_key
@@ -1400,6 +1441,7 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 claimed_by=None,
                 lease_expires_at=completed_at,
                 failure_reason=failure_reason,
+                next_retry_at=next_retry_at,
             )
         )
         await self.session.commit()

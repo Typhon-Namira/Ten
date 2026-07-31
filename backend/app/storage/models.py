@@ -1207,6 +1207,9 @@ class AIReasoningCycleLockRecord(Base):
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expired_claim_count: Mapped[int] = mapped_column(Integer, default=0)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

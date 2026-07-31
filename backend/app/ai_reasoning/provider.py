@@ -1757,6 +1757,8 @@ class GroqProviderPool:
         self.active_provider: str | None = None
         self.latest_successful_analysis_at: datetime | None = None
         self.retry_attempts = 0
+        self._rotation_cursor = 0
+        self._rotation_lock = asyncio.Lock()
         # Monotonic process counters are separate from the UTC-day runtime
         # counters. Service-level metric deltas are persisted per request, so
         # they must not roll backwards at midnight.
@@ -1781,6 +1783,10 @@ class GroqProviderPool:
     ) -> AIProviderResponse:
         now = self.clock()
         last_error: AIProviderRequestError | None = None
+        async with self._rotation_lock:
+            start_index = self._rotation_cursor
+            self._rotation_cursor = (self._rotation_cursor + 1) % len(self.providers)
+        providers = self.providers[start_index:] + self.providers[:start_index]
         logger.info(
             "groq_pool.routing.entered",
             extra={
@@ -1788,12 +1794,13 @@ class GroqProviderPool:
                 "instrument": request.instrument,
                 "cycle_id": str(request.cycle_id),
                 "ums_boundary": request.analysis_timestamp.isoformat(),
-                "strategy": "ordered_failover",
-                "account_order": tuple(self.providers_by_id),
+                "strategy": "round_robin_failover",
+                "rotation_start": providers[0].provider_name,
+                "account_order": tuple(provider.provider_name for provider in providers),
             },
         )
         attempted_accounts = 0
-        for index, provider in enumerate(self.providers):
+        for index, provider in enumerate(providers):
             account_id = provider.provider_name
             if not self._eligible(account_id, now):
                 account_state = self.states[account_id]
@@ -1857,13 +1864,13 @@ class GroqProviderPool:
                         "status_code": exc.details.http_status,
                         "sanitized_error_code": exc.details.reason_code,
                         "next_account_allowed": (
-                            attempted_accounts < 2
+                            attempted_accounts < len(self.providers)
                             and self._failover_allowed(exc.details)
                         ),
                     },
                 )
                 if (
-                    attempted_accounts >= 2
+                    attempted_accounts >= len(self.providers)
                     or not self._failover_allowed(exc.details)
                 ):
                     raise
@@ -2211,6 +2218,12 @@ class GroqProviderPool:
 
     def metadata(self) -> dict[str, object]:
         now = self.clock()
+        retry_deadlines = tuple(
+            state.circuit_open_until
+            for state in self.states.values()
+            if state.circuit_open_until is not None
+            and state.circuit_open_until > now
+        )
         available_accounts = sum(
             self._eligible(provider.provider_name, now)
             for provider in self.providers
@@ -2258,7 +2271,10 @@ class GroqProviderPool:
             "quota_exhausted_account_count": quota_accounts,
             "configuration_error_account_count": configuration_accounts,
             "aggregate_reason": aggregate_reason,
-            "pool_strategy": "ordered_failover",
+            "next_retry_at": (
+                min(retry_deadlines).isoformat() if retry_deadlines else None
+            ),
+            "pool_strategy": "round_robin_failover",
             "providers": {
                 name: state.snapshot() for name, state in self.states.items()
             },

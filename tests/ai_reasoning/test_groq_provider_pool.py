@@ -156,7 +156,7 @@ def test_analysis_schema_remains_strict_at_every_object() -> None:
 
 
 @pytest.mark.asyncio
-async def test_account_one_success_stops_ordered_failover() -> None:
+async def test_first_success_stops_current_round_robin_attempt() -> None:
     providers = four({})
     router = pool(providers)
 
@@ -323,7 +323,7 @@ async def test_rate_limited_account_becomes_available_only_after_cooldown() -> N
 
 
 @pytest.mark.asyncio
-async def test_provider_failover_is_bounded_to_one_alternate_account() -> None:
+async def test_provider_failover_can_exhaust_all_four_accounts() -> None:
     providers = four(
         {
             index: [failure(f"groq_{index}", "rate_limited", status=429)]
@@ -335,9 +335,9 @@ async def test_provider_failover_is_bounded_to_one_alternate_account() -> None:
     with pytest.raises(AIProviderRequestError):
         await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
 
-    assert [provider.calls for provider in providers] == [1, 1, 0, 0]
+    assert [provider.calls for provider in providers] == [1, 1, 1, 1]
     metadata = router.metadata()
-    assert metadata["available_account_count"] == 2
+    assert metadata["available_account_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -387,16 +387,53 @@ async def test_all_accounts_failing_returns_no_successful_provider() -> None:
     with pytest.raises(AIProviderRequestError) as captured:
         await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
 
-    assert captured.value.details.provider == "groq_2"
+    assert captured.value.details.provider == "groq_4"
     assert router.active_provider is None
     assert all(
         state.status == ProviderStatus.QUOTA_EXHAUSTED
-        for state in tuple(router.states.values())[:2]
+        for state in router.states.values()
     )
-    assert all(
-        state.status == ProviderStatus.AVAILABLE
-        for state in tuple(router.states.values())[2:]
+
+
+@pytest.mark.asyncio
+async def test_successful_cycles_rotate_through_all_four_accounts() -> None:
+    providers = [
+        StubProvider(f"groq_{index}", [response(f"groq_{index}")])
+        for index in range(1, 5)
+    ]
+    router = pool(providers)
+
+    selected = [
+        (await router.reason(request(), prompt_version="v1")).provider  # type: ignore[arg-type]
+        for _ in range(4)
+    ]
+
+    assert selected == ["groq_1", "groq_2", "groq_3", "groq_4"]
+    assert [provider.calls for provider in providers] == [1, 1, 1, 1]
+    assert router.metadata()["pool_strategy"] == "round_robin_failover"
+
+
+@pytest.mark.asyncio
+async def test_all_rate_limits_expose_earliest_provider_retry_time() -> None:
+    providers = four(
+        {
+            index: [
+                failure(
+                    f"groq_{index}", "rate_limited", status=429,
+                    retry_after=f"{index * 30}s",
+                )
+            ]
+            for index in range(1, 5)
+        }
     )
+    router = pool(providers)
+
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert router.metadata()["next_retry_at"] == (
+        NOW + timedelta(seconds=30)
+    ).isoformat()
 
 
 @pytest.mark.asyncio
