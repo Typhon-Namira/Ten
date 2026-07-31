@@ -126,7 +126,11 @@ class UnifiedMarketStateRepository(Protocol):
     async def latest_frame(self, instrument: str, timeframe: str, boundary: datetime, knowledge_cutoff: datetime) -> MarketEvidenceFrame | None: ...
     async def save_state(self, value: UnifiedMarketState) -> UnifiedMarketState: ...
     async def get_state(self, state_id: object) -> UnifiedMarketState | None: ...
-    async def latest_state(self, instrument: str) -> UnifiedMarketState | None: ...
+    async def latest_state(
+        self,
+        instrument: str,
+        trigger_timeframe: str | None = None,
+    ) -> UnifiedMarketState | None: ...
 
 
 class InMemoryUnifiedMarketStateRepository:
@@ -157,9 +161,21 @@ class InMemoryUnifiedMarketStateRepository:
             self._states[value.state_id] = value
         return value
 
-    async def latest_state(self, instrument: str) -> UnifiedMarketState | None:
+    async def latest_state(
+        self,
+        instrument: str,
+        trigger_timeframe: str | None = None,
+    ) -> UnifiedMarketState | None:
         async with self._lock:
-            values = [item for item in self._states.values() if item.instrument == instrument]
+            values = [
+                item
+                for item in self._states.values()
+                if item.instrument == instrument
+                and (
+                    trigger_timeframe is None
+                    or item.trigger_timeframe == trigger_timeframe
+                )
+            ]
         return max(values, key=lambda item: (item.market_data_boundary, str(item.state_id)), default=None)
 
     async def get_state(self, state_id: object) -> UnifiedMarketState | None:
@@ -331,7 +347,11 @@ class SqlAlchemyUnifiedMarketStateRepository(ScopedSessionRepository):
         return _reconstruct_compact_state(record, timeframe_rows, frames, typed_links)
 
     @scoped_session
-    async def latest_state(self, instrument: str) -> UnifiedMarketState | None:
+    async def latest_state(
+        self,
+        instrument: str,
+        trigger_timeframe: str | None = None,
+    ) -> UnifiedMarketState | None:
         query = (
             select(UnifiedMarketStateRecord)
             .outerjoin(
@@ -345,6 +365,10 @@ class SqlAlchemyUnifiedMarketStateRepository(ScopedSessionRepository):
             )
             .limit(1)
         )
+        if trigger_timeframe is not None:
+            query = query.where(
+                UnifiedMarketStateRecord.trigger_timeframe == trigger_timeframe
+            )
         record = (await self.session.scalars(query)).first()
         if record is None:
             return None

@@ -98,6 +98,30 @@ def test_primary_scenario_simulation_migration_is_normalized_and_reversible() ->
     assert 'ondelete="RESTRICT"' in source
 
 
+def test_authoritative_simulation_attempt_migration_is_idempotent_and_reversible() -> None:
+    source = (
+        ROOT
+        / "migrations/versions/20260731_0018_authoritative_simulation_attempts.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260731_0018"' in source
+    assert 'down_revision = "20260730_0017"' in source
+    assert '"authoritative_simulation_attempts"' in source
+    assert "ux_authoritative_simulation_attempt_boundary" in source
+    for status in (
+        "SCHEDULED",
+        "RUNNING",
+        "SUCCESS",
+        "NO_SIGNAL",
+        "ANALYTICAL_ONLY",
+        "BLOCKED",
+        "FAILED",
+        "SKIPPED",
+    ):
+        assert status in source
+    assert 'op.drop_table("authoritative_simulation_attempts")' in source
+
+
 def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     source = (
         ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"

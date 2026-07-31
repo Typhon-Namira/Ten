@@ -226,6 +226,8 @@ class FullSystemIntegrationService:
 
     async def _run(self, envelope: CanonicalEventEnvelope, *, publish_signal: bool = True) -> OperationalSignal | None:
         started = perf_counter()
+        if not isinstance(envelope.payload, MarketCandlePayload):
+            raise ValueError("integration analytical cycles require a market candle payload")
         symbol, timeframe_name = envelope.instrument_id or "", envelope.timeframe
         assert timeframe_name is not None
         timeframe = Timeframe(timeframe_name)
@@ -258,6 +260,8 @@ class FullSystemIntegrationService:
         primary_scenario = None
         market_state = None
         quantitative_forecast = None
+        synthesis = None
+        market_simulation_invoked = False
         failure_stage = "market_data_history"
         # Everything from here through the final `tracker.complete(...)` below is one failure
         # domain: ANY exception in this span — including `market_data.history()` and
@@ -470,20 +474,64 @@ class FullSystemIntegrationService:
                                         synthesis,
                                         trigger_timeframe=timeframe.value,
                                         candles=tuple(candles),
-                                        evaluated_at=max(self.clock(), boundary),
+                                        evaluated_at=self.clock(),
                                     )
                                 if self.market_simulation is not None:
                                     failure_stage = "market_simulation"
+                                    market_simulation_invoked = True
                                     primary_scenario = await self.market_simulation.process(
                                         market_state,
                                         quantitative_forecast,
                                         synthesis,
                                         trigger_timeframe=timeframe.value,
                                         candles=tuple(candles),
-                                        evaluated_at=max(self.clock(), boundary),
+                                        evaluated_at=self.clock(),
                                     )
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)
+            if (
+                timeframe == Timeframe.M15
+                and self.market_simulation is not None
+                and not market_simulation_invoked
+            ):
+                payload = envelope.payload
+                reason = (
+                    "MARKET_STATE_MISSING"
+                    if market_state is None
+                    else "QUANT_FORECAST_MISSING"
+                    if quantitative_forecast is None
+                    else "AI_ANALYSIS_MISSING"
+                    if validated_analysis is None
+                    else "SYNTHESIS_MISSING"
+                    if synthesis is None
+                    else "SIMULATION_NOT_INVOKED"
+                )
+                logger.info(
+                    "market_simulation.m15_eligibility",
+                    extra={
+                        **log_context,
+                        "provider_timestamp": payload.ingestion_time.isoformat(),
+                        "candle_open_time": payload.open_time.isoformat(),
+                        "candle_close_time": payload.close_time.isoformat(),
+                        "resolved_market_cutoff": boundary.isoformat(),
+                        "server_time": self.clock().isoformat(),
+                        "timezone": "UTC",
+                        "eligibility_result": True,
+                        "eligibility_reason": "completed_final_m15_candle",
+                        "simulation_result": "BLOCKED",
+                        "simulation_reason": reason,
+                    },
+                )
+                await self.market_simulation.record_blocked_cutoff(
+                    instrument=symbol,
+                    market_cutoff=boundary,
+                    server_time=self.clock(),
+                    reason=reason,
+                    provider_timestamp=payload.ingestion_time,
+                    candle_open_time=payload.open_time,
+                    candle_close_time=payload.close_time,
+                    failure_stage=failure_stage,
+                )
             failure_stage = "evidence_assembly"
             evidence = [EvidenceReference(engine="market_data", evidence_id=envelope.event_id, engine_version="1.0.0", effective_at=boundary)]
             for name, value in outputs:

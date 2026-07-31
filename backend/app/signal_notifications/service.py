@@ -74,56 +74,7 @@ def render_signal_email(payload: dict[str, Any]) -> tuple[str, str]:
             ]
         )
         return subject, body
-    blocked = payload.get("publication_status") != "ELIGIBLE"
-    marker = "[BLOCKED]" if blocked else ""
-    reason = next(iter(payload.get("blockers") or ()), "Observe only")
-    subject = (
-        f"[TEN AI]{marker} {payload['symbol']} {payload['direction']} · "
-        f"Entry {payload['entry']}"
-        + (f" · {reason}" if blocked else "")
-    )
-    frames = payload.get("timeframe_summaries") or ()
-    frame_lines = [
-        (
-            f"{item['timeframe']}: {item['direction']} · "
-            f"{item['confidence']:.1f}% {item['strength']} · "
-            f"{item['execution_status']}"
-        )
-        for item in frames
-    ]
-    fields = (
-        ("Symbol", payload["symbol"]),
-        ("Direction", payload["direction"]),
-        ("Combined confidence", f"{payload['combined_confidence']:.1f}%"),
-        ("Combined strength", payload["combined_strength"]),
-        ("Entry Price", payload["entry"]),
-        ("Stop Loss", payload["stop_loss"]),
-        ("Take Profit", payload["take_profit"]),
-        ("Risk/Reward", payload["risk_reward"]),
-        ("Current market price", payload.get("current_market_price")),
-        ("Expected horizon (seconds)", payload.get("expected_horizon_seconds")),
-        ("Market time", payload.get("market_time")),
-        ("Signal creation time", payload.get("created_at")),
-        ("Expiration time", payload.get("expires_at")),
-        ("Execution status", payload.get("execution_status")),
-        ("Guardrail status", payload.get("guardrail_status")),
-        ("Publication status", payload.get("publication_status")),
-        ("Geometry owner", payload.get("geometry_owner_timeframe")),
-        ("Structural sources", ", ".join(payload.get("structural_source_ids") or ())),
-        ("Blockers / warnings", ", ".join(payload.get("blockers") or ()) or "None"),
-        ("Analytical thesis", payload.get("analytical_thesis")),
-        ("Cycle ID", payload.get("cycle_id")),
-        ("Analysis ID", payload.get("analysis_id")),
-        ("Synthesis ID", payload.get("synthesis_id")),
-        ("Signal ID", payload.get("signal_id")),
-        ("Decision ID", payload.get("decision_id")),
-    )
-    body = "\n".join(
-        ["TEN AI ANALYTICAL PLATFORM", "", *frame_lines, ""]
-        + [f"{label}: {value}" for label, value in fields]
-    )
-    return subject, body
-
+    raise ValueError("signal email requires an authoritative Primary Scenario")
 
 class SmtpSignalEmailSender:
     def __init__(

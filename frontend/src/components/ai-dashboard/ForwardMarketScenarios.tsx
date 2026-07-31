@@ -65,20 +65,47 @@ function CandidateSummary({ candidate, title }: { candidate: CandidateMarketScen
 
 export function PrimaryMarketScenario({ cycle }: { cycle: LatestCompletedCycle | null }) {
   const selection = cycle?.primary_market_scenario
+  const attempt = cycle?.authoritative_simulation
   return <section className="scenario-forecast-section">
     <SectionHeader eyebrow="Authoritative M15 simulation" title="Primary Market Scenario" action={<Route size={19} />} />
     {!selection || !selection.primary
-      ? <section className="ai-card ai-card--wide"><EmptyState title="Primary Scenario pending" detail={selection?.rejection_reason ? humanize(selection.rejection_reason) : 'Awaiting a synchronized completed M15 simulation.'} /></section>
+      ? <section className="ai-card ai-card--wide"><EmptyState
+          title={attempt?.status ? humanize(attempt.status) : 'Primary Scenario pending'}
+          detail={attempt?.failure_message || attempt?.skip_reason || selection?.rejection_reason
+            ? humanize(attempt?.failure_message ?? attempt?.skip_reason ?? selection?.rejection_reason ?? '')
+            : 'Awaiting a synchronized completed M15 simulation.'}
+        /></section>
       : <>
         <CandidateSummary candidate={selection.primary} title="Selected Primary Scenario" />
+        <section className="ai-card ai-card--wide">
+          <SectionHeader eyebrow="Structured forecast" title="Expected Price Path" action={<Route size={18} />} />
+          <ol className="scenario-path">
+            {selection.primary.path_sequence.map(stage => <li key={stage.stage_id}>
+              <strong>Stage {stage.sequence} · {stage.label}</strong>
+              <span>{price(stage.expected_price_area.low)}–{price(stage.expected_price_area.high)}</span>
+              <small>{stage.timing_seconds ? `Expected within ${Math.round(stage.timing_seconds / 60)} minutes · ` : ''}{humanize(stage.invalidation_condition)}</small>
+            </li>)}
+          </ol>
+        </section>
         <div className="health-grid">
           <Metric label="Authoritative signal" value={selection.authoritative_action} />
           <Metric label="Selection status" value={selection.status} />
           <Metric label="Publication" value={selection.signal_eligible ? 'ELIGIBLE' : 'BLOCKED'} />
           <Metric label="Minimum score" value={`${selection.minimum_score.toFixed(0)}%`} />
         </div>
-        <p className="reasoning-copy">{selection.ranking_explanation}</p>
-        {selection.alternative && <CandidateSummary candidate={selection.alternative} title="Alternative Market Scenario" />}
+        <section className="ai-card ai-card--wide">
+          <SectionHeader eyebrow="Deterministic ranking" title="Why This Scenario Was Selected" action={<Route size={18} />} />
+          <p className="reasoning-copy">{selection.ranking_explanation}</p>
+          <div className="health-grid">
+            {selection.primary.score_components.map(component => <Metric
+              key={component.name}
+              label={humanize(component.name)}
+              value={`${component.contribution >= 0 ? '+' : ''}${component.contribution.toFixed(1)}`}
+              detail={component.reason}
+            />)}
+          </div>
+        </section>
+        {selection.alternative && <CandidateSummary candidate={selection.alternative} title="Alternative Market Scenario · Not authoritative" />}
         <section className="ai-card ai-card--wide">
           <SectionHeader eyebrow="Deterministic candidate comparison" title="Candidate Scenario Ranking" action={<Route size={18} />} />
           <div className="health-grid">

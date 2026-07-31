@@ -44,6 +44,87 @@ class ScenarioSignalAction(StrEnum):
     HOLD = "HOLD"
 
 
+class SimulationAttemptStatus(StrEnum):
+    SCHEDULED = "SCHEDULED"
+    RUNNING = "RUNNING"
+    SUCCESS = "SUCCESS"
+    NO_SIGNAL = "NO_SIGNAL"
+    ANALYTICAL_ONLY = "ANALYTICAL_ONLY"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+    @property
+    def terminal(self) -> bool:
+        return self not in {self.SCHEDULED, self.RUNNING}
+
+
+class AuthoritativeSimulationAttempt(SimulationModel):
+    attempt_id: UUID
+    instrument: str
+    timeframe: str = "M15"
+    market_cutoff: datetime
+    simulation_version: str
+    status: SimulationAttemptStatus
+    provider_timestamp: datetime | None = None
+    candle_open_time: datetime | None = None
+    candle_close_time: datetime | None = None
+    resolved_market_cutoff: datetime
+    server_time: datetime
+    timezone: str = "UTC"
+    eligibility_result: bool
+    eligibility_reason: str
+    m5_cutoff: datetime | None = None
+    cutoff_difference_seconds: float | None = Field(default=None, ge=0)
+    synchronization_status: str
+    scheduled_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    candidate_count: int = Field(default=0, ge=0, le=10)
+    simulation_cycle_id: UUID | None = None
+    primary_scenario_id: UUID | None = None
+    alternative_scenario_id: UUID | None = None
+    failure_stage: str | None = None
+    failure_type: str | None = None
+    failure_message: str | None = None
+    skip_reason: str | None = None
+    retry_count: int = Field(default=0, ge=0)
+
+    @field_validator(
+        "market_cutoff",
+        "provider_timestamp",
+        "candle_open_time",
+        "candle_close_time",
+        "resolved_market_cutoff",
+        "server_time",
+        "m5_cutoff",
+        "scheduled_at",
+        "started_at",
+        "completed_at",
+    )
+    @classmethod
+    def attempt_times_are_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("simulation attempt timestamps must be timezone-aware")
+        return value.astimezone(UTC) if value is not None else None
+
+    @model_validator(mode="after")
+    def lifecycle_is_coherent(self) -> AuthoritativeSimulationAttempt:
+        if self.timeframe != "M15":
+            raise ValueError("authoritative simulation attempts are M15 only")
+        if self.status == SimulationAttemptStatus.RUNNING and self.started_at is None:
+            raise ValueError("running attempt requires started_at")
+        if self.status.terminal and self.completed_at is None:
+            raise ValueError("terminal attempt requires completed_at")
+        if self.status == SimulationAttemptStatus.SUCCESS and self.primary_scenario_id is None:
+            raise ValueError("successful attempt requires a Primary Scenario")
+        if self.status == SimulationAttemptStatus.FAILED and not self.failure_message:
+            raise ValueError("failed attempt requires a failure message")
+        if self.status == SimulationAttemptStatus.SKIPPED and not self.skip_reason:
+            raise ValueError("skipped attempt requires a reason")
+        return self
+
+
 class QuantMoveConversion(SimulationModel):
     raw_expected_move: float = Field(ge=0)
     raw_expected_move_unit: str

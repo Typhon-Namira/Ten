@@ -514,18 +514,18 @@ def test_dashboard_system_status_is_one_authoritative_thirteen_stage_contract() 
     assert len(body["stages"]) == 13
     assert [item["id"] for item in body["stages"]] == [
         "market_data",
-        "smc",
-        "liquidity",
-        "volume_profile",
-        "institutional_flow",
-        "market_regime",
-        "economic_calendar",
-        "unified_market_state",
+        "market_intelligence",
         "quant_forecast",
         "ai_reasoning",
-        "proposal",
+        "candidate_generation",
+        "candidate_scoring",
+        "primary_selection",
+        "geometry_validation",
         "guardrails",
-        "final_decision",
+        "publication",
+        "email",
+        "outcome",
+        "calibration",
     ]
     valid = {
         "healthy", "running", "degraded", "failed",

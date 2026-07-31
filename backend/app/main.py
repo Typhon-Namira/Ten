@@ -581,6 +581,10 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                     ),
                 )
             ),
+            market_state_repository=app.state.unified_market_state_repository,
+            quant_repository=app.state.quant_forecast_repository,
+            synthesis_repository=app.state.multi_timeframe_signal_repository,
+            recovery_max_age_seconds=settings.scenario_recovery_max_age_seconds,
         )
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,

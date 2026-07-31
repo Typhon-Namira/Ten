@@ -60,7 +60,9 @@ class Settings(BaseSettings):
     market_data_worker_enabled: bool = False
     market_data_provider: str = "lbma_gold_price"
     market_data_symbols: Annotated[tuple[str, ...], NoDecode] = ("XAUUSD",)
-    market_data_timeframes: Annotated[tuple[str, ...], NoDecode] = ("M15",)
+    # Scenario authority requires both point-in-time inputs.  Running M15 alone can never
+    # construct a synchronized UnifiedMarketState and therefore can never produce a Primary.
+    market_data_timeframes: Annotated[tuple[str, ...], NoDecode] = ("M5", "M15")
     market_data_bootstrap_enabled: bool = True
     market_data_bootstrap_candles: int = Field(default=2500, ge=50, le=5000)
     market_data_poll_seconds: float = Field(default=10, ge=5, le=3600)
@@ -135,6 +137,9 @@ class Settings(BaseSettings):
     primary_scenario_maximum_entry_distance_percent: float = Field(default=0.003, gt=0, le=0.02)
     primary_scenario_expiry_seconds: int = Field(default=900, ge=300, le=3600)
     scenario_calibration_minimum_sample: int = Field(default=30, ge=1)
+    scenario_pending_stall_seconds: int = Field(default=120, ge=30, le=3600)
+    scenario_recovery_lookback_count: int = Field(default=8, ge=1, le=96)
+    scenario_recovery_max_age_seconds: int = Field(default=7200, ge=900, le=86400)
     xauusd_tick_size: float = Field(default=0.01, gt=0)
     xauusd_display_precision: int = Field(default=2, ge=0, le=8)
     xauusd_minimum_stop_distance: float = Field(default=0.10, gt=0)
@@ -165,12 +170,17 @@ class Settings(BaseSettings):
     def parse_market_data_sequence(cls, value: Any, info: ValidationInfo) -> Any:
         """Accept both JSON arrays and comma-separated Railway variables."""
         if not isinstance(value, str):
-            return value
-        raw = value.strip()
-        if raw.startswith("["):
-            items = json.loads(raw)
+            if info.field_name != "market_data_timeframes":
+                return value
+            items = value
         else:
-            items = tuple(item.strip() for item in raw.split(",") if item.strip())
+            raw = value.strip()
+            if raw.startswith("["):
+                items = json.loads(raw)
+            else:
+                items = tuple(
+                    item.strip() for item in raw.split(",") if item.strip()
+                )
         if info.field_name != "market_data_timeframes":
             return items
         aliases = {
@@ -189,7 +199,24 @@ class Settings(BaseSettings):
             "1d": "D1",
             "d1": "D1",
         }
-        return tuple(aliases.get(str(item).strip().lower(), str(item).strip()) for item in items)
+        normalized = tuple(
+            aliases.get(str(item).strip().lower(), str(item).strip())
+            for item in items
+        )
+        if {"M5", "M15"} & set(normalized) and not {"M5", "M15"} <= set(
+            normalized
+        ):
+            logger.warning(
+                "market_data.timeframes.completed_for_scenario_authority",
+                extra={
+                    "configured": normalized,
+                    "required": ("M5", "M15"),
+                },
+            )
+            normalized = tuple(
+                dict.fromkeys(("M5", "M15", *normalized))
+            )
+        return normalized
 
     @field_validator("groq_base_url")
     @classmethod

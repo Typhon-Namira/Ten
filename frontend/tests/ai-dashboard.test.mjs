@@ -15,8 +15,7 @@ test('primary navigation exposes only the five AI-centric destinations', async (
 test('overview preserves the required decision hierarchy', async () => {
   const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
   const orderedSections = [
-    '<CurrentAnalyticalCycle',
-    '<ForwardMarketScenarios',
+    '<PrimaryMarketScenario',
     '<MarketStateSummary',
     '<QuantForecastSummary',
     '<SystemStatusPanel',
@@ -39,23 +38,66 @@ test('decision copy is derived from backend action states and never implies exec
   assert.match(shell, /Analysis and decision support only/)
 })
 
-test('dashboard leads with Primary and Alternative scenarios and retains supporting synthesis', async () => {
+test('dashboard exposes only scenario authority on the Overview page', async () => {
   const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
   const scenarios = await source('src/components/ai-dashboard/ForwardMarketScenarios.tsx')
   const types = await source('src/types/index.ts')
   assert.match(dashboard, /PrimaryMarketScenario/)
-  assert.match(dashboard, /ForwardMarketScenarios/)
-  assert.ok(dashboard.indexOf('<PrimaryMarketScenario') < dashboard.indexOf('<CurrentAnalyticalCycle'))
+  assert.doesNotMatch(dashboard, /<ForwardMarketScenarios/)
+  assert.doesNotMatch(dashboard, /<CurrentAnalyticalCycle cycle=\{data\.latestCycle\} \/><\/ErrorBoundary>\s*<ErrorBoundary label="Forward/)
   assert.match(scenarios, /Primary Market Scenario/)
   assert.match(scenarios, /Alternative Market Scenario/)
   assert.match(scenarios, /Candidate Scenario Ranking/)
-  assert.match(scenarios, /Supporting Directional Synthesis/)
-  assert.match(scenarios, /Combined forward scenario/)
-  assert.match(scenarios, /Analytical Intelligence Only/)
-  assert.match(scenarios, /No Broker Execution/)
+  assert.match(scenarios, /Expected Price Path/)
+  assert.match(scenarios, /Why This Scenario Was Selected/)
   assert.match(types, /forward_market_scenarios/)
   assert.match(types, /primary_market_scenario/)
+  assert.match(types, /authoritative_simulation/)
   assert.match(types, /execution_geometry_validity/)
+})
+
+test('scenario-first headings render exactly once in the overview composition', async () => {
+  const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
+  const scenarios = await source('src/components/ai-dashboard/ForwardMarketScenarios.tsx')
+  const intelligence = await source('src/components/ai-dashboard/IntelligenceCards.tsx')
+  const system = await source('src/components/ai-dashboard/SystemStatusPanel.tsx')
+  for (const [text, sourceText] of [
+    ['Primary Market Scenario', scenarios],
+    ['Alternative Market Scenario', scenarios],
+    ['Candidate Scenario Ranking', scenarios],
+    ['Market Context', intelligence],
+    ['Quantitative Outlook', intelligence],
+    ['System Health', system],
+  ]) {
+    assert.equal(sourceText.split(text).length - 1, 1, `${text} must render once`)
+  }
+  assert.equal(dashboard.split('<PrimaryMarketScenario').length - 1, 1)
+})
+
+test('overview does not render legacy decision authority or old forward scenarios', async () => {
+  const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
+  const overview = dashboard.slice(
+    dashboard.indexOf("{view === 'overview'"),
+    dashboard.indexOf("{view === 'signals'"),
+  )
+  for (const obsolete of [
+    'CurrentAnalyticalCycle',
+    'ForwardMarketScenarios',
+    'Current AI decision',
+    'Current analytical signal',
+    'Final action',
+  ]) {
+    assert.doesNotMatch(overview, new RegExp(obsolete))
+  }
+})
+
+test('quant outlook converts decimal returns to explicit XAUUSD points', async () => {
+  const intelligence = await source('src/components/ai-dashboard/IntelligenceCards.tsx')
+  assert.match(intelligence, /reference_price \* item\.expected_base_movement/)
+  assert.match(intelligence, /Converted XAUUSD move/)
+  assert.match(intelligence, /Raw model value/)
+  assert.match(intelligence, /decimal_return/)
+  assert.doesNotMatch(intelligence, />Expected move <strong>\{item\.expected_base_movement/)
 })
 
 test('completed cycles keep BUY or SELL analysis separate from execution status', async () => {

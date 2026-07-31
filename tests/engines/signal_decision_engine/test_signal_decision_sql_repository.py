@@ -113,7 +113,7 @@ async def test_sql_reads_active_filters_history_and_pruning() -> None:
 
 
 @pytest.mark.asyncio
-async def test_signal_email_outbox_is_inserted_in_the_decision_transaction_once() -> None:
+async def test_legacy_signal_without_primary_never_creates_email_outbox() -> None:
     signal_id = uuid4()
     value = decision().model_copy(
         update={
@@ -160,12 +160,12 @@ async def test_signal_email_outbox_is_inserted_in_the_decision_transaction_once(
     repository.find_by_fingerprint = AsyncMock(side_effect=[None, value])  # type: ignore[method-assign]
 
     assert await repository.save_decision(value) == value
-    assert db.execute.await_count == 4
+    assert db.execute.await_count == 3
     db.commit.assert_awaited_once()
 
     repository.find_by_fingerprint = AsyncMock(return_value=value)  # type: ignore[method-assign]
     await repository.save_decision(value)
-    assert db.execute.await_count == 4
+    assert db.execute.await_count == 3
 
 
 @pytest.mark.asyncio

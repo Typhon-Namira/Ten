@@ -1,65 +1,68 @@
-# Forward Market Scenario architecture
+# Scenario-first market intelligence architecture
 
-The Scenario Forecasting layer is additive. It does not replace or mutate AI
-interpretation, Quant forecasting, multi-timeframe signal synthesis, structural
-geometry, guardrails, final decisions, lifecycle, or publication.
+The M15 Primary Scenario is TEN's only production signal authority. Trend, SMC,
+liquidity, institutional flow, volume, regime, Quant, AI interpretation, and the
+M5/M15 synthesis remain immutable analytical inputs. They cannot independently
+publish a direction or geometry.
 
-## Data flow
+## Authoritative flow
 
 ```text
-Completed M5/M15 candle
+Completed UTC M5 and M15 candles
   -> point-in-time UnifiedMarketState
-  -> QuantForecastResult + validated AI interpretation
-  -> existing MultiTimeframeSignalSet
-  -> ScenarioForecastingEngine
-       -> M5 ForwardMarketScenario after an M5 close
-       -> M15 ForwardMarketScenario after an M15 close
-       -> CombinedForwardScenario after an M15 close
-  -> immutable scenario persistence
-  -> read-only dashboard projection
-
-Expired scenario + post-cutoff candles through expiry
-  -> ScenarioOutcome
-  -> completed-only calibration history
-  -> reliability annotation for later scenarios
+  -> Quant forecast + AI interpretation
+  -> supporting multi-timeframe synthesis
+  -> durable M15 simulation attempt (SCHEDULED -> RUNNING)
+  -> 5-10 diverse candidate paths
+  -> deterministic candidate scoring
+  -> Primary + materially distinct Alternative
+  -> Primary geometry validation
+  -> Signal Validation Engine (risk and publication guardrails only)
+  -> Authoritative Scenario Signal
+  -> dashboard + email + lifecycle + outcome + calibration
 ```
 
-## Ownership boundaries
+The validator may block the Primary but cannot originate or override its
+direction. No Primary means no user-facing BUY/SELL and no email.
 
-- Existing components remain the owners of evidence extraction, scoring,
-  direction, structural geometry, guardrails, final action, lifecycle and
-  publication.
-- Scenario Forecasting consumes their immutable outputs and owns only
-  forward-path hypotheses, scenario geometry, scenario history, outcome
-  evaluation and calibration.
-- Scenario geometry never overwrites structural geometry and is never fed into
-  publication implicitly.
-- The dashboard endpoint only reads persisted scenario records and never invokes
-  the engine or an AI provider.
+## M15 timing and synchronization
 
-## Point-in-time rules
+- Provider candles use an inclusive open and exclusive close interval. A
+  `10:00` M15 candle becomes eligible at `10:15:00 UTC`, never at `10:14:59`.
+- The authoritative cutoff is the completed M15 close.
+- The M5 source is the latest completed M5 cutoff at or before that M15 cutoff;
+  processing timestamps do not need to match.
+- Future M5 evidence is prohibited.
+- M5 updates between closes never hide the last still-authoritative M15 Primary.
 
-- A scenario requires a fresh frame whose source close equals its expected close.
-- All inputs must share one market-state and cycle lineage.
-- The next-candle Quant horizon (`candle_count == 1`) is selected explicitly.
-- M5 comparison input must have a cutoff at or before the M15 cutoff and remain
-  unexpired.
-- Outcome evaluation accepts only candles whose timestamp is at or after the
-  scenario cutoff and whose completed close is at or before expiry.
-- Calibration accepts only outcomes completed at or after scenario expiry.
+## Durable lifecycle and recovery
 
-## Deterministic geometry
+Every eligible M15 cutoff has one idempotency boundary:
 
-Direction and explanation may consume the existing AI interpretation indirectly
-through the validated multi-timeframe synthesis. All prices are deterministic:
+```text
+instrument + M15 + market_cutoff + simulation_version
+```
 
-- expected movement and range come from the Quant next-candle horizon;
-- entry is current price or an already-validated, reachable structural entry;
-- reachability is bounded by expected movement and a percentage ceiling;
-- a structural fact identifier is mandatory;
-- stop distance and target distance are bounded fractions of expected movement;
-- ordering, target traversal, invalidation traversal, minimum risk/reward and
-  expected-move bounds are validated before geometry is persisted.
+The attempt ledger records `SCHEDULED`, `RUNNING`, `SUCCESS`, `NO_SIGNAL`,
+`ANALYTICAL_ONLY`, `BLOCKED`, `FAILED`, or `SKIPPED`, including exact
+eligibility, synchronization, failure, and candidate details. `PENDING` is a
+presentation state only when no attempt exists; it is not persisted as a
+terminal result.
 
-A valid analytical scenario may therefore persist with unavailable execution
-geometry and an exact rejection reason.
+The integration worker performs a bounded startup recovery of the latest
+persisted M15 UnifiedMarketState. It uses only Quant and synthesis artifacts
+belonging to that immutable state, so recovery cannot introduce future data.
+The durable integration outbox then continues processing older unpublished
+market events in chronological order.
+
+## Dashboard authority
+
+Overview reads the latest authoritative attempt and latest M15 selection by
+market cutoff, not by the latest legacy M5 analytical cycle. A newer terminal
+`NO_SIGNAL`, `BLOCKED`, `FAILED`, or `SKIPPED` result replaces the older signal.
+A currently running next cutoff may retain the previous valid Primary until the
+new attempt resolves.
+
+Legacy analysis and decision records remain readable for audit. They are not
+rendered on Overview, do not provide fallback direction or geometry, and cannot
+enqueue signal email without a Primary Scenario ID.

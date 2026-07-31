@@ -34,7 +34,7 @@ export function SystemStatusPanel({ data }: { data: DashboardSystemStatus | null
   }
   return <>
     <section className="ai-card ai-card--wide system-map">
-      <SectionHeader eyebrow="Backend authoritative" title="Pipeline timeline" action={<GitCommitHorizontal size={19} />} />
+      <SectionHeader eyebrow="Scenario authority operations" title="System Health" action={<GitCommitHorizontal size={19} />} />
       <div className="system-map__stages">
         {data.stages.map((stage, index) => <div className={`system-stage system-stage--${stage.status}`} key={stage.id}>
           <span className="system-stage__number">{index + 1}</span>

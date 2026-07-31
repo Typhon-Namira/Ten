@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from backend.app.core.config import Settings
 from backend.app.signal_notifications.service import render_signal_email
 
@@ -50,31 +52,18 @@ def payload(*, blocked: bool = False) -> dict[str, object]:
     }
 
 
-def test_executable_email_contains_complete_same_cycle_contract() -> None:
-    subject, body = render_signal_email(payload())
-
-    assert subject.startswith("[TEN AI] XAUUSD BUY")
-    for expected in (
-        "TEN AI ANALYTICAL PLATFORM",
-        "M5: BUY",
-        "M15: BUY",
-        "Entry Price: 4026.89",
-        "Stop Loss: 4018.0",
-        "Take Profit: 4045.0",
-        "Risk/Reward: 2.04",
-        "Cycle ID: cycle",
-        "Decision ID: decision",
+def test_legacy_signal_email_is_rejected_without_primary_authority() -> None:
+    with pytest.raises(
+        ValueError, match="requires an authoritative Primary Scenario"
     ):
-        assert expected in body
+        render_signal_email(payload())
 
 
-def test_blocked_email_prominently_preserves_guardrail_reason() -> None:
-    subject, body = render_signal_email(payload(blocked=True))
-
-    assert subject.startswith("[TEN AI][BLOCKED]")
-    assert "cooldown_active" in subject
-    assert "Publication status: INELIGIBLE" in body
-    assert "Guardrail status: REJECTED" in body
+def test_blocked_legacy_signal_email_is_also_rejected() -> None:
+    with pytest.raises(
+        ValueError, match="requires an authoritative Primary Scenario"
+    ):
+        render_signal_email(payload(blocked=True))
 
 
 def test_primary_scenario_email_uses_authoritative_contract() -> None:
