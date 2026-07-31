@@ -445,6 +445,19 @@ async def _completed_cycle_projection(
     scenario_repository = getattr(
         request.app.state, "scenario_forecast_repository", None
     )
+    simulation_repository = getattr(
+        request.app.state, "market_simulation_repository", None
+    )
+    primary_scenario = (
+        await simulation_repository.for_state(signal.snapshot_id)
+        if simulation_repository is not None
+        else None
+    )
+    ranked_scenarios = (
+        await simulation_repository.candidates(primary_scenario.simulation_cycle_id)
+        if simulation_repository is not None and primary_scenario is not None
+        else ()
+    )
     m5_scenario = (
         await scenario_repository.latest_scenario(
             instrument,
@@ -596,6 +609,17 @@ async def _completed_cycle_projection(
                 else signal.signal_id
             ),
         },
+        "primary_scenario": {
+            "status": "healthy" if primary_scenario is not None else "no_data",
+            "reason": (
+                "authoritative_m15_primary_scenario_persisted"
+                if primary_scenario is not None
+                else "awaiting_authoritative_m15_simulation"
+            ),
+            "record_id": (
+                str(primary_scenario.selection_id) if primary_scenario is not None else None
+            ),
+        },
         "guardrails": {
             "status": "healthy",
             "reason": "deterministic_guardrails_completed",
@@ -668,14 +692,44 @@ async def _completed_cycle_projection(
         else None
     )
     analytical_direction = (
-        combined_signal.analytical_direction.value
+        primary_scenario.authoritative_action.value
+        if primary_scenario is not None
+        else combined_signal.analytical_direction.value
         if combined_signal is not None
         else signal.signal.value
     )
-    geometry = _geometry_projection(
-        multi_timeframe_signal,
-        minimum_risk_reward=minimum_rr,
-        now=now,
+    primary_candidate = primary_scenario.primary if primary_scenario is not None else None
+    primary_geometry = primary_candidate.geometry if primary_candidate is not None else None
+    geometry = (
+        {
+            "owner_timeframe": "M15",
+            "direction": primary_scenario.authoritative_action.value,
+            "entry": primary_geometry.entry,
+            "entry_zone": primary_geometry.entry_zone.model_dump(mode="json"),
+            "stop_loss": primary_geometry.stop_loss,
+            "take_profit": primary_geometry.take_profit,
+            "secondary_target": primary_geometry.secondary_target,
+            "risk_reward_ratio": primary_geometry.risk_reward_ratio,
+            "required_minimum_risk_reward": minimum_rr,
+            "basis_fact_identifiers": list(
+                primary_geometry.basis_fact_identifiers
+            ),
+            "validation_status": primary_candidate.geometry_validity.value,
+            "entry_type": primary_candidate.entry_type.value,
+            "created_at": primary_scenario.selected_at,
+            "expires_at": primary_candidate.expiry,
+        }
+        if primary_scenario is not None
+        and primary_scenario.signal_eligible
+        and primary_candidate is not None
+        and primary_geometry is not None
+        else _geometry_projection(
+            multi_timeframe_signal,
+            minimum_risk_reward=minimum_rr,
+            now=now,
+        )
+        if primary_scenario is None
+        else None
     )
     guardrail_blockers = [
         item.model_dump(mode="json") for item in decision.blockers
@@ -723,6 +777,16 @@ async def _completed_cycle_projection(
             "analytical_intelligence_only": True,
             "broker_execution": False,
         },
+        "primary_market_scenario": (
+            primary_scenario.model_dump(mode="json")
+            | {
+                "ranked_candidates": [
+                    item.model_dump(mode="json") for item in ranked_scenarios
+                ]
+            }
+            if primary_scenario is not None
+            else None
+        ),
         "timeframe_matrix": (
             [
                 item.model_dump(mode="json")
@@ -742,12 +806,24 @@ async def _completed_cycle_projection(
         "analytical_direction": {
             "direction": analytical_direction,
             "confidence": (
-                combined_signal.confidence
+                primary_candidate.final_scenario_score
+                if primary_candidate is not None
+                else combined_signal.confidence
                 if combined_signal is not None
                 else signal.signal_confidence
             ),
             "strength": (
-                combined_signal.strength.value
+                (
+                    "VERY_STRONG"
+                    if primary_candidate.final_scenario_score >= 85
+                    else "STRONG"
+                    if primary_candidate.final_scenario_score >= 70
+                    else "MODERATE"
+                    if primary_candidate.final_scenario_score >= 55
+                    else "WEAK"
+                )
+                if primary_candidate is not None
+                else combined_signal.strength.value
                 if combined_signal is not None
                 else signal.strength.value
             ),
@@ -765,19 +841,38 @@ async def _completed_cycle_projection(
         "structural_trade_setup": geometry,
         "execution_eligibility": {
             "status": (
-                combined_signal.execution_status.value
+                "READY"
+                if primary_scenario is not None and primary_scenario.signal_eligible
+                else "BLOCKED"
+                if primary_scenario is not None
+                else combined_signal.execution_status.value
                 if combined_signal is not None
                 else signal.execution_status.value
             ),
             "blockers": (
-                list(combined_signal.blocking_reasons)
+                (
+                    []
+                    if primary_scenario.signal_eligible
+                    else [
+                        primary_scenario.rejection_reason
+                        or primary_candidate.rejection_reason
+                        if primary_candidate is not None
+                        else "primary_scenario_unavailable"
+                    ]
+                )
+                if primary_scenario is not None
+                else list(combined_signal.blocking_reasons)
                 if combined_signal is not None
                 else list(signal.blocking_reasons)
             ),
         },
         "confidence_semantics": {
             "analytical_confidence": (
-                combined_signal.confidence if combined_signal is not None else None
+                primary_candidate.final_scenario_score
+                if primary_candidate is not None
+                else combined_signal.confidence
+                if combined_signal is not None
+                else None
             ),
             "ai_interpretation_confidence": (
                 analysis.output.analysis_confidence * 100

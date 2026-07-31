@@ -8,7 +8,11 @@ from uuid import NAMESPACE_URL, uuid5
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.market_state import UnifiedMarketState
-from backend.app.quant_forecasting.models import HorizonPrediction, QuantForecastResult
+from backend.app.quant_forecasting.models import (
+    ForecastValueUnit,
+    HorizonPrediction,
+    QuantForecastResult,
+)
 from backend.app.signal_synthesis.models import (
     AnalyticalDirection,
     MultiTimeframeSignalSet,
@@ -27,6 +31,7 @@ from .models import (
     ScenarioValidity,
 )
 from .validation import GeometryCandidate, validate_geometry
+from .instrument import InstrumentSpecification, convert_prediction_move
 
 
 class ScenarioForecastingConfig(BaseModel):
@@ -71,6 +76,25 @@ class ScenarioForecastingEngine:
         if frame.source_candle_close_at != frame.expected_candle_close_at or frame.stale:
             raise ValueError("scenario requires a fresh completed source candle")
         prediction = self._prediction(quant, timeframe)
+        conversion = convert_prediction_move(prediction, InstrumentSpecification())
+        factor = (
+            prediction.reference_price
+            if prediction.expected_base_movement_unit
+            == ForecastValueUnit.DECIMAL_RETURN
+            else prediction.reference_price / 100
+            if prediction.expected_base_movement_unit == ForecastValueUnit.PERCENT
+            else 1.0
+        )
+        prediction = prediction.model_copy(
+            update={
+                "expected_minimum_movement": prediction.expected_minimum_movement
+                * factor,
+                "expected_base_movement": conversion.converted_expected_move,
+                "expected_maximum_movement": prediction.expected_maximum_movement
+                * factor,
+                "expected_base_movement_unit": ForecastValueUnit.PRICE_POINTS,
+            }
+        )
         signal = next(
             item for item in synthesis.timeframe_signals if item.timeframe == timeframe
         )

@@ -4,6 +4,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -264,6 +265,7 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
             if (
                 self.signal_email_enabled
                 and decision.mode == DecisionMode.LIVE
+                and decision.publication_eligible
                 and notification is not None
                 and notification.get("direction") in {"BUY", "SELL"}
                 and all(
@@ -271,6 +273,8 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
                     for field in ("entry", "stop_loss", "take_profit", "risk_reward")
                 )
                 and float(notification["risk_reward"]) > 0
+                and float(notification.get("primary_scenario_score", 100))
+                >= float(notification.get("email_threshold", 0))
                 and decision.decided_at < decision.valid_until
                 and (
                     notification_expires_at is None
@@ -294,11 +298,31 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
                         for item in (*decision.blockers, *decision.warnings)
                     ],
                 }
+                deduplication_key = sha256(
+                    "|".join(
+                        str(value)
+                        for value in (
+                            decision.instrument,
+                            notification.get("market_cutoff", decision.as_of.isoformat()),
+                            notification.get("primary_scenario_id", notification["signal_id"]),
+                            notification["direction"],
+                            notification["entry"],
+                            notification["stop_loss"],
+                            notification["take_profit"],
+                        )
+                    ).encode()
+                ).hexdigest()
                 await self.session.execute(
                     insert(SignalEmailOutboxRecord)
                     .values(
                         id=stable_id("signal-email", notification["signal_id"]),
                         signal_id=UUID(str(notification["signal_id"])),
+                        primary_scenario_id=(
+                            UUID(str(notification["primary_scenario_id"]))
+                            if notification.get("primary_scenario_id")
+                            else None
+                        ),
+                        deduplication_key=deduplication_key,
                         decision_id=decision.decision_id,
                         recipient=self.signal_email_recipient,
                         status="PENDING",
@@ -308,7 +332,7 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
                         created_at=now,
                         updated_at=now,
                     )
-                    .on_conflict_do_nothing(index_elements=["signal_id"])
+                    .on_conflict_do_nothing()
                 )
             await self.session.commit()
             return await self.find_by_fingerprint(decision.input_fingerprint, decision.mode) or decision

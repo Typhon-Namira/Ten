@@ -72,6 +72,32 @@ def test_scenario_forecasting_migration_is_traceable_and_reversible() -> None:
     assert "ondelete=\"CASCADE\"" in source
 
 
+def test_primary_scenario_simulation_migration_is_normalized_and_reversible() -> None:
+    source = (
+        ROOT
+        / "migrations/versions/20260730_0017_primary_scenario_simulation.py"
+    ).read_text(encoding="utf-8")
+    tables = (
+        "market_simulation_cycles",
+        "candidate_market_scenarios",
+        "scenario_path_stages",
+        "scenario_score_components",
+        "primary_scenario_selections",
+        "primary_scenario_geometries",
+        "scenario_lifecycle_transitions",
+        "scenario_calibration_metrics",
+        "candidate_scenario_outcomes",
+    )
+    for table in tables:
+        assert f'"{table}"' in source
+        assert f'op.drop_table("{table}")' in source
+    assert 'down_revision = "20260730_0016"' in source
+    assert "ux_market_simulation_boundary" in source
+    assert "ux_candidate_market_scenario_diversity" in source
+    assert 'ondelete="CASCADE"' in source
+    assert 'ondelete="RESTRICT"' in source
+
+
 def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     source = (
         ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"

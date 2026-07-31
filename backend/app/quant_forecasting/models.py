@@ -41,6 +41,14 @@ class CalibrationStatus(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class ForecastValueUnit(StrEnum):
+    DECIMAL_RETURN = "decimal_return"
+    PERCENT = "percent"
+    PRICE_POINTS = "price_points"
+    NORMALIZED = "normalized"
+    UNKNOWN = "unknown"
+
+
 class ForecastHorizon(ImmutableForecastModel):
     horizon_id: str
     timeframe: str
@@ -146,9 +154,11 @@ class HorizonPrediction(ImmutableForecastModel):
     neutral_probability: float = Field(ge=0, le=1)
     expected_return: float
     expected_base_movement: float = Field(ge=0)
+    expected_base_movement_unit: ForecastValueUnit = ForecastValueUnit.DECIMAL_RETURN
     expected_minimum_movement: float = Field(ge=0)
     expected_maximum_movement: float = Field(ge=0)
     expected_volatility: float = Field(ge=0)
+    expected_volatility_unit: ForecastValueUnit = ForecastValueUnit.DECIMAL_RETURN
     expected_mfe: float = Field(ge=0)
     expected_mae: float = Field(ge=0)
     tp1_probability: float = Field(ge=0, le=1)

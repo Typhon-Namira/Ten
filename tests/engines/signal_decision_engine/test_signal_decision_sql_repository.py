@@ -117,6 +117,7 @@ async def test_signal_email_outbox_is_inserted_in_the_decision_transaction_once(
     signal_id = uuid4()
     value = decision().model_copy(
         update={
+            "publication_eligible": True,
             "notification_context": {
                 "signal_id": str(signal_id),
                 "analysis_id": str(uuid4()),
@@ -168,16 +169,16 @@ async def test_signal_email_outbox_is_inserted_in_the_decision_transaction_once(
 
 
 @pytest.mark.asyncio
-async def test_signal_without_complete_geometry_does_not_enqueue_email() -> None:
+async def test_publication_blocked_signal_does_not_enqueue_email_even_with_geometry() -> None:
     value = decision().model_copy(
         update={
             "notification_context": {
                 "signal_id": str(uuid4()),
                 "direction": "SELL",
-                "entry": None,
-                "stop_loss": None,
-                "take_profit": None,
-                "risk_reward": None,
+                "entry": 4026.0,
+                "stop_loss": 4030.0,
+                "take_profit": 4018.0,
+                "risk_reward": 2.0,
             }
         }
     )

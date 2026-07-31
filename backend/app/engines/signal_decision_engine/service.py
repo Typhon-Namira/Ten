@@ -202,6 +202,7 @@ class SignalDecisionService:
             quantitative_forecast_id=getattr(request, "quantitative_forecast_id", None),
             current_price=getattr(request, "current_price", None),
             expected_move=getattr(request, "expected_move", None),
+            current_primary_scenario=getattr(request, "current_primary_scenario", None),
             mode=request.mode,
             policy_name=policy_name,
             policy_version=policy_version,

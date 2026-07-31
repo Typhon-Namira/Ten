@@ -127,6 +127,20 @@ class Settings(BaseSettings):
     email_from: str | None = None
     signal_email_poll_seconds: float = Field(default=10, ge=1, le=300)
     signal_email_max_attempts: int = Field(default=5, ge=1, le=20)
+    scenario_minimum_candidates: int = Field(default=5, ge=5, le=10)
+    scenario_maximum_candidates: int = Field(default=7, ge=5, le=10)
+    primary_scenario_threshold: float = Field(default=60, ge=0, le=100)
+    primary_scenario_email_threshold: float = Field(default=60, ge=0, le=100)
+    primary_scenario_minimum_risk_reward: float = Field(default=2.0, gt=0)
+    primary_scenario_maximum_entry_distance_percent: float = Field(default=0.003, gt=0, le=0.02)
+    primary_scenario_expiry_seconds: int = Field(default=900, ge=300, le=3600)
+    scenario_calibration_minimum_sample: int = Field(default=30, ge=1)
+    xauusd_tick_size: float = Field(default=0.01, gt=0)
+    xauusd_display_precision: int = Field(default=2, ge=0, le=8)
+    xauusd_minimum_stop_distance: float = Field(default=0.10, gt=0)
+    xauusd_minimum_target_distance: float = Field(default=0.20, gt=0)
+    xauusd_minimum_meaningful_move: float = Field(default=0.10, gt=0)
+    xauusd_maximum_expected_move_percent: float = Field(default=0.02, gt=0, le=0.25)
 
     @property
     def signal_email_configuration_errors(self) -> tuple[str, ...]:

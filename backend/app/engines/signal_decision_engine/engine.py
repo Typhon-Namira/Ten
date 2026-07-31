@@ -47,6 +47,19 @@ class ConservativeSignalDecisionPolicy:
         score = decision_input.ai_score
         direction = DecisionDirection(self.config.direction_mapping[score.directional_label.value])
         strength = abs(score.directional_score)
+        primary_selection = decision_input.current_primary_scenario
+        primary = primary_selection.primary if primary_selection is not None else None
+        primary_authority_required = bool(
+            decision_input.market_snapshot_id is not None
+            and decision_input.timeframe == "M15"
+        )
+        if primary_selection is not None:
+            direction = {
+                "BUY": DecisionDirection.BULLISH,
+                "SELL": DecisionDirection.BEARISH,
+                "HOLD": DecisionDirection.NEUTRAL,
+            }[primary_selection.authoritative_action.value]
+            strength = primary.final_scenario_score if primary is not None else 0.0
         age = (decision_input.as_of - score.as_of).total_seconds()
         window = self.config.freshness[decision_input.timeframe]
         evaluations: list[RuleEvaluation] = []
@@ -116,7 +129,24 @@ class ConservativeSignalDecisionPolicy:
                 "ai_analysis_unavailable",
             )
         signal_aligned = False
-        if analysis_signal is None:
+        if primary_authority_required:
+            signal_aligned = bool(
+                primary_selection is not None
+                and primary is not None
+                and primary_selection.authoritative_action.value in {"BUY", "SELL"}
+            )
+            rule(
+                "ai.signal_authority",
+                RuleOutcome.PASSED if signal_aligned else RuleOutcome.NOT_EVALUATED,
+                RuleSeverity.INFORMATIONAL,
+                (
+                    "primary_scenario_authority_selected"
+                    if signal_aligned
+                    else "primary_scenario_authority_unavailable"
+                ),
+                str(primary_selection.selection_id) if primary_selection else None,
+            )
+        elif analysis_signal is None:
             rule(
                 "ai.signal_authority",
                 RuleOutcome.NOT_EVALUATED,
@@ -150,19 +180,32 @@ class ConservativeSignalDecisionPolicy:
                 analysis_signal.signal.value,
                 direction.value,
             )
-        geometry_valid = bool(
-            analysis_signal is not None
-            and analysis_signal.signal
-            in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
-            and analysis_signal.entry is not None
-            and analysis_signal.stop_loss is not None
-            and analysis_signal.take_profit is not None
-            and analysis_signal.risk_reward_ratio is not None
-            and analysis_signal.risk_reward_ratio
-            >= self.config.minimum_risk_reward
+        geometry_valid = (
+            bool(
+                primary_selection is not None
+                and primary_selection.signal_eligible
+                and primary is not None
+                and primary.geometry_validity.value == "VALID"
+                and primary.geometry is not None
+                and primary.geometry.risk_reward_ratio >= self.config.minimum_risk_reward
+            )
+            if primary_authority_required
+            else bool(
+                analysis_signal is not None
+                and analysis_signal.signal
+                in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
+                and analysis_signal.entry is not None
+                and analysis_signal.stop_loss is not None
+                and analysis_signal.take_profit is not None
+                and analysis_signal.risk_reward_ratio is not None
+                and analysis_signal.risk_reward_ratio
+                >= self.config.minimum_risk_reward
+            )
         )
         geometry_not_applicable = bool(
-            analysis_signal is None
+            primary_selection is None or primary is None
+            if primary_authority_required
+            else analysis_signal is None
             or analysis_signal.signal == AnalysisSignalAction.HOLD
         )
         rule(
@@ -187,7 +230,9 @@ class ConservativeSignalDecisionPolicy:
                 else "structural_geometry_below_minimum_risk_reward"
             ),
             (
-                analysis_signal.risk_reward_ratio
+                primary.geometry.risk_reward_ratio
+                if primary_authority_required and primary is not None and primary.geometry is not None
+                else analysis_signal.risk_reward_ratio
                 if analysis_signal is not None
                 else None
             ),
@@ -328,16 +373,24 @@ class ConservativeSignalDecisionPolicy:
             state == DecisionState.ELIGIBLE
             and direction != DecisionDirection.NEUTRAL
             and analysis_valid
-            and analysis_signal is not None
-            and analysis_signal.signal
-            in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
             and signal_aligned
             and geometry_valid
+            and (
+                primary_selection is not None
+                if primary_authority_required
+                else analysis_signal is not None
+                and analysis_signal.signal
+                in {AnalysisSignalAction.BUY, AnalysisSignalAction.SELL}
+            )
         )
         if not actionable and not hard and not insufficient:
             hold_reason = (
                 "validated_ai_analysis_unavailable"
                 if not analysis_valid
+                else "primary_scenario_unavailable"
+                if primary_authority_required and primary_selection is None
+                else "primary_scenario_insufficient_confidence"
+                if primary_authority_required and primary is None
                 else "analysis_signal_unavailable"
                 if analysis_signal is None
                 else "analysis_signal_hold"
@@ -351,7 +404,9 @@ class ConservativeSignalDecisionPolicy:
             soft.append(hold_warning)
 
         ai_confidence = (
-            float(analysis_signal.confidence)
+            primary.final_scenario_score
+            if primary_authority_required and primary is not None
+            else float(analysis_signal.confidence)
             if analysis_signal is not None
             else 0.0
         )
@@ -400,12 +455,16 @@ class ConservativeSignalDecisionPolicy:
         previous = decision_input.history.latest
         active = decision_input.history.active
         final_action = (
-            FinalSignalAction.BUY
-            if analysis_signal is not None
-            and analysis_signal.signal == AnalysisSignalAction.BUY
+            (
+                FinalSignalAction(primary_selection.authoritative_action.value)
+                if primary_selection is not None
+                else FinalSignalAction.HOLD
+            )
+            if primary_authority_required
+            else FinalSignalAction.BUY
+            if analysis_signal is not None and analysis_signal.signal == AnalysisSignalAction.BUY
             else FinalSignalAction.SELL
-            if analysis_signal is not None
-            and analysis_signal.signal == AnalysisSignalAction.SELL
+            if analysis_signal is not None and analysis_signal.signal == AnalysisSignalAction.SELL
             else FinalSignalAction.HOLD
         )
         entry_low: float | None = None
@@ -415,17 +474,34 @@ class ConservativeSignalDecisionPolicy:
         risk_reward: float | None = None
         invalidation: str | None = None
         if actionable:
-            assert analysis_signal is not None
-            assert analysis_signal.entry is not None
-            assert analysis_signal.stop_loss is not None
-            assert analysis_signal.take_profit is not None
-            assert analysis_signal.risk_reward_ratio is not None
-            entry_low = analysis_signal.entry
-            entry_high = analysis_signal.entry
-            stop_loss = analysis_signal.stop_loss
-            take_profit_targets = (analysis_signal.take_profit,)
-            risk_reward = analysis_signal.risk_reward_ratio
+            if primary_authority_required:
+                assert primary is not None and primary.geometry is not None
+                entry_low = primary.geometry.entry_zone.low
+                entry_high = primary.geometry.entry_zone.high
+                stop_loss = primary.geometry.stop_loss
+                take_profit_targets = (primary.geometry.take_profit,)
+                if primary.geometry.secondary_target is not None:
+                    take_profit_targets += (primary.geometry.secondary_target,)
+                risk_reward = primary.geometry.risk_reward_ratio
+                invalidation = primary.trigger_condition + "; " + (
+                    f"invalid beyond {primary.invalidation_level:.2f}"
+                    if primary.invalidation_level is not None
+                    else "scenario structural invalidation"
+                )
+            else:
+                assert analysis_signal is not None
+                assert analysis_signal.entry is not None
+                assert analysis_signal.stop_loss is not None
+                assert analysis_signal.take_profit is not None
+                assert analysis_signal.risk_reward_ratio is not None
+                entry_low = analysis_signal.entry
+                entry_high = analysis_signal.entry
+                stop_loss = analysis_signal.stop_loss
+                take_profit_targets = (analysis_signal.take_profit,)
+                risk_reward = analysis_signal.risk_reward_ratio
             invalidation = (
+                invalidation
+                or
                 analysis.output.invalidation_conditions[0]
                 if analysis is not None
                 and analysis.output is not None
@@ -576,6 +652,9 @@ class ConservativeSignalDecisionPolicy:
                 ),
                 historical_ai_analysis_ids=historical_ids,
                 quantitative_forecast_id=decision_input.quantitative_forecast_id,
+                primary_scenario_selection_id=(
+                    primary_selection.selection_id if primary_selection is not None else None
+                ),
                 strategy_evaluation_ids=tuple(item.rule_id for item in evaluations),
                 temporal_context_version=(
                     decision_input.temporal_context.version
@@ -588,6 +667,44 @@ class ConservativeSignalDecisionPolicy:
             ),
             publication_eligible=actionable,
             notification_context=(
+                {
+                    "signal_id": str(primary_selection.selection_id),
+                    "primary_scenario_id": str(primary.candidate_id),
+                    "alternative_scenario_id": (
+                        str(primary_selection.alternative_candidate_id)
+                        if primary_selection.alternative_candidate_id
+                        else None
+                    ),
+                    "cycle_id": str(primary_selection.cycle_id),
+                    "direction": primary_selection.authoritative_action.value,
+                    "primary_scenario_score": primary.final_scenario_score,
+                    "email_threshold": primary_selection.minimum_score,
+                    "scenario_type": primary.scenario_type,
+                    "market_cutoff": primary.market_cutoff.isoformat(),
+                    "reference_price": primary.reference_price,
+                    "expected_path": primary.deterministically_validated_path,
+                    "entry_type": primary.entry_type.value,
+                    "entry_zone": primary.geometry.entry_zone.model_dump()
+                    if primary.geometry else None,
+                    "entry": primary.geometry.entry if primary.geometry else None,
+                    "stop_loss": primary.geometry.stop_loss if primary.geometry else None,
+                    "take_profit": primary.geometry.take_profit if primary.geometry else None,
+                    "risk_reward": primary.geometry.risk_reward_ratio if primary.geometry else None,
+                    "invalidation": invalidation,
+                    "expires_at": primary.expiry.isoformat(),
+                    "supporting_evidence": primary.supporting_evidence_ids[:5],
+                    "alternative_summary": (
+                        {
+                            "direction": primary_selection.alternative.direction.value,
+                            "scenario_type": primary_selection.alternative.scenario_type,
+                            "score": primary_selection.alternative.final_scenario_score,
+                        }
+                        if primary_selection.alternative is not None
+                        else None
+                    ),
+                }
+                if primary_authority_required and primary_selection is not None and primary is not None
+                else
                 {
                     "signal_id": str(analysis_signal.signal_id),
                     "analysis_id": str(analysis_signal.analysis_id),

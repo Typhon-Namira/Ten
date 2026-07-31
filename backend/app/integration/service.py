@@ -57,7 +57,7 @@ def _stage_status(result: object) -> str:
 class FullSystemIntegrationService:
     """Coordinates existing engines at a final-candle boundary; contains no analytics."""
 
-    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, signal_synthesizer: Any | None = None, signal_synthesis_repository: Any | None = None, scenario_forecasting: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
+    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, signal_synthesizer: Any | None = None, signal_synthesis_repository: Any | None = None, scenario_forecasting: Any | None = None, market_simulation: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
         self.event_bus, self.repository, self.config = event_bus, repository, config
         self.market_data, self.smc, self.liquidity = market_data, smc, liquidity
         self.volume_profile, self.institutional_flow = volume_profile, institutional_flow
@@ -72,6 +72,7 @@ class FullSystemIntegrationService:
         self.signal_synthesizer = signal_synthesizer
         self.signal_synthesis_repository = signal_synthesis_repository
         self.scenario_forecasting = scenario_forecasting
+        self.market_simulation = market_simulation
         self.ai_centric_shadow_mode = ai_centric_shadow_mode
         self._unsubscribe: Callable[[], None] | None = None
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -254,6 +255,7 @@ class FullSystemIntegrationService:
             tracker.mark(symbol, timeframe.value, boundary, ("candle_received", "candle_normalized", "stored_in_database"), "success")
         outputs: list[tuple[str, object]] = []
         validated_analysis = None
+        primary_scenario = None
         market_state = None
         quantitative_forecast = None
         failure_stage = "market_data_history"
@@ -470,6 +472,16 @@ class FullSystemIntegrationService:
                                         candles=tuple(candles),
                                         evaluated_at=max(self.clock(), boundary),
                                     )
+                                if self.market_simulation is not None:
+                                    failure_stage = "market_simulation"
+                                    primary_scenario = await self.market_simulation.process(
+                                        market_state,
+                                        quantitative_forecast,
+                                        synthesis,
+                                        trigger_timeframe=timeframe.value,
+                                        candles=tuple(candles),
+                                        evaluated_at=max(self.clock(), boundary),
+                                    )
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)
             failure_stage = "evidence_assembly"
@@ -546,11 +558,12 @@ class FullSystemIntegrationService:
                             else None
                         ),
                         expected_move=(
-                            getattr(prediction, "expected_base_movement", None)
-                            if prediction
-                            and getattr(prediction, "expected_base_movement", 0) > 0
+                            primary_scenario.primary.expected_move
+                            if primary_scenario is not None
+                            and primary_scenario.primary is not None
                             else None
                         ),
+                        current_primary_scenario=primary_scenario,
                     )
                 )
                 self.last_decision_persisted_at = self.clock()
