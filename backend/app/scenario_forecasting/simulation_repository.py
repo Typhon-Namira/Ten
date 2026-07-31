@@ -119,7 +119,11 @@ class InMemoryMarketSimulationRepository:
                 and not (
                     existing.status == SimulationAttemptStatus.BLOCKED
                     and existing.failure_type
-                    in {"AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING"}
+                    in {
+                        "AI_ANALYSIS_MISSING",
+                        "AI_ANALYSIS_PENDING",
+                        "SIMULATION_NOT_INVOKED",
+                    }
                 )
             ):
                 return existing
@@ -141,7 +145,11 @@ class InMemoryMarketSimulationRepository:
                     and not (
                         existing.status == SimulationAttemptStatus.BLOCKED
                         and existing.failure_type
-                        in {"AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING"}
+                        in {
+                            "AI_ANALYSIS_MISSING",
+                            "AI_ANALYSIS_PENDING",
+                            "SIMULATION_NOT_INVOKED",
+                        }
                     )
                 )
             ):
@@ -389,7 +397,11 @@ class SqlAlchemyMarketSimulationRepository(ScopedSessionRepository):
                             == "BLOCKED"
                         )
                         & AuthoritativeSimulationAttemptRecord.failure_type.in_(
-                            ("AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING")
+                            (
+                                "AI_ANALYSIS_MISSING",
+                                "AI_ANALYSIS_PENDING",
+                                "SIMULATION_NOT_INVOKED",
+                            )
                         ),
                     ),
                 )

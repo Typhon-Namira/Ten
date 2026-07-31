@@ -94,7 +94,11 @@ class MarketSimulationService:
             and not (
                 existing.status == SimulationAttemptStatus.BLOCKED
                 and existing.failure_type
-                in {"AI_ANALYSIS_MISSING", "AI_ANALYSIS_PENDING"}
+                in {
+                    "AI_ANALYSIS_MISSING",
+                    "AI_ANALYSIS_PENDING",
+                    "SIMULATION_NOT_INVOKED",
+                }
             )
         ):
             return await self.repository.at_cutoff(

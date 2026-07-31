@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 
@@ -296,6 +297,36 @@ async def test_service_persists_one_idempotent_scenario_and_m15_combination() ->
     assert len(repository.scenarios) == 2
     assert combined is not None
     assert combined.m5_scenario_id == first.scenario_id
+
+
+@pytest.mark.asyncio
+async def test_service_accepts_pipeline_correlation_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state, quant, synthesis = await scenario_inputs()
+    service = ScenarioForecastingService(
+        InMemoryScenarioForecastRepository(), ScenarioForecastingEngine()
+    )
+    correlation_id = uuid4()
+    caplog.set_level("INFO", logger="backend.app.scenario_forecasting.service")
+
+    scenario, _ = await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M5",
+        candles=(),
+        evaluated_at=state.market_data_boundary,
+        correlation_id=correlation_id,
+    )
+
+    assert scenario is not None
+    record = next(
+        item
+        for item in caplog.records
+        if item.getMessage() == "scenario_forecast.created"
+    )
+    assert record.correlation_id == str(correlation_id)
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
+from uuid import UUID
 
 from backend.app.engines.market_data_engine.models import Candle
 from backend.app.market_state import UnifiedMarketState
@@ -37,6 +38,7 @@ class ScenarioForecastingService:
         trigger_timeframe: str,
         candles: tuple[Candle, ...],
         evaluated_at: datetime,
+        correlation_id: UUID | None = None,
     ) -> tuple[ForwardMarketScenario, CombinedForwardScenario | None]:
         if trigger_timeframe not in {"M5", "M15"}:
             raise ValueError("scenarios are generated only on M5/M15 candle close")
@@ -67,6 +69,7 @@ class ScenarioForecastingService:
             "scenario_forecast.created",
             extra={
                 "scenario_id": str(scenario.scenario_id),
+                "correlation_id": str(correlation_id) if correlation_id else None,
                 "cycle_id": str(scenario.cycle_id),
                 "market_state_id": str(scenario.market_state_id),
                 "instrument": scenario.instrument,
@@ -110,6 +113,9 @@ class ScenarioForecastingService:
                     "scenario_forecast.combined",
                     extra={
                         "combined_scenario_id": str(combined.combined_scenario_id),
+                        "correlation_id": (
+                            str(correlation_id) if correlation_id else None
+                        ),
                         "m5_scenario_id": str(combined.m5_scenario_id),
                         "m15_scenario_id": str(combined.m15_scenario_id),
                         "agreement": combined.agreement.value,
