@@ -1155,6 +1155,7 @@ class AIReasoningCycleLockRecord(Base):
     )
 
     idempotency_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    claim_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), unique=True, index=True)
     instrument: Mapped[str] = mapped_column(String(32), index=True)
     ums_boundary: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     cycle_version: Mapped[str] = mapped_column(String(32))
@@ -1170,7 +1171,20 @@ class AIReasoningCycleLockRecord(Base):
         String(128),
         nullable=True,
     )
-    status: Mapped[str] = mapped_column(String(24))
+    market_state_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    snapshot_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32))
     request_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("ai_reasoning_requests.request_id", ondelete="SET NULL"),
@@ -1190,6 +1204,11 @@ class AIReasoningCycleLockRecord(Base):
         index=True,
     )
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expired_claim_count: Mapped[int] = mapped_column(Integer, default=0)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     ai_max_output_tokens: int = Field(default=1400, ge=256, le=10_000)
     ai_input_token_budget: int = Field(default=3500, ge=512, le=100_000)
     ai_token_safety_margin: int = Field(default=256, ge=64, le=4096)
+    ai_claim_lease_seconds: int = Field(default=90, ge=30, le=600)
+    ai_claim_heartbeat_seconds: int = Field(default=20, ge=5, le=120)
+    ai_claim_max_runtime_seconds: int = Field(default=180, ge=60, le=1800)
     integration_enabled: bool = True
     live_pipeline_enabled: bool = True
     integration_worker_enabled: bool = False

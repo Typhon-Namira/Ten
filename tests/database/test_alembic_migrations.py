@@ -153,6 +153,29 @@ def test_scenario_waiting_and_email_delivery_migration_is_reversible() -> None:
     assert "op.drop_column" in source
 
 
+def test_ai_reasoning_claim_lease_migration_is_reversible() -> None:
+    source = (
+        ROOT / "migrations/versions/20260731_0021_ai_reasoning_claim_leases.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260731_0021"' in source
+    assert 'down_revision = "20260731_0020"' in source
+    for field in (
+        "claim_id",
+        "market_state_id",
+        "snapshot_id",
+        "claimed_by",
+        "heartbeat_at",
+        "lease_expires_at",
+        "failure_reason",
+        "released_at",
+    ):
+        assert field in source
+    assert "ACTIVE_CLAIM" in source
+    assert "RECOVERED" in source
+    assert "op.drop_column" in source
+
+
 def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     source = (
         ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"

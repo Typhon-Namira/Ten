@@ -44,6 +44,9 @@ class AIReasoningConfig(BaseModel):
     )
     request_timeout_seconds: float = Field(gt=0)
     llm_concurrency_limit: int = Field(ge=1, le=32)
+    claim_lease_seconds: int = Field(default=90, ge=30, le=600)
+    claim_heartbeat_seconds: int = Field(default=20, ge=5, le=120)
+    claim_max_runtime_seconds: int = Field(default=180, ge=60, le=1800)
     provider_backoff_initial_seconds: float = Field(gt=0)
     provider_backoff_max_seconds: float = Field(gt=0)
     target_input_tokens: int = Field(default=4_000, ge=256, le=100_000)
@@ -84,6 +87,10 @@ class AIReasoningConfig(BaseModel):
             raise ValueError("AI input and output reservations exceed model context")
         if self.truncation_degraded_threshold > self.truncation_unhealthy_threshold:
             raise ValueError("AI truncation health thresholds must be ordered")
+        if self.claim_heartbeat_seconds * 2 >= self.claim_lease_seconds:
+            raise ValueError("AI claim heartbeat must run at least twice within the lease")
+        if self.claim_max_runtime_seconds <= self.claim_lease_seconds:
+            raise ValueError("AI claim maximum runtime must exceed the lease")
         if self.temporal_lookback_minutes != (5, 15, 30, 60, 240):
             raise ValueError("temporal lookback anchors must remain 5m, 15m, 30m, 1h, and 4h")
         if not (

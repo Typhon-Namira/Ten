@@ -391,12 +391,15 @@ class SignalEmailWorker:
         enabled: bool,
         poll_seconds: float,
         max_attempts: int,
+        recipient: str | None = None,
     ) -> None:
         self.repository = repository
         self.sender = sender
         self.enabled = enabled
         self.poll_seconds = poll_seconds
         self.max_attempts = max_attempts
+        self.recipient = recipient
+        self._next_reconciliation_at: datetime | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
@@ -414,6 +417,26 @@ class SignalEmailWorker:
     async def _run(self) -> None:
         while not self._stop.is_set():
             try:
+                now = datetime.now(UTC)
+                if (
+                    self.recipient is not None
+                    and (
+                        self._next_reconciliation_at is None
+                        or now >= self._next_reconciliation_at
+                    )
+                ):
+                    reconciled = await self.repository.reconcile_eligible_decisions(
+                        self.recipient
+                    )
+                    self._next_reconciliation_at = now + timedelta(seconds=60)
+                    logger.info(
+                        "signal_email.reconciliation.completed",
+                        extra={
+                            "recipient": self.recipient,
+                            "newly_queued": reconciled,
+                            "reconciled_at": now.isoformat(),
+                        },
+                    )
                 for event in await self.repository.claim(limit=10, now=datetime.now(UTC)):
                     await self._deliver(event)
             except Exception:

@@ -386,6 +386,9 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 "input_token_budget": settings.ai_input_token_budget,
                 "target_input_tokens": settings.ai_input_token_budget,
                 "token_safety_margin": settings.ai_token_safety_margin,
+                "claim_lease_seconds": settings.ai_claim_lease_seconds,
+                "claim_heartbeat_seconds": settings.ai_claim_heartbeat_seconds,
+                "claim_max_runtime_seconds": settings.ai_claim_max_runtime_seconds,
             }
         )
         groq_keys = settings.groq_pool_api_keys
@@ -736,6 +739,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 enabled=True,
                 poll_seconds=settings.signal_email_poll_seconds,
                 max_attempts=settings.signal_email_max_attempts,
+                recipient=settings.signal_email_recipient,
             )
             app.state.signal_email_worker.start()
         enabled_workers = [

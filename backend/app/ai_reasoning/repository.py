@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from hashlib import sha256
 import json
 import logging
-from typing import Protocol
+from typing import Protocol, cast
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 from sqlalchemy import case, func, or_, select, update
@@ -63,6 +66,73 @@ from .request_persistence import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AIReasoningClaim:
+    """Current ownership and health of one authoritative analysis lease."""
+
+    acquired: bool
+    outcome: str
+    claim_id: UUID
+    idempotency_key: str
+    instrument: str
+    market_cutoff: datetime
+    market_state_id: UUID | None
+    snapshot_id: UUID | None
+    claimed_by: str | None
+    claimed_at: datetime
+    heartbeat_at: datetime
+    lease_expires_at: datetime
+    status: str
+    analysis_id: UUID | None = None
+    failure_reason: str | None = None
+    released_at: datetime | None = None
+    expired_claim_count: int = 0
+
+
+def _claim_from_mapping(value: Mapping[str, object], *, acquired: bool, outcome: str) -> AIReasoningClaim:
+    return AIReasoningClaim(
+        acquired=acquired,
+        outcome=outcome,
+        claim_id=UUID(str(value["claim_id"])),
+        idempotency_key=str(value["idempotency_key"]),
+        instrument=str(value["instrument"]),
+        market_cutoff=value["ums_boundary"],  # type: ignore[arg-type]
+        market_state_id=(UUID(str(value["market_state_id"])) if value.get("market_state_id") else None),
+        snapshot_id=(UUID(str(value["snapshot_id"])) if value.get("snapshot_id") else None),
+        claimed_by=str(value["claimed_by"]) if value.get("claimed_by") else None,
+        claimed_at=value["claimed_at"],  # type: ignore[arg-type]
+        heartbeat_at=value["heartbeat_at"],  # type: ignore[arg-type]
+        lease_expires_at=value["lease_expires_at"],  # type: ignore[arg-type]
+        status=str(value["status"]),
+        analysis_id=(UUID(str(value["analysis_id"])) if value.get("analysis_id") else None),
+        failure_reason=(str(value["failure_reason"]) if value.get("failure_reason") else None),
+        released_at=value.get("released_at"),  # type: ignore[arg-type]
+        expired_claim_count=int(str(value.get("expired_claim_count") or 0)),
+    )
+
+
+def _claim_from_record(value: AIReasoningCycleLockRecord, *, acquired: bool, outcome: str) -> AIReasoningClaim:
+    return AIReasoningClaim(
+        acquired=acquired,
+        outcome=outcome,
+        claim_id=value.claim_id,
+        idempotency_key=value.idempotency_key,
+        instrument=value.instrument,
+        market_cutoff=value.ums_boundary,
+        market_state_id=value.market_state_id,
+        snapshot_id=value.snapshot_id,
+        claimed_by=value.claimed_by,
+        claimed_at=value.claimed_at,
+        heartbeat_at=value.heartbeat_at,
+        lease_expires_at=value.lease_expires_at,
+        status=value.status,
+        analysis_id=value.analysis_id,
+        failure_reason=value.failure_reason,
+        released_at=value.released_at,
+        expired_claim_count=value.expired_claim_count,
+    )
 
 
 class AIArtifactConflictError(RuntimeError):
@@ -127,7 +197,23 @@ class AIReasoningRepository(Protocol):
         five_minute_window_start: datetime | None = None,
         market_state_hash: str | None = None,
         analysis_contract_version: str | None = None,
+        market_state_id: UUID | None = None,
+        snapshot_id: UUID | None = None,
+        claimed_by: str,
+        lease_seconds: int,
+    ) -> AIReasoningClaim: ...
+    async def heartbeat_reasoning_cycle(
+        self, idempotency_key: str, claim_id: UUID, claimed_by: str,
+        heartbeat_at: datetime, lease_seconds: int,
     ) -> bool: ...
+    async def release_reasoning_cycle(
+        self, idempotency_key: str, claim_id: UUID, released_at: datetime,
+        *, status: str = "RELEASED", failure_reason: str | None = None,
+        analysis_id: UUID | None = None,
+    ) -> bool: ...
+    async def claim_for_cutoff(
+        self, instrument: str, market_cutoff: datetime,
+    ) -> AIReasoningClaim | None: ...
     async def complete_reasoning_cycle(
         self,
         idempotency_key: str,
@@ -148,6 +234,9 @@ class AIReasoningRepository(Protocol):
         analysis_id: object | None,
         status: str,
         completed_at: datetime,
+        *,
+        claim_id: UUID | None = None,
+        failure_reason: str | None = None,
     ) -> None: ...
     async def analysis_for_market_state_hash(
         self,
@@ -301,10 +390,15 @@ class InMemoryAIReasoningRepository:
         five_minute_window_start: datetime | None = None,
         market_state_hash: str | None = None,
         analysis_contract_version: str | None = None,
-    ) -> bool:
+        market_state_id: UUID | None = None,
+        snapshot_id: UUID | None = None,
+        claimed_by: str,
+        lease_seconds: int,
+    ) -> AIReasoningClaim:
         async with self._lock:
-            duplicate = any(
-                item.get("instrument") == instrument
+            existing = next(
+                (item for item in self.reasoning_cycles.values()
+                if item.get("instrument") == instrument
                 and (
                     item.get("idempotency_key") == idempotency_key
                     or (
@@ -321,13 +415,43 @@ class InMemoryAIReasoningRepository:
                         and item.get("analysis_contract_version")
                         == analysis_contract_version
                     )
-                )
-                for item in self.reasoning_cycles.values()
+                )),
+                None,
             )
-            if idempotency_key in self.reasoning_cycles or duplicate:
-                return False
-            self.reasoning_cycles[idempotency_key] = {
+            if existing is not None:
+                if existing.get("analysis_id") is not None and existing.get("status") in {
+                    "COMMITTED", "RECOVERED"
+                }:
+                    return _claim_from_mapping(
+                        existing, acquired=False, outcome="DUPLICATE_COMMITTED_ANALYSIS"
+                    )
+                lease_expires_at = existing.get("lease_expires_at")
+                if (
+                    existing.get("status") == "ACTIVE_CLAIM"
+                    and isinstance(lease_expires_at, datetime)
+                    and lease_expires_at > claimed_at
+                ):
+                    return _claim_from_mapping(existing, acquired=False, outcome="ACTIVE_CLAIM")
+                expired_count = int(str(existing.get("expired_claim_count") or 0)) + 1
+                previous_claim_id = existing.get("claim_id")
+                existing.update(
+                    claim_id=uuid4(),
+                    claimed_by=claimed_by,
+                    claimed_at=claimed_at,
+                    heartbeat_at=claimed_at,
+                    lease_expires_at=claimed_at + timedelta(seconds=lease_seconds),
+                    status="ACTIVE_CLAIM",
+                    failure_reason=None,
+                    released_at=None,
+                    expired_claim_count=expired_count,
+                    previous_claim_id=previous_claim_id,
+                    market_state_id=market_state_id,
+                    snapshot_id=snapshot_id,
+                )
+                return _claim_from_mapping(existing, acquired=True, outcome="CLAIM_TAKEOVER")
+            value: dict[str, object] = {
                 "idempotency_key": idempotency_key,
+                "claim_id": uuid4(),
                 "instrument": instrument,
                 "ums_boundary": ums_boundary,
                 "cycle_version": cycle_version,
@@ -336,10 +460,73 @@ class InMemoryAIReasoningRepository:
                 "five_minute_window_start": five_minute_window_start,
                 "market_state_hash": market_state_hash,
                 "analysis_contract_version": analysis_contract_version,
-                "status": "claimed",
+                "market_state_id": market_state_id,
+                "snapshot_id": snapshot_id,
+                "claimed_by": claimed_by,
+                "status": "ACTIVE_CLAIM",
                 "claimed_at": claimed_at,
+                "heartbeat_at": claimed_at,
+                "lease_expires_at": claimed_at + timedelta(seconds=lease_seconds),
+                "expired_claim_count": 0,
             }
+            self.reasoning_cycles[idempotency_key] = value
+            return _claim_from_mapping(value, acquired=True, outcome="CLAIM_ACQUIRED")
+
+    async def heartbeat_reasoning_cycle(
+        self, idempotency_key: str, claim_id: UUID, claimed_by: str,
+        heartbeat_at: datetime, lease_seconds: int,
+    ) -> bool:
+        async with self._lock:
+            cycle = self.reasoning_cycles.get(idempotency_key)
+            if (
+                cycle is None
+                or cycle.get("claim_id") != claim_id
+                or cycle.get("claimed_by") != claimed_by
+                or cycle.get("status") != "ACTIVE_CLAIM"
+            ):
+                return False
+            cycle["heartbeat_at"] = heartbeat_at
+            cycle["lease_expires_at"] = heartbeat_at + timedelta(seconds=lease_seconds)
             return True
+
+    async def release_reasoning_cycle(
+        self, idempotency_key: str, claim_id: UUID, released_at: datetime,
+        *, status: str = "RELEASED", failure_reason: str | None = None,
+        analysis_id: UUID | None = None,
+    ) -> bool:
+        async with self._lock:
+            cycle = self.reasoning_cycles.get(idempotency_key)
+            if cycle is None or cycle.get("claim_id") != claim_id:
+                return False
+            cycle.update(
+                status=status,
+                analysis_id=analysis_id,
+                failure_reason=failure_reason,
+                released_at=released_at,
+                completed_at=released_at,
+                claimed_by=None,
+                lease_expires_at=released_at,
+            )
+            return True
+
+    async def claim_for_cutoff(
+        self, instrument: str, market_cutoff: datetime,
+    ) -> AIReasoningClaim | None:
+        async with self._lock:
+            values = [
+                item for item in self.reasoning_cycles.values()
+                if item.get("instrument") == instrument
+                and item.get("ums_boundary") == market_cutoff
+            ]
+            value = max(
+                values,
+                key=lambda item: cast(datetime, item["claimed_at"]),
+                default=None,
+            )
+            return (
+                _claim_from_mapping(value, acquired=False, outcome=str(value["status"]))
+                if value is not None else None
+            )
 
     async def complete_reasoning_cycle(
         self,
@@ -372,6 +559,8 @@ class InMemoryAIReasoningRepository:
                 "FAILED_SCHEMA",
                 "FAILED_PERSISTENCE",
                 "TIMED_OUT",
+                "COMMITTED",
+                "RECOVERED",
             }:
                 return None
             request_id = cycle.get("request_id")
@@ -399,6 +588,8 @@ class InMemoryAIReasoningRepository:
                 "FAILED_SCHEMA",
                 "FAILED_PERSISTENCE",
                 "TIMED_OUT",
+                "COMMITTED",
+                "RECOVERED",
             }:
                 return None
             return self.analyses.get(cycle.get("analysis_id"))
@@ -410,13 +601,23 @@ class InMemoryAIReasoningRepository:
         analysis_id: object | None,
         status: str,
         completed_at: datetime,
+        *,
+        claim_id: UUID | None = None,
+        failure_reason: str | None = None,
     ) -> None:
         async with self._lock:
-            self.reasoning_cycles[idempotency_key].update(
+            cycle = self.reasoning_cycles[idempotency_key]
+            if claim_id is not None and cycle.get("claim_id") != claim_id:
+                return
+            cycle.update(
                 request_id=request_id,
                 analysis_id=analysis_id,
                 status=status,
                 completed_at=completed_at,
+                released_at=completed_at,
+                claimed_by=None,
+                lease_expires_at=completed_at,
+                failure_reason=failure_reason,
             )
 
     async def analysis_for_market_state_hash(
@@ -899,11 +1100,18 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         five_minute_window_start: datetime | None = None,
         market_state_hash: str | None = None,
         analysis_contract_version: str | None = None,
-    ) -> bool:
-        statement = (
+        market_state_id: UUID | None = None,
+        snapshot_id: UUID | None = None,
+        claimed_by: str,
+        lease_seconds: int,
+    ) -> AIReasoningClaim:
+        claim_id = uuid4()
+        lease_expires_at = claimed_at + timedelta(seconds=lease_seconds)
+        insert_statement = (
             insert(AIReasoningCycleLockRecord)
             .values(
                 idempotency_key=idempotency_key,
+                claim_id=claim_id,
                 instrument=instrument,
                 ums_boundary=ums_boundary,
                 cycle_version=cycle_version,
@@ -912,15 +1120,154 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                 five_minute_window_start=five_minute_window_start,
                 market_state_hash=market_state_hash,
                 analysis_contract_version=analysis_contract_version,
-                status="claimed",
+                market_state_id=market_state_id,
+                snapshot_id=snapshot_id,
+                claimed_by=claimed_by,
+                status="ACTIVE_CLAIM",
                 claimed_at=claimed_at,
+                heartbeat_at=claimed_at,
+                lease_expires_at=lease_expires_at,
+                expired_claim_count=0,
             )
             .on_conflict_do_nothing()
             .returning(AIReasoningCycleLockRecord.idempotency_key)
         )
-        claimed = (await self.session.execute(statement)).scalar_one_or_none() is not None
+        inserted_key = (await self.session.execute(insert_statement)).scalar_one_or_none()
         await self.session.commit()
-        return claimed
+        if inserted_key is not None:
+            record = await self.session.get(AIReasoningCycleLockRecord, inserted_key)
+            if record is None:
+                raise RuntimeError("new AI reasoning claim was not readable after commit")
+            return _claim_from_record(record, acquired=True, outcome="CLAIM_ACQUIRED")
+
+        identity = [AIReasoningCycleLockRecord.idempotency_key == idempotency_key]
+        if analysis_timeframe is not None and five_minute_window_start is not None:
+            identity.append(
+                (AIReasoningCycleLockRecord.instrument == instrument)
+                & (AIReasoningCycleLockRecord.analysis_timeframe == analysis_timeframe)
+                & (AIReasoningCycleLockRecord.five_minute_window_start == five_minute_window_start)
+                & (AIReasoningCycleLockRecord.analysis_contract_version == analysis_contract_version)
+            )
+        if market_state_hash is not None:
+            identity.append(
+                (AIReasoningCycleLockRecord.instrument == instrument)
+                & (AIReasoningCycleLockRecord.market_state_hash == market_state_hash)
+                & (AIReasoningCycleLockRecord.analysis_contract_version == analysis_contract_version)
+            )
+        existing = (
+            await self.session.scalars(
+                select(AIReasoningCycleLockRecord).where(or_(*identity)).limit(1)
+            )
+        ).first()
+        if existing is None:
+            raise RuntimeError("AI reasoning claim conflict did not return its owning row")
+        takeover = (
+            update(AIReasoningCycleLockRecord)
+            .where(
+                AIReasoningCycleLockRecord.idempotency_key == existing.idempotency_key,
+                or_(
+                    AIReasoningCycleLockRecord.status.in_(("FAILED", "RELEASED", "EXPIRED")),
+                    (
+                        (AIReasoningCycleLockRecord.status == "ACTIVE_CLAIM")
+                        & (AIReasoningCycleLockRecord.lease_expires_at <= claimed_at)
+                    ),
+                ),
+            )
+            .values(
+                claim_id=claim_id,
+                market_state_id=market_state_id,
+                snapshot_id=snapshot_id,
+                claimed_by=claimed_by,
+                claimed_at=claimed_at,
+                heartbeat_at=claimed_at,
+                lease_expires_at=lease_expires_at,
+                status="ACTIVE_CLAIM",
+                failure_reason=None,
+                released_at=None,
+                completed_at=None,
+                expired_claim_count=AIReasoningCycleLockRecord.expired_claim_count + 1,
+            )
+            .returning(AIReasoningCycleLockRecord)
+        )
+        taken = (await self.session.execute(takeover)).scalar_one_or_none()
+        await self.session.commit()
+        if taken is not None:
+            return _claim_from_record(taken, acquired=True, outcome="CLAIM_TAKEOVER")
+        await self.session.refresh(existing)
+        outcome = (
+            "DUPLICATE_COMMITTED_ANALYSIS"
+            if existing.status in {"COMMITTED", "RECOVERED"} and existing.analysis_id is not None
+            else "STALE_CLAIM"
+            if existing.status == "ACTIVE_CLAIM" and existing.lease_expires_at <= claimed_at
+            else "ACTIVE_CLAIM"
+        )
+        return _claim_from_record(existing, acquired=False, outcome=outcome)
+
+    @scoped_session
+    async def heartbeat_reasoning_cycle(
+        self, idempotency_key: str, claim_id: UUID, claimed_by: str,
+        heartbeat_at: datetime, lease_seconds: int,
+    ) -> bool:
+        result = await self.session.execute(
+            update(AIReasoningCycleLockRecord)
+            .where(
+                AIReasoningCycleLockRecord.idempotency_key == idempotency_key,
+                AIReasoningCycleLockRecord.claim_id == claim_id,
+                AIReasoningCycleLockRecord.claimed_by == claimed_by,
+                AIReasoningCycleLockRecord.status == "ACTIVE_CLAIM",
+            )
+            .values(
+                heartbeat_at=heartbeat_at,
+                lease_expires_at=heartbeat_at + timedelta(seconds=lease_seconds),
+            )
+        )
+        await self.session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
+    @scoped_session
+    async def release_reasoning_cycle(
+        self, idempotency_key: str, claim_id: UUID, released_at: datetime,
+        *, status: str = "RELEASED", failure_reason: str | None = None,
+        analysis_id: UUID | None = None,
+    ) -> bool:
+        result = await self.session.execute(
+            update(AIReasoningCycleLockRecord)
+            .where(
+                AIReasoningCycleLockRecord.idempotency_key == idempotency_key,
+                AIReasoningCycleLockRecord.claim_id == claim_id,
+            )
+            .values(
+                status=status,
+                analysis_id=analysis_id,
+                failure_reason=failure_reason,
+                released_at=released_at,
+                completed_at=released_at,
+                claimed_by=None,
+                lease_expires_at=released_at,
+            )
+        )
+        await self.session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
+    @scoped_session
+    async def claim_for_cutoff(
+        self, instrument: str, market_cutoff: datetime,
+    ) -> AIReasoningClaim | None:
+        record = (
+            await self.session.scalars(
+                select(AIReasoningCycleLockRecord)
+                .where(
+                    AIReasoningCycleLockRecord.instrument == instrument,
+                    AIReasoningCycleLockRecord.ums_boundary == market_cutoff,
+                )
+                .order_by(AIReasoningCycleLockRecord.claimed_at.desc())
+                .limit(1)
+            )
+        ).first()
+        return (
+            _claim_from_record(record, acquired=False, outcome=record.status)
+            if record is not None else None
+        )
 
     @scoped_session
     async def complete_reasoning_cycle(
@@ -962,6 +1309,8 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                             "FAILED_SCHEMA",
                             "FAILED_PERSISTENCE",
                             "TIMED_OUT",
+                            "COMMITTED",
+                            "RECOVERED",
                         )
                     ),
                 )
@@ -1010,6 +1359,8 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
                             "FAILED_SCHEMA",
                             "FAILED_PERSISTENCE",
                             "TIMED_OUT",
+                            "COMMITTED",
+                            "RECOVERED",
                         )
                     ),
                 )
@@ -1029,15 +1380,26 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
         analysis_id: object | None,
         status: str,
         completed_at: datetime,
+        *,
+        claim_id: UUID | None = None,
+        failure_reason: str | None = None,
     ) -> None:
+        statement = update(AIReasoningCycleLockRecord).where(
+            AIReasoningCycleLockRecord.idempotency_key == idempotency_key
+        )
+        if claim_id is not None:
+            statement = statement.where(AIReasoningCycleLockRecord.claim_id == claim_id)
         await self.session.execute(
-            update(AIReasoningCycleLockRecord)
-            .where(AIReasoningCycleLockRecord.idempotency_key == idempotency_key)
+            statement
             .values(
                 request_id=request_id,
                 analysis_id=analysis_id,
                 status=status,
                 completed_at=completed_at,
+                released_at=completed_at,
+                claimed_by=None,
+                lease_expires_at=completed_at,
+                failure_reason=failure_reason,
             )
         )
         await self.session.commit()

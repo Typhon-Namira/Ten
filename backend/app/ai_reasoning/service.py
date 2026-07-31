@@ -45,7 +45,7 @@ from .llm_context import LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION, build_llm_analysis
 from .memory import MarketMemory
 from .models import LLMStructuredOutputFailure
 from .provider import AIReasoningProvider
-from .repository import AIReasoningRepository
+from .repository import AIReasoningClaim, AIReasoningRepository
 from .request_builder import AIReasoningRequestBuilder
 from .signal import DeterministicAnalysisSignalGenerator
 from .signal_outcomes import AnalysisSignalOutcomeEvaluator
@@ -57,7 +57,7 @@ class AIAnalysisSkipReason(StrEnum):
     NOT_FIVE_MINUTE_BOUNDARY = "not_five_minute_boundary"
     CYCLE_NOT_COMPLETE = "cycle_not_complete"
     ANALYSIS_ALREADY_EXISTS = "analysis_already_exists"
-    CYCLE_ALREADY_CLAIMED = "cycle_already_claimed"
+    ACTIVE_CLAIM = "active_claim"
     DUPLICATE_MARKET_STATE = "duplicate_market_state"
     MARKET_DATA_INCOMPLETE = "market_data_incomplete"
     MARKET_DATA_STALE = "market_data_stale"
@@ -116,6 +116,10 @@ class AIReasoningService:
         self.final_decision = final_decision
         self.clock = clock or (lambda: datetime.now(UTC))
         self._llm_semaphore = asyncio.Semaphore(config.llm_concurrency_limit)
+        host = os.getenv("RAILWAY_REPLICA_ID") or os.getenv("HOSTNAME") or os.getenv("COMPUTERNAME") or "worker"
+        self.worker_id = f"{host}:{os.getpid()}"
+        self._claim_heartbeats: dict[str, asyncio.Task[None]] = {}
+        self._active_claims: dict[str, AIReasoningClaim] = {}
         self.memory = MarketMemory(config.maximum_memory_entries)
         self.signal_generator = DeterministicAnalysisSignalGenerator(config)
         self.signal_outcomes = AnalysisSignalOutcomeEvaluator()
@@ -145,6 +149,151 @@ class AIReasoningService:
     @property
     def enabled(self) -> bool:
         return self.shadow_enabled
+
+    def _claim_log_context(self, claim: AIReasoningClaim, **extra: object) -> dict[str, object]:
+        return {
+            "instrument": claim.instrument,
+            "cutoff": claim.market_cutoff.isoformat(),
+            "claim_id": str(claim.claim_id),
+            "worker_id": self.worker_id,
+            "market_state_id": str(claim.market_state_id) if claim.market_state_id else None,
+            "snapshot_id": str(claim.snapshot_id) if claim.snapshot_id else None,
+            "analysis_id": str(claim.analysis_id) if claim.analysis_id else None,
+            "claimed_at": claim.claimed_at.isoformat(),
+            "heartbeat_at": claim.heartbeat_at.isoformat(),
+            "lease_expires_at": claim.lease_expires_at.isoformat(),
+            **extra,
+        }
+
+    def _start_claim_heartbeat(self, claim: AIReasoningClaim) -> None:
+        self._active_claims[claim.idempotency_key] = claim
+        async def heartbeat() -> None:
+            deadline = claim.claimed_at + timedelta(seconds=self.config.claim_max_runtime_seconds)
+            try:
+                while True:
+                    await asyncio.sleep(self.config.claim_heartbeat_seconds)
+                    now = self.clock().astimezone(UTC)
+                    if now >= deadline:
+                        released = await self.repository.release_reasoning_cycle(
+                            claim.idempotency_key,
+                            claim.claim_id,
+                            now,
+                            status="FAILED",
+                            failure_reason="claim_max_runtime_exceeded",
+                        )
+                        if released:
+                            logger.error(
+                                "ai_reasoning.claim.failed",
+                                extra=self._claim_log_context(
+                                    claim,
+                                    failure_reason="claim_max_runtime_exceeded",
+                                    released_at=now.isoformat(),
+                                ),
+                            )
+                        return
+                    renewed = await self.repository.heartbeat_reasoning_cycle(
+                        claim.idempotency_key,
+                        claim.claim_id,
+                        self.worker_id,
+                        now,
+                        self.config.claim_lease_seconds,
+                    )
+                    if not renewed:
+                        return
+                    logger.info(
+                        "ai_reasoning.claim.heartbeat",
+                        extra=self._claim_log_context(
+                            claim,
+                            heartbeat_at=now.isoformat(),
+                            lease_expires_at=(
+                                now + timedelta(seconds=self.config.claim_lease_seconds)
+                            ).isoformat(),
+                        ),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "ai_reasoning.claim.heartbeat_failed",
+                    extra=self._claim_log_context(claim),
+                )
+            finally:
+                self._claim_heartbeats.pop(claim.idempotency_key, None)
+                self._active_claims.pop(claim.idempotency_key, None)
+
+        self._claim_heartbeats[claim.idempotency_key] = asyncio.create_task(
+            heartbeat(), name=f"ai-claim-heartbeat:{claim.idempotency_key[:12]}"
+        )
+
+    async def shutdown(self) -> None:
+        """Release locally owned claims before worker/process shutdown."""
+
+        tasks = tuple(self._claim_heartbeats.items())
+        claims = tuple(self._active_claims.values())
+        for _, task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
+        now = self.clock().astimezone(UTC)
+        for claim in claims:
+            released = await self.repository.release_reasoning_cycle(
+                claim.idempotency_key,
+                claim.claim_id,
+                now,
+                failure_reason="worker_shutdown",
+            )
+            if released:
+                logger.info(
+                    "ai_reasoning.claim.released",
+                    extra=self._claim_log_context(
+                        claim,
+                        failure_reason="worker_shutdown",
+                        released_at=now.isoformat(),
+                    ),
+                )
+
+    async def _complete_claim(
+        self,
+        claim: AIReasoningClaim,
+        *,
+        request_id: object | None,
+        analysis_id: object | None,
+        status: str,
+        failure_reason: str | None = None,
+    ) -> None:
+        now = self.clock().astimezone(UTC)
+        await self.repository.complete_analysis_cycle(
+            claim.idempotency_key,
+            request_id,
+            analysis_id,
+            status,
+            now,
+            claim_id=claim.claim_id,
+            failure_reason=failure_reason,
+        )
+        task = self._claim_heartbeats.pop(claim.idempotency_key, None)
+        self._active_claims.pop(claim.idempotency_key, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        event = {
+            "COMMITTED": "ai_reasoning.analysis.committed",
+            "RECOVERED": "ai_reasoning.analysis.committed",
+            "FAILED": "ai_reasoning.claim.failed",
+            "RELEASED": "ai_reasoning.claim.released",
+            "EXPIRED": "ai_reasoning.claim.expired",
+        }.get(status, "ai_reasoning.claim.released")
+        logger.info(
+            event,
+            extra=self._claim_log_context(
+                claim,
+                analysis_id=str(analysis_id) if analysis_id else None,
+                status=status,
+                failure_reason=failure_reason,
+                released_at=now.isoformat(),
+                claim_duration_seconds=max(0.0, (now - claim.claimed_at).total_seconds()),
+            ),
+        )
 
     async def record_gate_decision(
         self,
@@ -279,7 +428,7 @@ class AIReasoningService:
             state.state_hash,
             contract_version,
         )
-        claimed = await self.repository.claim_reasoning_cycle(
+        claim = await self.repository.claim_reasoning_cycle(
             idempotency_key,
             state.instrument,
             window_start,
@@ -290,10 +439,14 @@ class AIReasoningService:
             five_minute_window_start=window_start,
             market_state_hash=state.state_hash,
             analysis_contract_version=contract_version,
+            market_state_id=state.state_id,
+            snapshot_id=state.state_id,
+            claimed_by=self.worker_id,
+            lease_seconds=self.config.claim_lease_seconds,
         )
-        if not claimed:
+        if not claim.acquired:
             cached = await self.repository.analysis_for_reasoning_cycle(idempotency_key)
-            if cached is not None:
+            if claim.outcome == "DUPLICATE_COMMITTED_ANALYSIS" and cached is not None:
                 self.metrics["analyses_reused"] += 1
                 await self._skip(
                     AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS,
@@ -312,7 +465,7 @@ class AIReasoningService:
             reason = (
                 AIAnalysisSkipReason.DUPLICATE_MARKET_STATE
                 if duplicate is not None
-                else AIAnalysisSkipReason.CYCLE_ALREADY_CLAIMED
+                else AIAnalysisSkipReason.ACTIVE_CLAIM
             )
             await self._skip(
                 reason,
@@ -321,6 +474,7 @@ class AIReasoningService:
                 existing_analysis=duplicate,
                 window_start=window_start,
                 idempotency_key=idempotency_key,
+                claim=claim,
             )
             return (
                 await self._validated_analysis(duplicate, state, quant)
@@ -328,15 +482,42 @@ class AIReasoningService:
                 else None
             )
 
-        await self.record_gate_decision(
-            state=state,
-            attempted_cutoff=boundary,
-            gate_decision="PROCEED",
-            details={
-                "idempotency_key": idempotency_key,
-                "analysis_timeframe": claim_timeframe,
-            },
+        claim_event = (
+            "ai_reasoning.claim.takeover"
+            if claim.outcome == "CLAIM_TAKEOVER"
+            else "ai_reasoning.claim.acquired"
         )
+        logger.info(claim_event, extra=self._claim_log_context(claim, outcome=claim.outcome))
+        if claim.outcome == "CLAIM_TAKEOVER":
+            logger.warning(
+                "ai_reasoning.claim.expired",
+                extra=self._claim_log_context(
+                    claim,
+                    expired_claim_count=claim.expired_claim_count,
+                ),
+            )
+        self._start_claim_heartbeat(claim)
+
+        try:
+            await self.record_gate_decision(
+                state=state,
+                attempted_cutoff=boundary,
+                gate_decision="PROCEED",
+                details={
+                    "idempotency_key": idempotency_key,
+                    "analysis_timeframe": claim_timeframe,
+                    "claim_id": str(claim.claim_id),
+                },
+            )
+        except Exception:
+            await self._complete_claim(
+                claim,
+                request_id=None,
+                analysis_id=None,
+                status="FAILED",
+                failure_reason="gate_decision_persistence",
+            )
+            raise
 
         try:
             recent_memory = await self.repository.recent_memory(
@@ -359,12 +540,12 @@ class AIReasoningService:
             )
             await self.repository.save_request(request)
         except Exception:
-            await self.repository.complete_analysis_cycle(
-                idempotency_key,
-                None,
-                None,
-                "FAILED_PERSISTENCE",
-                self.clock(),
+            await self._complete_claim(
+                claim,
+                request_id=None,
+                analysis_id=None,
+                status="FAILED",
+                failure_reason="request_construction_or_persistence",
             )
             logger.exception(
                 "ai_reasoning.job.terminal",
@@ -538,12 +719,12 @@ class AIReasoningService:
                     window_start=window_start,
                     idempotency_key=idempotency_key,
                 )
-                await self.repository.complete_analysis_cycle(
-                    idempotency_key,
-                    request.request_id,
-                    None,
-                    "SKIPPED_WITH_REASON",
-                    self.clock(),
+                await self._complete_claim(
+                    claim,
+                    request_id=request.request_id,
+                    analysis_id=None,
+                    status="RELEASED",
+                    failure_reason="request_preflight_failed",
                 )
                 return None
             if exc.details.reason_code not in {
@@ -605,12 +786,12 @@ class AIReasoningService:
                     provider_delta[f"{account_id}_{key}"] = sum(values)
 
         if provider_failure is not None:
-            await self.repository.complete_analysis_cycle(
-                idempotency_key,
-                request.request_id,
-                None,
-                terminal_status,
-                self.clock(),
+            await self._complete_claim(
+                claim,
+                request_id=request.request_id,
+                analysis_id=None,
+                status="FAILED",
+                failure_reason=failure_state,
             )
             self.failed_requests += 1
             self.last_validation_passed = False
@@ -640,15 +821,31 @@ class AIReasoningService:
             )
             return None
 
+        ownership_confirmed = await self.repository.heartbeat_reasoning_cycle(
+            claim.idempotency_key,
+            claim.claim_id,
+            self.worker_id,
+            self.clock().astimezone(UTC),
+            self.config.claim_lease_seconds,
+        )
+        if not ownership_confirmed:
+            logger.warning(
+                "ai_reasoning.claim.expired",
+                extra=self._claim_log_context(
+                    claim,
+                    failure_reason="lease_lost_before_analysis_persistence",
+                ),
+            )
+            return None
         try:
             analysis = await self.repository.save_analysis(analysis)
         except Exception:
-            await self.repository.complete_analysis_cycle(
-                idempotency_key,
-                request.request_id,
-                None,
-                "FAILED_PERSISTENCE",
-                self.clock(),
+            await self._complete_claim(
+                claim,
+                request_id=request.request_id,
+                analysis_id=None,
+                status="FAILED",
+                failure_reason="analysis_persistence",
             )
             logger.exception(
                 "ai_reasoning.job.terminal",
@@ -660,23 +857,13 @@ class AIReasoningService:
                 },
             )
             return None
-        commit_decision = await self.record_gate_decision(
-            state=state,
-            attempted_cutoff=analysis.analysis_timestamp,
-            gate_decision="COMMITTED",
-            existing_analysis=analysis,
-            details={
-                "transaction_commit_time": self.clock().isoformat(),
-                "idempotency_key": idempotency_key,
-            },
-        )
         if analysis.status != AnalysisStatus.AVAILABLE:
-            await self.repository.complete_analysis_cycle(
-                idempotency_key,
-                request.request_id,
-                analysis.analysis_id,
-                terminal_status,
-                self.clock(),
+            await self._complete_claim(
+                claim,
+                request_id=request.request_id,
+                analysis_id=analysis.analysis_id,
+                status="FAILED",
+                failure_reason=failure_state,
             )
             self.failed_requests += 1
             self.last_validation_passed = False
@@ -720,6 +907,29 @@ class AIReasoningService:
             )
             return None
 
+        try:
+            commit_decision = await self.record_gate_decision(
+                state=state,
+                attempted_cutoff=analysis.analysis_timestamp,
+                gate_decision="COMMITTED",
+                existing_analysis=analysis,
+                details={
+                    "transaction_commit_time": self.clock().isoformat(),
+                    "idempotency_key": idempotency_key,
+                    "claim_id": str(claim.claim_id),
+                    "claim_outcome": claim.outcome,
+                },
+            )
+        except Exception:
+            await self._complete_claim(
+                claim,
+                request_id=request.request_id,
+                analysis_id=analysis.analysis_id,
+                status="FAILED",
+                failure_reason="commit_gate_persistence",
+            )
+            raise
+
         self.last_validation_passed = True
         self.last_failure_state = None
         assert response is not None
@@ -748,12 +958,12 @@ class AIReasoningService:
             self.failed_requests += 1
             self.last_cycle_outcome = "failed"
             self.last_failure_state = "analysis_signal_persistence_failed"
-            await self.repository.complete_analysis_cycle(
-                idempotency_key,
-                request.request_id,
-                analysis.analysis_id,
-                "FAILED_PERSISTENCE",
-                self.clock(),
+            await self._complete_claim(
+                claim,
+                request_id=request.request_id,
+                analysis_id=analysis.analysis_id,
+                status="FAILED",
+                failure_reason="analysis_signal_persistence",
             )
             logger.exception(
                 "ai_reasoning.job.terminal",
@@ -768,12 +978,11 @@ class AIReasoningService:
             return None
         self.last_cycle_outcome = "pool_success"
         self.metrics["analyses_successfully_completed"] += 1
-        await self.repository.complete_analysis_cycle(
-            idempotency_key,
-            request.request_id,
-            analysis.analysis_id,
-            "COMPLETED",
-            self.clock(),
+        await self._complete_claim(
+            claim,
+            request_id=request.request_id,
+            analysis_id=analysis.analysis_id,
+            status="RECOVERED" if claim.outcome == "CLAIM_TAKEOVER" else "COMMITTED",
         )
         logger.info(
             "ai_reasoning.job.terminal",
@@ -1153,12 +1362,13 @@ class AIReasoningService:
         existing_analysis: AIMarketAnalysis | None = None,
         window_start: datetime | None = None,
         idempotency_key: str | None = None,
+        claim: AIReasoningClaim | None = None,
     ) -> None:
         self.skip_reasons[reason.value] += 1
         self.metrics["skipped_before_provider_call"] += 1
         if reason in {
             AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS,
-            AIAnalysisSkipReason.CYCLE_ALREADY_CLAIMED,
+            AIAnalysisSkipReason.ACTIVE_CLAIM,
             AIAnalysisSkipReason.DUPLICATE_MARKET_STATE,
         }:
             self.metrics["deduplicated_before_provider_call"] += 1
@@ -1179,6 +1389,13 @@ class AIReasoningService:
                 "five_minute_window_start": (
                     window_start.isoformat() if window_start else None
                 ),
+                "claim_id": str(claim.claim_id) if claim is not None else None,
+                "claim_status": claim.status if claim is not None else None,
+                "claim_outcome": claim.outcome if claim is not None else None,
+                "claimed_by": claim.claimed_by if claim is not None else None,
+                "claimed_at": claim.claimed_at.isoformat() if claim is not None else None,
+                "heartbeat_at": claim.heartbeat_at.isoformat() if claim is not None else None,
+                "lease_expires_at": claim.lease_expires_at.isoformat() if claim is not None else None,
             },
         )
         logger.info(
@@ -1190,7 +1407,7 @@ class AIReasoningService:
                     AIAnalysisSkipReason.NOT_FIVE_MINUTE_BOUNDARY: "interval_not_due",
                     AIAnalysisSkipReason.CYCLE_NOT_COMPLETE: "invalid_state",
                     AIAnalysisSkipReason.ANALYSIS_ALREADY_EXISTS: "analysis_exists",
-                    AIAnalysisSkipReason.CYCLE_ALREADY_CLAIMED: "concurrency_limit",
+                    AIAnalysisSkipReason.ACTIVE_CLAIM: "active_claim",
                     AIAnalysisSkipReason.DUPLICATE_MARKET_STATE: "duplicate_snapshot",
                     AIAnalysisSkipReason.MARKET_DATA_INCOMPLETE: "missing_prerequisite",
                     AIAnalysisSkipReason.MARKET_DATA_STALE: "stale_data",
@@ -1202,6 +1419,11 @@ class AIReasoningService:
                     window_start.isoformat() if window_start else None
                 ),
                 "idempotency_key": idempotency_key,
+                "claim_id": str(claim.claim_id) if claim is not None else None,
+                "claim_status": claim.status if claim is not None else None,
+                "lease_expires_at": (
+                    claim.lease_expires_at.isoformat() if claim is not None else None
+                ),
                 "provider_call_made": False,
                 "snapshot_id": context.get("market_state_id"),
                 "attempted_cutoff": persisted.attempted_cutoff.isoformat(),

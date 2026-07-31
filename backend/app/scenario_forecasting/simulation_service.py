@@ -430,6 +430,7 @@ class MarketSimulationService:
                 and gate_skip_reason
                 not in {
                     "analysis_already_exists",
+                    "active_claim",
                     "cycle_already_claimed",
                     "duplicate_market_state",
                 }

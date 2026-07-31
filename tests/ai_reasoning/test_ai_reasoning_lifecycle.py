@@ -486,6 +486,112 @@ async def test_concurrent_workers_share_durable_analysis_claim() -> None:
 
 
 @pytest.mark.asyncio
+async def test_normal_analysis_commits_and_releases_owned_claim() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+
+    result = await build_service(repository, ValidProvider()).process(state, quant)
+
+    assert result is not None
+    claim = await repository.claim_for_cutoff(state.instrument, state.market_data_boundary)
+    assert claim is not None
+    assert claim.status == "COMMITTED"
+    assert claim.analysis_id == result.analysis.analysis_id
+    assert claim.claimed_by is None
+    assert claim.released_at is not None
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_terminates_and_releases_claim() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+
+    assert await build_service(repository, TypedFailureProvider()).process(state, quant) is None
+
+    claim = await repository.claim_for_cutoff(state.instrument, state.market_data_boundary)
+    assert claim is not None
+    assert claim.status == "FAILED"
+    assert claim.failure_reason == "authentication_failed"
+    assert claim.claimed_by is None
+
+
+@pytest.mark.asyncio
+async def test_active_claim_is_bounded_and_stale_claim_is_atomically_taken_over() -> None:
+    repository = InMemoryAIReasoningRepository()
+    state, _ = await state_and_quant()
+    arguments = dict(
+        idempotency_key="b" * 64,
+        instrument=state.instrument,
+        ums_boundary=state.market_data_boundary,
+        cycle_version="1.0",
+        provider_contract_version="contract",
+        analysis_timeframe="M5_M15:M15",
+        five_minute_window_start=state.market_data_boundary,
+        market_state_hash=state.state_hash,
+        analysis_contract_version="analysis-contract",
+        market_state_id=state.state_id,
+        snapshot_id=state.state_id,
+        lease_seconds=60,
+    )
+    first = await repository.claim_reasoning_cycle(
+        **arguments, claimed_at=NOW, claimed_by="worker-a"
+    )
+    active = await repository.claim_reasoning_cycle(
+        **arguments, claimed_at=NOW + timedelta(seconds=30), claimed_by="worker-b"
+    )
+    takeover = await repository.claim_reasoning_cycle(
+        **arguments, claimed_at=NOW + timedelta(seconds=61), claimed_by="worker-b"
+    )
+
+    assert first.acquired is True
+    assert active.acquired is False
+    assert active.outcome == "ACTIVE_CLAIM"
+    assert takeover.acquired is True
+    assert takeover.outcome == "CLAIM_TAKEOVER"
+    assert takeover.claim_id != first.claim_id
+    assert takeover.expired_claim_count == 1
+
+
+@pytest.mark.asyncio
+async def test_released_claim_without_analysis_can_be_recovered() -> None:
+    repository = InMemoryAIReasoningRepository()
+    state, _ = await state_and_quant()
+    first = await repository.claim_reasoning_cycle(
+        "c" * 64,
+        state.instrument,
+        state.market_data_boundary,
+        "1.0",
+        "contract",
+        NOW,
+        market_state_id=state.state_id,
+        snapshot_id=state.state_id,
+        claimed_by="worker-a",
+        lease_seconds=60,
+    )
+    assert await repository.release_reasoning_cycle(
+        first.idempotency_key,
+        first.claim_id,
+        NOW + timedelta(seconds=1),
+        failure_reason="gate_skip_without_committed_analysis",
+    )
+
+    recovered = await repository.claim_reasoning_cycle(
+        "c" * 64,
+        state.instrument,
+        state.market_data_boundary,
+        "1.0",
+        "contract",
+        NOW + timedelta(seconds=2),
+        market_state_id=state.state_id,
+        snapshot_id=state.state_id,
+        claimed_by="worker-b",
+        lease_seconds=60,
+    )
+    assert recovered.acquired is True
+    assert recovered.outcome == "CLAIM_TAKEOVER"
+
+
+@pytest.mark.asyncio
 async def test_provider_failure_persists_failure_without_fabricating_analysis() -> None:
     state, quant = await state_and_quant()
     repository, provider = InMemoryAIReasoningRepository(), TypedFailureProvider()
@@ -707,4 +813,8 @@ async def test_request_preflight_failure_is_a_skip_not_a_provider_failure() -> N
     assert metrics["provider_http_calls"] == 0
     assert metrics["provider_failures"] == 0
     assert metrics["skip_reasons"]["request_preflight_failed"] == 1
+    claim = await repository.claim_for_cutoff(state.instrument, state.market_data_boundary)
+    assert claim is not None
+    assert claim.status == "RELEASED"
+    assert claim.failure_reason == "request_preflight_failed"
     assert repository.analyses == {}

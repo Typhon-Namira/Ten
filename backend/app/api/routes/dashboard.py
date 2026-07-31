@@ -1976,10 +1976,72 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         if state is not None
         else None
     )
+    reasoning_claim = (
+        await request.app.state.ai_reasoning_repository.claim_for_cutoff(
+            symbol,
+            state.market_data_boundary,
+        )
+        if state is not None
+        else None
+    )
+    claim_active = bool(
+        reasoning_claim is not None
+        and reasoning_claim.status == "ACTIVE_CLAIM"
+        and reasoning_claim.lease_expires_at > now
+    )
+    claim_stalled = bool(
+        reasoning_claim is not None
+        and reasoning_claim.status == "ACTIVE_CLAIM"
+        and reasoning_claim.lease_expires_at <= now
+    )
+    claim_unhealthy = bool(
+        reasoning_claim is not None
+        and reasoning_claim.expired_claim_count >= 2
+        and analysis is None
+    )
+    claim_recovering = bool(
+        claim_active
+        and reasoning_claim is not None
+        and reasoning_claim.expired_claim_count > 0
+    )
+    ai_stage_status = (
+        "disabled"
+        if not reasoning_enabled
+        else "blocked"
+        if quant is None
+        else "healthy"
+        if analysis is not None and analysis.validation_passed
+        else "failed"
+        if claim_unhealthy or (reasoning_claim is not None and reasoning_claim.status == "FAILED")
+        else "degraded"
+        if claim_stalled
+        else "running"
+        if claim_active
+        else "blocked"
+    )
+    ai_stage_reason = (
+        "ai_centric_shadow_mode_disabled"
+        if not reasoning_enabled
+        else "awaiting_quant_forecast"
+        if quant is None
+        else "authoritative_ai_analysis_persisted"
+        if analysis is not None and analysis.validation_passed
+        else "structured_output_invalid"
+        if analysis is not None
+        else "ai_analysis_recovery_in_progress"
+        if claim_recovering
+        else "ai_analysis_running"
+        if claim_active
+        else "ai_analysis_stalled_recovery_required"
+        if claim_stalled
+        else reasoning_claim.failure_reason
+        if reasoning_claim is not None and reasoning_claim.status == "FAILED"
+        else (getattr(gate_decision, "gate_skip_reason", None) or "authoritative_ai_analysis_missing")
+    )
     stages["ai_reasoning"] = _system_stage(
         "ai_reasoning", "AI Market Analysis",
-        "disabled" if not reasoning_enabled else "blocked" if quant is None or analysis is None else "failed" if not analysis.validation_passed else "healthy",
-        "ai_centric_shadow_mode_disabled" if not reasoning_enabled else "awaiting_quant_forecast" if quant is None else (getattr(gate_decision, "gate_skip_reason", None) or "authoritative_ai_analysis_missing") if analysis is None else "structured_output_invalid" if not analysis.validation_passed else "authoritative_ai_analysis_persisted",
+        ai_stage_status,
+        ai_stage_reason,
         timestamp=getattr(analysis, "analysis_timestamp", None), record_id=getattr(analysis, "analysis_id", None),
         details={
             "attempted_cutoff": getattr(state, "market_data_boundary", None),
@@ -2000,6 +2062,13 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
             "signal": getattr(getattr(signal_decision, "final_action", None), "value", None),
             "confidence": getattr(analysis_signal, "confidence", None),
             "strength": getattr(getattr(analysis_signal, "strength", None), "value", None),
+            "claim_id": getattr(reasoning_claim, "claim_id", None),
+            "claim_status": getattr(reasoning_claim, "status", None),
+            "claimed_by": getattr(reasoning_claim, "claimed_by", None),
+            "claimed_at": getattr(reasoning_claim, "claimed_at", None),
+            "heartbeat_at": getattr(reasoning_claim, "heartbeat_at", None),
+            "lease_expires_at": getattr(reasoning_claim, "lease_expires_at", None),
+            "expired_claim_count": getattr(reasoning_claim, "expired_claim_count", 0),
         },
     )
     stages["proposal"] = _system_stage(
