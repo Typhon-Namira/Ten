@@ -255,6 +255,8 @@ class FullSystemIntegrationService:
             self._unsubscribe()
             self._unsubscribe = None
         self.started = False
+        if self.ai_reasoning is not None and hasattr(self.ai_reasoning, "shutdown"):
+            await self.ai_reasoning.shutdown()
 
     async def _on_candle(self, event: Event) -> None:
         candle = Candle.model_validate(event.payload)

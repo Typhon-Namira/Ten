@@ -24,6 +24,9 @@ tokens_per_analysis_degraded_threshold: 6000
 # Each provider client is configured five seconds below this orchestration deadline.
 request_timeout_seconds: 60.0
 llm_concurrency_limit: 1
+claim_lease_seconds: 90
+claim_heartbeat_seconds: 20
+claim_max_runtime_seconds: 180
 provider_backoff_initial_seconds: 5.0
 provider_backoff_max_seconds: 300.0
 target_input_tokens: 4000

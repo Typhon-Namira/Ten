@@ -174,6 +174,8 @@ async def test_database_reasoning_cycle_claim_is_distributed_and_idempotent(_sch
             "1.0",
             "contract-1",
             now,
+            claimed_by="worker-a",
+            lease_seconds=90,
         ),
         second_repository.claim_reasoning_cycle(
             key,
@@ -182,10 +184,14 @@ async def test_database_reasoning_cycle_claim_is_distributed_and_idempotent(_sch
             "1.0",
             "contract-1",
             now,
+            claimed_by="worker-b",
+            lease_seconds=90,
         ),
     )
 
-    assert sorted((first, second)) == [False, True]
+    assert sorted((first.acquired, second.acquired)) == [False, True]
+    blocked = first if not first.acquired else second
+    assert blocked.outcome == "ACTIVE_CLAIM"
 
 
 @pytest.mark.asyncio
