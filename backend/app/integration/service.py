@@ -620,6 +620,7 @@ class FullSystemIntegrationService:
                                         trigger_timeframe=timeframe.value,
                                         candles=tuple(candles),
                                         evaluated_at=self.clock(),
+                                        correlation_id=envelope.correlation_id,
                                     )
                 except Exception:
                     logger.exception("ai_centric_shadow_pipeline_failed", extra=log_context)

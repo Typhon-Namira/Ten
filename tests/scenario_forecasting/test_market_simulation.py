@@ -513,6 +513,48 @@ async def test_startup_recovery_processes_latest_missing_m15_from_persisted_inpu
 
 
 @pytest.mark.asyncio
+async def test_startup_recovery_reopens_simulation_not_invoked() -> None:
+    state, quant, synthesis = await scenario_inputs()
+    state = state.model_copy(update={"trigger_timeframe": "M15"})
+    repository = InMemoryMarketSimulationRepository()
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(
+            MarketSimulationConfig(
+                primary_scenario_threshold=0,
+                email_scenario_threshold=0,
+            )
+        ),
+        market_state_repository=AsyncMock(),
+        quant_repository=AsyncMock(),
+        synthesis_repository=AsyncMock(),
+    )
+    service.market_state_repository.latest_state.return_value = state
+    service.quant_repository.result_for_state.return_value = quant
+    service.synthesis_repository.for_state.return_value = synthesis
+    await service.record_blocked_cutoff(
+        instrument=state.instrument,
+        market_cutoff=state.market_data_boundary,
+        server_time=state.market_data_boundary,
+        reason="SIMULATION_NOT_INVOKED",
+        market_state_id=state.state_id,
+        quantitative_forecast_id=quant.result_id,
+    )
+
+    recovered = await service.recover_latest(
+        state.instrument,
+        now=state.market_data_boundary + timedelta(minutes=1),
+    )
+
+    assert recovered is not None
+    attempt = await repository.latest_attempt(state.instrument)
+    assert attempt is not None
+    assert attempt.status.terminal
+    assert attempt.failure_type is None
+
+
+@pytest.mark.asyncio
 async def test_newer_m5_state_does_not_hide_latest_recoverable_m15_state() -> None:
     state, _, _ = await scenario_inputs()
     m15_state = state.model_copy(
