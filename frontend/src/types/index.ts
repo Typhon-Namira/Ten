@@ -570,6 +570,7 @@ export interface QuantHorizonPrediction {
   neutral_probability: number
   expected_return: number
   expected_base_movement: number
+  expected_base_movement_unit?: 'decimal_return' | 'price_points' | 'normalized'
   expected_minimum_movement: number
   expected_maximum_movement: number
   expected_volatility: number
@@ -953,6 +954,28 @@ export interface PrimaryScenarioSelection {
   lifecycle_status: string
 }
 
+export interface AuthoritativeSimulationAttempt {
+  attempt_id: string
+  instrument: string
+  timeframe: 'M15'
+  market_cutoff: string
+  simulation_version: string
+  status: 'SCHEDULED' | 'RUNNING' | 'SUCCESS' | 'NO_SIGNAL' | 'ANALYTICAL_ONLY' | 'BLOCKED' | 'FAILED' | 'SKIPPED'
+  candidate_count: number
+  primary_scenario_id: string | null
+  alternative_scenario_id: string | null
+  failure_stage: string | null
+  failure_type: string | null
+  failure_message: string | null
+  skip_reason: string | null
+  m5_cutoff: string | null
+  cutoff_difference_seconds: number | null
+  synchronization_status: string
+  scheduled_at: string
+  started_at: string | null
+  completed_at: string | null
+}
+
 export interface AuthoritativeCycleStage {
   status: SystemStageStatus
   reason: string
@@ -971,7 +994,7 @@ export interface LatestCompletedCycle {
   analysis_timestamp?: string | null
   signal_generated_at?: string | null
   decision_timestamp?: string | null
-  action?: 'BUY' | 'SELL' | 'HOLD' | null
+  action?: 'BUY' | 'SELL' | 'PENDING' | 'NO_SIGNAL' | 'ANALYTICAL_ONLY' | 'BLOCKED' | 'FAILED' | 'SKIPPED' | null
   publication_eligible?: boolean
   lifecycle_status?: AIAnalysisSignal['lifecycle_status'] | 'CURRENT' | null
   cycle_version?: string | null
@@ -992,6 +1015,14 @@ export interface LatestCompletedCycle {
     broker_execution: false
   }
   primary_market_scenario?: PrimaryScenarioSelection | null
+  authoritative_simulation?: AuthoritativeSimulationAttempt | null
+  authoritative_timestamps?: {
+    latest_market_data_cutoff: string | null
+    latest_m5_analytical_cutoff: string | null
+    latest_m15_analytical_cutoff: string | null
+    latest_authoritative_simulation_cutoff: string | null
+    dashboard_response_generated_at: string
+  }
   timeframe_matrix?: TimeframeAnalyticalSignal[]
   signal_lifecycle?: {
     status: AIAnalysisSignal['lifecycle_status'] | 'CURRENT'

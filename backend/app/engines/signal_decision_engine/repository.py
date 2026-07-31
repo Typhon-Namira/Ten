@@ -267,6 +267,7 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
                 and decision.mode == DecisionMode.LIVE
                 and decision.publication_eligible
                 and notification is not None
+                and notification.get("primary_scenario_id") is not None
                 and notification.get("direction") in {"BUY", "SELL"}
                 and all(
                     notification.get(field) is not None

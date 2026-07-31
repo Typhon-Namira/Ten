@@ -8,10 +8,11 @@ function percent(input: number | null | undefined): string {
 }
 
 export function MarketStateSummary({ data }: { data: MarketIntelligence | null }) {
-  if (!data) return <section className="ai-card"><SectionHeader eyebrow="Market intelligence" title="Unified market state" /><EmptyState title="Waiting for market state" detail="Waiting for a synchronized M5 and M15 state." /></section>
+  const header = <SectionHeader eyebrow="Supporting intelligence" title="Market Context" action={<CandlestickChart size={19} />} />
+  if (!data) return <section className="ai-card">{header}<EmptyState title="Waiting for market state" detail="Waiting for a synchronized M5 and M15 state." /></section>
   const staleSources = data.diagnostics.filter(item => item.freshness === 'stale')
   return <section className="ai-card">
-    <SectionHeader eyebrow="Market intelligence" title="Unified market state" action={<CandlestickChart size={19} />} />
+    {header}
     <div className="summary-list">
       {data.current_candle && <div><span>Market price</span><strong>{data.current_candle.close.toFixed(2)}</strong></div>}
       {data.market_regime.dominant_regime && <div><span>Regime</span><strong>{humanize(data.market_regime.dominant_regime)}</strong></div>}
@@ -42,14 +43,26 @@ export function MarketStateSummary({ data }: { data: MarketIntelligence | null }
 
 export function QuantForecastSummary({ forecast, calibration, unavailableReason }: { forecast: QuantForecastResult | null; calibration: QuantCalibrationReport | null; unavailableReason?: string }) {
   return <section className="ai-card">
-    <SectionHeader eyebrow="Quantitative forecast" title="Multi-horizon outlook" action={<Sigma size={19} />} />
+    <SectionHeader eyebrow="Converted XAUUSD price movement" title="Quantitative Outlook" action={<Sigma size={19} />} />
     {!forecast || forecast.status !== 'available' ? <EmptyState title="Forecast not completed" detail={humanize(forecast?.reason_codes[0] ?? unavailableReason ?? 'awaiting_first_completed_cycle')} /> : <>
       <div className="horizon-stack">
-        {forecast.predictions.map(item => <article className="horizon" key={item.horizon.horizon_id}>
+        {forecast.predictions.map(item => {
+          const unit = item.expected_base_movement_unit ?? 'decimal_return'
+          const converted = unit === 'decimal_return'
+            ? item.reference_price * item.expected_base_movement
+            : unit === 'price_points'
+              ? item.expected_base_movement
+              : null
+          return <article className="horizon" key={item.horizon.horizon_id}>
           <div className="horizon__head"><div><strong>{item.horizon.horizon_id.replaceAll('_', ' × ')}</strong><span>{item.horizon.duration_seconds / 60} minute horizon</span></div><StatusBadge tone="neutral">{humanize(forecast.calibration_status)}</StatusBadge></div>
           <ProbabilityBar buy={item.buy_probability} sell={item.sell_probability} neutral={item.neutral_probability} />
-          <div className="horizon__meta"><span>Expected move <strong>{item.expected_base_movement.toFixed(3)}</strong></span><span>Expected volatility <strong>{item.expected_volatility.toFixed(3)}</strong></span></div>
-        </article>)}
+          <div className="horizon__meta">
+            <span>Converted XAUUSD move <strong>{converted == null ? 'Unavailable' : `${converted.toFixed(2)} points`}</strong></span>
+            <span>Reference price <strong>{item.reference_price.toFixed(2)}</strong></span>
+            <span>Raw model value <strong>{item.expected_base_movement.toFixed(6)} {humanize(unit)}</strong></span>
+            <span>Expected volatility <strong>{item.expected_volatility.toFixed(4)} model units</strong></span>
+          </div>
+        </article>})}
       </div>
       <div className="card-foot"><span>{humanize(forecast.model_name)} · v{forecast.model_version}</span><StatusBadge tone="neutral">Quantitative model</StatusBadge></div>
       <DetailDrawer label="Model and calibration details">

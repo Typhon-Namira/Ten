@@ -1516,7 +1516,13 @@ class ScenarioOutcomeRecord(Base):
 class MarketSimulationCycleRecord(Base):
     __tablename__ = "market_simulation_cycles"
     __table_args__ = (
-        Index("ux_market_simulation_boundary", "instrument", "market_cutoff", unique=True),
+        Index(
+            "ux_market_simulation_boundary",
+            "instrument",
+            "market_cutoff",
+            "configuration_version",
+            unique=True,
+        ),
     )
 
     simulation_cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
@@ -1524,7 +1530,6 @@ class MarketSimulationCycleRecord(Base):
     market_state_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
-        unique=True,
         index=True,
     )
     synthesis_id: Mapped[UUID] = mapped_column(
@@ -1548,6 +1553,54 @@ class MarketSimulationCycleRecord(Base):
     engine_version: Mapped[str] = mapped_column(String(32))
     configuration_version: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AuthoritativeSimulationAttemptRecord(Base):
+    """Durable lifecycle record created before an authoritative M15 simulation runs."""
+
+    __tablename__ = "authoritative_simulation_attempts"
+    __table_args__ = (
+        Index(
+            "ux_authoritative_simulation_attempt_boundary",
+            "instrument",
+            "timeframe",
+            "market_cutoff",
+            "simulation_version",
+            unique=True,
+        ),
+    )
+
+    attempt_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(8), index=True)
+    market_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    simulation_version: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    simulation_cycle_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("market_simulation_cycles.simulation_cycle_id", ondelete="SET NULL"),
+        index=True,
+    )
+    primary_scenario_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="SET NULL"),
+        index=True,
+    )
+    alternative_scenario_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="SET NULL"),
+        index=True,
+    )
+    failure_stage: Mapped[str | None] = mapped_column(String(96))
+    failure_type: Mapped[str | None] = mapped_column(String(128))
+    failure_message: Mapped[str | None] = mapped_column(String(1000))
+    skip_reason: Mapped[str | None] = mapped_column(String(128))
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class CandidateMarketScenarioRecord(Base):
@@ -1613,7 +1666,6 @@ class PrimaryScenarioSelectionRecord(Base):
     market_state_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
-        unique=True,
         index=True,
     )
     primary_candidate_id: Mapped[UUID | None] = mapped_column(

@@ -42,6 +42,19 @@ class IntegrationWorker:
             logger.critical("integration.worker.task_died", exc_info=exc, extra={"worker": "integration", "error_type": type(exc).__name__})
 
     async def run(self) -> None:
+        simulation = getattr(self.service, "market_simulation", None)
+        if simulation is not None and hasattr(simulation, "recover_latest"):
+            for configured in self.service.config.instruments:
+                try:
+                    await simulation.recover_latest(configured.instrument_id)
+                except Exception as exc:
+                    logger.exception(
+                        "market_simulation.recovery.failed",
+                        extra={
+                            "instrument": configured.instrument_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
         while not self._stop.is_set():
             self.last_heartbeat_at = datetime.now(UTC)
             logger.info("worker.heartbeat", extra={"worker": "integration"})

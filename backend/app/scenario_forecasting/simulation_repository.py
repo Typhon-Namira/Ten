@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from backend.app.storage.models import (
     CandidateScenarioOutcomeRecord,
     CandidateMarketScenarioRecord,
+    AuthoritativeSimulationAttemptRecord,
     MarketSimulationCycleRecord,
     PrimaryScenarioGeometryRecord,
     PrimaryScenarioSelectionRecord,
@@ -24,6 +25,7 @@ from backend.app.storage.models import (
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
 
 from .simulation_models import (
+    AuthoritativeSimulationAttempt,
     CandidateMarketScenario,
     CandidateScenarioOutcome,
     MarketSimulationCycle,
@@ -32,6 +34,22 @@ from .simulation_models import (
 
 
 class MarketSimulationRepository(Protocol):
+    async def save_attempt(
+        self, attempt: AuthoritativeSimulationAttempt
+    ) -> AuthoritativeSimulationAttempt: ...
+
+    async def latest_attempt(
+        self, instrument: str
+    ) -> AuthoritativeSimulationAttempt | None: ...
+
+    async def recent_attempts(
+        self, instrument: str, limit: int = 16
+    ) -> tuple[AuthoritativeSimulationAttempt, ...]: ...
+
+    async def at_cutoff(
+        self, instrument: str, market_cutoff: datetime
+    ) -> PrimaryScenarioSelection | None: ...
+
     async def save(
         self,
         simulation: MarketSimulationCycle,
@@ -61,6 +79,7 @@ class InMemoryMarketSimulationRepository:
         self.selections: dict[UUID, PrimaryScenarioSelection] = {}
         self._state: dict[UUID, UUID] = {}
         self.outcomes: dict[UUID, CandidateScenarioOutcome] = {}
+        self.attempts: dict[UUID, AuthoritativeSimulationAttempt] = {}
         self._lock = asyncio.Lock()
 
     async def save(
@@ -76,6 +95,51 @@ class InMemoryMarketSimulationRepository:
             self.selections[selection.selection_id] = selection
             self._state[simulation.market_state_id] = selection.selection_id
             return selection
+
+    async def save_attempt(
+        self, attempt: AuthoritativeSimulationAttempt
+    ) -> AuthoritativeSimulationAttempt:
+        async with self._lock:
+            existing = self.attempts.get(attempt.attempt_id)
+            if existing is not None and existing.status.terminal:
+                return existing
+            self.attempts[attempt.attempt_id] = attempt
+            return attempt
+
+    async def latest_attempt(
+        self, instrument: str
+    ) -> AuthoritativeSimulationAttempt | None:
+        values = await self.recent_attempts(instrument, 1)
+        return values[0] if values else None
+
+    async def recent_attempts(
+        self, instrument: str, limit: int = 16
+    ) -> tuple[AuthoritativeSimulationAttempt, ...]:
+        async with self._lock:
+            values = sorted(
+                (
+                    item
+                    for item in self.attempts.values()
+                    if item.instrument == instrument
+                ),
+                key=lambda item: (item.market_cutoff, item.server_time),
+                reverse=True,
+            )
+            return tuple(values[:limit])
+
+    async def at_cutoff(
+        self, instrument: str, market_cutoff: datetime
+    ) -> PrimaryScenarioSelection | None:
+        async with self._lock:
+            return next(
+                (
+                    item
+                    for item in self.selections.values()
+                    if item.instrument == instrument
+                    and item.market_cutoff == market_cutoff
+                ),
+                None,
+            )
 
     async def for_state(self, market_state_id: UUID) -> PrimaryScenarioSelection | None:
         async with self._lock:
@@ -119,6 +183,112 @@ class InMemoryMarketSimulationRepository:
 class SqlAlchemyMarketSimulationRepository(ScopedSessionRepository):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         super().__init__(session_factory)
+
+    @scoped_session
+    async def save_attempt(
+        self, attempt: AuthoritativeSimulationAttempt
+    ) -> AuthoritativeSimulationAttempt:
+        values = {
+            "attempt_id": attempt.attempt_id,
+            "instrument": attempt.instrument,
+            "timeframe": attempt.timeframe,
+            "market_cutoff": attempt.market_cutoff,
+            "simulation_version": attempt.simulation_version,
+            "status": attempt.status.value,
+            "payload": attempt.model_dump(mode="json"),
+            "scheduled_at": attempt.scheduled_at,
+            "started_at": attempt.started_at,
+            "completed_at": attempt.completed_at,
+            "candidate_count": attempt.candidate_count,
+            "simulation_cycle_id": attempt.simulation_cycle_id,
+            "primary_scenario_id": attempt.primary_scenario_id,
+            "alternative_scenario_id": attempt.alternative_scenario_id,
+            "failure_stage": attempt.failure_stage,
+            "failure_type": attempt.failure_type,
+            "failure_message": attempt.failure_message,
+            "skip_reason": attempt.skip_reason,
+            "retry_count": attempt.retry_count,
+        }
+        await self.session.execute(
+            insert(AuthoritativeSimulationAttemptRecord)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=[
+                    "instrument",
+                    "timeframe",
+                    "market_cutoff",
+                    "simulation_version",
+                ],
+                set_={
+                    key: value
+                    for key, value in values.items()
+                    if key
+                    not in {
+                        "attempt_id",
+                        "instrument",
+                        "timeframe",
+                        "market_cutoff",
+                        "simulation_version",
+                        "scheduled_at",
+                    }
+                },
+                where=AuthoritativeSimulationAttemptRecord.status.in_(
+                    ("SCHEDULED", "RUNNING", "FAILED")
+                ),
+            )
+        )
+        await self.session.commit()
+        record = await self.session.get(
+            AuthoritativeSimulationAttemptRecord, attempt.attempt_id
+        )
+        return (
+            AuthoritativeSimulationAttempt.model_validate(record.payload)
+            if record is not None
+            else attempt
+        )
+
+    @scoped_session
+    async def latest_attempt(
+        self, instrument: str
+    ) -> AuthoritativeSimulationAttempt | None:
+        values = await self.recent_attempts(instrument, 1)
+        return values[0] if values else None
+
+    @scoped_session
+    async def recent_attempts(
+        self, instrument: str, limit: int = 16
+    ) -> tuple[AuthoritativeSimulationAttempt, ...]:
+        records = (
+            await self.session.scalars(
+                select(AuthoritativeSimulationAttemptRecord)
+                .where(AuthoritativeSimulationAttemptRecord.instrument == instrument)
+                .order_by(
+                    AuthoritativeSimulationAttemptRecord.market_cutoff.desc(),
+                    AuthoritativeSimulationAttemptRecord.scheduled_at.desc(),
+                )
+                .limit(limit)
+            )
+        ).all()
+        return tuple(
+            AuthoritativeSimulationAttempt.model_validate(item.payload)
+            for item in records
+        )
+
+    @scoped_session
+    async def at_cutoff(
+        self, instrument: str, market_cutoff: datetime
+    ) -> PrimaryScenarioSelection | None:
+        record = (
+            await self.session.scalars(
+                select(PrimaryScenarioSelectionRecord)
+                .where(
+                    PrimaryScenarioSelectionRecord.instrument == instrument,
+                    PrimaryScenarioSelectionRecord.market_cutoff == market_cutoff,
+                )
+                .limit(1)
+            )
+        ).first()
+        return await self._hydrate(record) if record else None
 
     @scoped_session
     async def save(

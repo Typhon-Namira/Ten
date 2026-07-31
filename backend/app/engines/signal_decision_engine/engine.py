@@ -49,10 +49,9 @@ class ConservativeSignalDecisionPolicy:
         strength = abs(score.directional_score)
         primary_selection = decision_input.current_primary_scenario
         primary = primary_selection.primary if primary_selection is not None else None
-        primary_authority_required = bool(
-            decision_input.market_snapshot_id is not None
-            and decision_input.timeframe == "M15"
-        )
+        # Final decisions validate Scenario authority only.  M5 and historical legacy analyses
+        # may remain readable evidence, but can never originate a competing BUY/SELL.
+        primary_authority_required = True
         if primary_selection is not None:
             direction = {
                 "BUY": DecisionDirection.BULLISH,
@@ -629,9 +628,9 @@ class ConservativeSignalDecisionPolicy:
             take_profit_targets=take_profit_targets,
             risk_reward=risk_reward,
             decision_reason=(
-                f"Deterministic synthesis produced {final_action.value} from market score, "
-                "validated AI interpretation, institutional geometry, temporal consistency, "
-                f"and risk rules. {analysis_signal.quant_ai_explanation if analysis_signal else ''}"
+                f"Primary Scenario validation produced {final_action.value}; "
+                "risk, geometry, freshness, and publication rules were evaluated "
+                "without originating or overriding direction."
             ),
             opposite_direction_rejection=(
                 f"Opposite direction rejected because deterministic directional evidence is {direction.value}."
@@ -703,43 +702,7 @@ class ConservativeSignalDecisionPolicy:
                         else None
                     ),
                 }
-                if primary_authority_required and primary_selection is not None and primary is not None
-                else
-                {
-                    "signal_id": str(analysis_signal.signal_id),
-                    "analysis_id": str(analysis_signal.analysis_id),
-                    "synthesis_id": (
-                        str(analysis_signal.synthesis_id)
-                        if analysis_signal.synthesis_id is not None
-                        else None
-                    ),
-                    "cycle_id": str(analysis_signal.cycle_id),
-                    "direction": analysis_signal.signal.value,
-                    "combined_confidence": analysis_signal.signal_confidence,
-                    "combined_strength": analysis_signal.strength.value,
-                    "entry": analysis_signal.entry,
-                    "stop_loss": analysis_signal.stop_loss,
-                    "take_profit": analysis_signal.take_profit,
-                    "risk_reward": analysis_signal.risk_reward_ratio,
-                    "geometry_owner_timeframe": analysis_signal.geometry_owner_timeframe,
-                    "structural_source_ids": analysis_signal.geometry_basis,
-                    "timeframe_summaries": analysis_signal.timeframe_summaries,
-                    "expected_horizon_seconds": analysis_signal.expected_holding_seconds,
-                    "created_at": analysis_signal.generated_at.isoformat(),
-                    "expires_at": (
-                        analysis_signal.valid_until.isoformat()
-                        if analysis_signal.valid_until is not None
-                        else None
-                    ),
-                    "execution_status": analysis_signal.execution_status.value,
-                    "execution_blockers": analysis_signal.blocking_reasons,
-                    "analytical_thesis": analysis_signal.reasoning_summary,
-                    "current_market_price": decision_input.current_price,
-                    "ai_confidence": analysis_signal.analysis_confidence,
-                    "quant_confidence": analysis_signal.quant_confidence,
-                    "quant_ai_alignment": analysis_signal.quant_ai_alignment.value,
-                }
-                if analysis_signal is not None
+                if primary_selection is not None and primary is not None
                 else None
             ),
         )

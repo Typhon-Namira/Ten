@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from uuid import uuid4
+from unittest.mock import AsyncMock
 
 import pytest
 
 from backend.app.quant_forecasting.models import ForecastValueUnit
+from backend.app.market_state.repository import InMemoryUnifiedMarketStateRepository
 from backend.app.engines.signal_decision_engine import (
     ConservativeSignalDecisionPolicy,
     FinalSignalAction,
@@ -23,6 +26,7 @@ from backend.app.scenario_forecasting.simulation_models import (
     CandidateDirection,
     ScenarioSignalAction,
     SelectionStatus,
+    SimulationAttemptStatus,
 )
 from backend.app.scenario_forecasting.simulation_repository import (
     InMemoryMarketSimulationRepository,
@@ -322,3 +326,215 @@ async def test_primary_scenario_controls_final_direction_and_geometry() -> None:
         decision.notification_context["primary_scenario_id"]
         == str(selection.primary_candidate_id)
     )
+
+
+@pytest.mark.asyncio
+async def test_m15_close_is_terminal_and_duplicate_processing_is_idempotent() -> None:
+    state, quant, synthesis = await scenario_inputs()
+    repository = InMemoryMarketSimulationRepository()
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(
+            MarketSimulationConfig(
+                primary_scenario_threshold=0,
+                email_scenario_threshold=0,
+            )
+        ),
+    )
+
+    first = await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M15",
+        evaluated_at=state.market_data_boundary,
+    )
+    second = await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M15",
+        evaluated_at=state.market_data_boundary + timedelta(seconds=1),
+    )
+
+    assert first is not None
+    assert second == first
+    assert len(repository.attempts) == 1
+    attempt = await repository.latest_attempt(state.instrument)
+    assert attempt is not None
+    assert attempt.status.terminal
+    assert attempt.candidate_count == 7
+    assert len(repository.simulations) == 1
+
+
+@pytest.mark.asyncio
+async def test_m15_close_boundary_is_not_eligible_one_second_early() -> None:
+    state, quant, synthesis = await scenario_inputs()
+    repository = InMemoryMarketSimulationRepository()
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(),
+    )
+
+    result = await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M15",
+        evaluated_at=state.market_data_boundary - timedelta(seconds=1),
+    )
+
+    assert result is None
+    attempt = await repository.latest_attempt(state.instrument)
+    assert attempt is not None
+    assert attempt.status == SimulationAttemptStatus.SKIPPED
+    assert attempt.skip_reason == "M15_CANDLE_NOT_CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_four_consecutive_m15_closes_each_get_one_terminal_cycle() -> None:
+    base_state, base_quant, base_synthesis = await scenario_inputs()
+    repository = InMemoryMarketSimulationRepository()
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(
+            MarketSimulationConfig(
+                primary_scenario_threshold=0,
+                email_scenario_threshold=0,
+            )
+        ),
+    )
+    cutoffs = tuple(
+        base_state.market_data_boundary + timedelta(minutes=15 * index)
+        for index in range(4)
+    )
+
+    for cutoff in cutoffs:
+        state_id = uuid4()
+        cycle_id = uuid4()
+        frames = tuple(
+            frame.model_copy(
+                update={
+                    "frame_id": uuid4(),
+                    "source_candle_open_at": cutoff
+                    - timedelta(minutes=5 if frame.timeframe == "M5" else 15),
+                    "source_candle_close_at": cutoff,
+                    "expected_candle_close_at": cutoff,
+                }
+            )
+            for frame in base_state.timeframes
+        )
+        state = base_state.model_copy(
+            update={
+                "state_id": state_id,
+                "cycle_id": cycle_id,
+                "market_data_boundary": cutoff,
+                "knowledge_cutoff": cutoff,
+                "created_at": cutoff,
+                "timeframes": frames,
+            }
+        )
+        quant = base_quant.model_copy(
+            update={
+                "result_id": uuid4(),
+                "market_state_id": state_id,
+                "cycle_id": cycle_id,
+                "point_in_time": cutoff,
+                "created_at": cutoff,
+            }
+        )
+        synthesis = base_synthesis.model_copy(
+            update={
+                "synthesis_id": uuid4(),
+                "market_state_id": state_id,
+                "cycle_id": cycle_id,
+                "analysis_id": uuid4(),
+                "market_cutoff": cutoff,
+                "created_at": cutoff,
+            }
+        )
+        await service.process(
+            state,
+            quant,
+            synthesis,
+            trigger_timeframe="M15",
+            evaluated_at=cutoff,
+        )
+
+    attempts = await repository.recent_attempts(base_state.instrument)
+    assert tuple(item.market_cutoff for item in reversed(attempts)) == cutoffs
+    assert all(item.status.terminal for item in attempts)
+    assert all(item.candidate_count == 7 for item in attempts)
+    assert len(repository.simulations) == 4
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_processes_latest_missing_m15_from_persisted_inputs() -> None:
+    state, quant, synthesis = await scenario_inputs()
+    state = state.model_copy(update={"trigger_timeframe": "M15"})
+    repository = InMemoryMarketSimulationRepository()
+    state_repository = AsyncMock()
+    state_repository.latest_state.return_value = state
+    quant_repository = AsyncMock()
+    quant_repository.result_for_state.return_value = quant
+    synthesis_repository = AsyncMock()
+    synthesis_repository.for_state.return_value = synthesis
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(
+            MarketSimulationConfig(
+                primary_scenario_threshold=0,
+                email_scenario_threshold=0,
+            )
+        ),
+        market_state_repository=state_repository,
+        quant_repository=quant_repository,
+        synthesis_repository=synthesis_repository,
+    )
+
+    recovered = await service.recover_latest(
+        state.instrument,
+        now=state.market_data_boundary + timedelta(minutes=1),
+    )
+
+    assert recovered is not None
+    state_repository.latest_state.assert_awaited_once_with(
+        state.instrument,
+        trigger_timeframe="M15",
+    )
+    attempt = await repository.latest_attempt(state.instrument)
+    assert attempt is not None and attempt.status.terminal
+    assert attempt.market_cutoff == state.market_data_boundary
+
+
+@pytest.mark.asyncio
+async def test_newer_m5_state_does_not_hide_latest_recoverable_m15_state() -> None:
+    state, _, _ = await scenario_inputs()
+    m15_state = state.model_copy(
+        update={
+            "state_id": uuid4(),
+            "trigger_timeframe": "M15",
+        }
+    )
+    newer_m5_state = state.model_copy(
+        update={
+            "state_id": uuid4(),
+            "market_data_boundary": state.market_data_boundary
+            + timedelta(minutes=5),
+            "trigger_timeframe": "M5",
+        }
+    )
+    repository = InMemoryUnifiedMarketStateRepository()
+    await repository.save_state(m15_state)
+    await repository.save_state(newer_m5_state)
+
+    latest_m15 = await repository.latest_state(
+        state.instrument,
+        trigger_timeframe="M15",
+    )
+
+    assert latest_m15 == m15_state

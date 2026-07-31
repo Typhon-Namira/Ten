@@ -449,10 +449,25 @@ async def _completed_cycle_projection(
         request.app.state, "market_simulation_repository", None
     )
     primary_scenario = (
-        await simulation_repository.for_state(signal.snapshot_id)
+        await simulation_repository.latest(instrument)
         if simulation_repository is not None
         else None
     )
+    simulation_attempt = (
+        await simulation_repository.latest_attempt(instrument)
+        if simulation_repository is not None
+        else None
+    )
+    if (
+        primary_scenario is not None
+        and simulation_attempt is not None
+        and simulation_attempt.market_cutoff > primary_scenario.market_cutoff
+        and simulation_attempt.status.value
+        not in {"SCHEDULED", "RUNNING", "SUCCESS", "ANALYTICAL_ONLY"}
+    ):
+        # A newer terminal M15 outcome is authoritative.  Never fall back to an older BUY/SELL
+        # after a newer cutoff explicitly resolved as NO_SIGNAL/BLOCKED/FAILED/SKIPPED.
+        primary_scenario = None
     ranked_scenarios = (
         await simulation_repository.candidates(primary_scenario.simulation_cycle_id)
         if simulation_repository is not None and primary_scenario is not None
@@ -486,7 +501,43 @@ async def _completed_cycle_projection(
         and combined_scenario.market_cutoff_time > analysis.knowledge_cutoff
     ):
         combined_scenario = None
-    publication = _publication_projection(decision)
+    scenario_decision = None
+    if primary_scenario is not None:
+        scenario_analysis = await request.app.state.ai_reasoning_repository.analysis_for_state(
+            primary_scenario.market_state_id
+        )
+        scenario_signal = (
+            await request.app.state.ai_reasoning_repository.signal_for_analysis(
+                scenario_analysis.analysis_id
+            )
+            if scenario_analysis is not None
+            else None
+        )
+        scenario_decision = (
+            await _decision_for_analysis_signal(request, scenario_signal)
+            if scenario_signal is not None
+            else None
+        )
+    publication = (
+        _publication_projection(scenario_decision)
+        if primary_scenario is not None and primary_scenario.signal_eligible
+        else {
+            "status": "INELIGIBLE" if primary_scenario is not None else "PENDING",
+            "eligible": False,
+            "reason": (
+                primary_scenario.rejection_reason
+                or "primary_scenario_geometry_or_score_ineligible"
+                if primary_scenario is not None
+                else (
+                    simulation_attempt.failure_message
+                    or simulation_attempt.skip_reason
+                    or simulation_attempt.status.value.lower()
+                    if simulation_attempt is not None
+                    else "awaiting_authoritative_m15_simulation"
+                )
+            ),
+        }
+    )
     generated_signal_count = (
         await request.app.state.ai_reasoning_repository.count_analysis_signals(
             instrument,
@@ -506,7 +557,23 @@ async def _completed_cycle_projection(
         signal,
         now=now,
     )
-    authoritative_action = decision.final_action.value
+    authoritative_action = (
+        primary_scenario.authoritative_action.value
+        if primary_scenario is not None
+        and primary_scenario.signal_eligible
+        and scenario_decision is not None
+        and scenario_decision.publication_eligible
+        else "BLOCKED"
+        if primary_scenario is not None and primary_scenario.signal_eligible
+        else "ANALYTICAL_ONLY"
+        if primary_scenario is not None
+        and primary_scenario.status.value == "SELECTED"
+        else "NO_SIGNAL"
+        if primary_scenario is not None
+        else simulation_attempt.status.value
+        if simulation_attempt is not None
+        else "PENDING"
+    )
     authoritative_lifecycle_status = (
         "HOLD"
         if authoritative_action == "HOLD"
@@ -610,10 +677,27 @@ async def _completed_cycle_projection(
             ),
         },
         "primary_scenario": {
-            "status": "healthy" if primary_scenario is not None else "no_data",
+            "status": (
+                "healthy"
+                if primary_scenario is not None
+                else "failed"
+                if simulation_attempt is not None
+                and simulation_attempt.status.value == "FAILED"
+                else "blocked"
+                if simulation_attempt is not None
+                and simulation_attempt.status.value in {"BLOCKED", "SKIPPED"}
+                else "running"
+                if simulation_attempt is not None
+                and simulation_attempt.status.value in {"SCHEDULED", "RUNNING"}
+                else "no_data"
+            ),
             "reason": (
                 "authoritative_m15_primary_scenario_persisted"
                 if primary_scenario is not None
+                else simulation_attempt.failure_message
+                or simulation_attempt.skip_reason
+                or simulation_attempt.status.value.lower()
+                if simulation_attempt is not None
                 else "awaiting_authoritative_m15_simulation"
             ),
             "record_id": (
@@ -694,9 +778,7 @@ async def _completed_cycle_projection(
     analytical_direction = (
         primary_scenario.authoritative_action.value
         if primary_scenario is not None
-        else combined_signal.analytical_direction.value
-        if combined_signal is not None
-        else signal.signal.value
+        else None
     )
     primary_candidate = primary_scenario.primary if primary_scenario is not None else None
     primary_geometry = primary_candidate.geometry if primary_candidate is not None else None
@@ -723,12 +805,6 @@ async def _completed_cycle_projection(
         and primary_scenario.signal_eligible
         and primary_candidate is not None
         and primary_geometry is not None
-        else _geometry_projection(
-            multi_timeframe_signal,
-            minimum_risk_reward=minimum_rr,
-            now=now,
-        )
-        if primary_scenario is None
         else None
     )
     guardrail_blockers = [
@@ -787,6 +863,44 @@ async def _completed_cycle_projection(
             if primary_scenario is not None
             else None
         ),
+        "authoritative_simulation": (
+            simulation_attempt.model_dump(mode="json")
+            if simulation_attempt is not None
+            else None
+        ),
+        "authoritative_timestamps": {
+            "latest_market_data_cutoff": market_time,
+            "latest_m5_analytical_cutoff": (
+                next(
+                    (
+                        item.source_candle_close_at
+                        for item in state.timeframes
+                        if item.timeframe == "M5"
+                    ),
+                    None,
+                )
+                if state is not None
+                else None
+            ),
+            "latest_m15_analytical_cutoff": (
+                next(
+                    (
+                        item.source_candle_close_at
+                        for item in state.timeframes
+                        if item.timeframe == "M15"
+                    ),
+                    None,
+                )
+                if state is not None
+                else None
+            ),
+            "latest_authoritative_simulation_cutoff": (
+                simulation_attempt.market_cutoff
+                if simulation_attempt is not None
+                else None
+            ),
+            "dashboard_response_generated_at": now,
+        },
         "timeframe_matrix": (
             [
                 item.model_dump(mode="json")
@@ -800,7 +914,9 @@ async def _completed_cycle_projection(
         ),
         "signal_lifecycle": authoritative_lifecycle,
         "final_decision": (
-            decision.model_dump(mode="json") if decision is not None else None
+            scenario_decision.model_dump(mode="json")
+            if scenario_decision is not None
+            else None
         ),
         "publication": publication,
         "analytical_direction": {
@@ -1880,7 +1996,210 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         timestamp=getattr(signal_decision, "decided_at", None), record_id=getattr(signal_decision, "decision_id", None),
     )
     storage = await _storage_diagnostics(request)
-    stage_list = [stages[item[0]] for item in _PIPELINE_STAGES]
+    simulation_repository = getattr(
+        request.app.state, "market_simulation_repository", None
+    )
+    latest_attempt = (
+        await simulation_repository.latest_attempt(symbol)
+        if simulation_repository is not None
+        else None
+    )
+    latest_primary = (
+        await simulation_repository.latest(symbol)
+        if simulation_repository is not None
+        else None
+    )
+    attempt_status = (
+        latest_attempt.status.value if latest_attempt is not None else "PENDING"
+    )
+    stalled = bool(
+        latest_attempt is not None
+        and attempt_status in {"SCHEDULED", "RUNNING"}
+        and now
+        - (latest_attempt.started_at or latest_attempt.scheduled_at)
+        > timedelta(seconds=settings.scenario_pending_stall_seconds)
+    )
+    primary_candidate = (
+        latest_primary.primary if latest_primary is not None else None
+    )
+    candidates = (
+        await simulation_repository.candidates(latest_primary.simulation_cycle_id)
+        if simulation_repository is not None and latest_primary is not None
+        else ()
+    )
+    scenario_decision = None
+    if latest_primary is not None:
+        primary_analysis = await request.app.state.ai_reasoning_repository.analysis_for_state(
+            latest_primary.market_state_id
+        )
+        primary_signal = (
+            await request.app.state.ai_reasoning_repository.signal_for_analysis(
+                primary_analysis.analysis_id
+            )
+            if primary_analysis is not None
+            else None
+        )
+        scenario_decision = (
+            await _decision_for_analysis_signal(request, primary_signal)
+            if primary_signal is not None
+            else None
+        )
+    simulation_reason = (
+        "scenario_engine_stalled"
+        if stalled
+        else latest_attempt.failure_message
+        or latest_attempt.skip_reason
+        or f"simulation_{attempt_status.lower()}"
+        if latest_attempt is not None
+        else "awaiting_first_eligible_m15_cutoff"
+    )
+    simulation_stage_status = (
+        "failed"
+        if stalled or attempt_status == "FAILED"
+        else "blocked"
+        if attempt_status in {"BLOCKED", "SKIPPED"}
+        else "running"
+        if attempt_status in {"SCHEDULED", "RUNNING", "PENDING"}
+        else "healthy"
+    )
+    scenario_stages = {
+        "market_data": stages["market_data"],
+        "market_intelligence": _system_stage(
+            "market_intelligence",
+            "Market Intelligence",
+            stages["unified_market_state"]["status"],
+            stages["unified_market_state"]["reason"],
+            timestamp=market_timestamp,
+            record_id=getattr(state, "state_id", None),
+        ),
+        "quant_forecast": stages["quant_forecast"],
+        "ai_reasoning": stages["ai_reasoning"]
+        | {"label": "AI Interpretation"},
+        "candidate_generation": _system_stage(
+            "candidate_generation",
+            "Candidate Scenario Generation",
+            simulation_stage_status,
+            simulation_reason,
+            timestamp=getattr(latest_attempt, "completed_at", None),
+            record_id=getattr(latest_attempt, "attempt_id", None),
+            details={"candidate_count": len(candidates)},
+        ),
+        "candidate_scoring": _system_stage(
+            "candidate_scoring",
+            "Candidate Scoring",
+            "healthy" if candidates else simulation_stage_status,
+            "candidate_scores_persisted" if candidates else simulation_reason,
+            timestamp=getattr(latest_attempt, "completed_at", None),
+            details={"candidate_count": len(candidates)},
+        ),
+        "primary_selection": _system_stage(
+            "primary_selection",
+            "Primary Scenario Selection",
+            "healthy" if latest_primary is not None else simulation_stage_status,
+            (
+                "primary_scenario_selected"
+                if latest_primary is not None
+                else simulation_reason
+            ),
+            timestamp=getattr(latest_primary, "selected_at", None),
+            record_id=getattr(latest_primary, "selection_id", None),
+        ),
+        "geometry_validation": _system_stage(
+            "geometry_validation",
+            "Geometry Validation",
+            (
+                "healthy"
+                if primary_candidate is not None
+                and primary_candidate.geometry_validity.value == "VALID"
+                else "blocked"
+            ),
+            (
+                "primary_geometry_valid"
+                if primary_candidate is not None
+                and primary_candidate.geometry_validity.value == "VALID"
+                else getattr(primary_candidate, "rejection_reason", None)
+                or "no_executable_primary_geometry"
+            ),
+            record_id=getattr(primary_candidate, "candidate_id", None),
+        ),
+        "guardrails": _system_stage(
+            "guardrails",
+            "Guardrails",
+            "healthy" if scenario_decision is not None else "blocked",
+            (
+                "primary_scenario_guardrails_completed"
+                if scenario_decision is not None
+                else "awaiting_primary_scenario"
+            ),
+            timestamp=getattr(scenario_decision, "decided_at", None),
+            record_id=getattr(scenario_decision, "decision_id", None),
+        ),
+        "publication": _system_stage(
+            "publication",
+            "Publication",
+            (
+                "healthy"
+                if scenario_decision is not None
+                and scenario_decision.publication_eligible
+                else "blocked"
+            ),
+            (
+                "primary_scenario_publication_eligible"
+                if scenario_decision is not None
+                and scenario_decision.publication_eligible
+                else "primary_scenario_not_publication_eligible"
+            ),
+            timestamp=getattr(scenario_decision, "decided_at", None),
+        ),
+        "email": _system_stage(
+            "email",
+            "Email",
+            "disabled"
+            if not settings.signal_email_enabled
+            else "healthy"
+            if latest_primary is not None and latest_primary.signal_eligible
+            else "blocked",
+            (
+                "signal_email_disabled"
+                if not settings.signal_email_enabled
+                else "primary_scenario_email_eligible"
+                if latest_primary is not None and latest_primary.signal_eligible
+                else "no_email_without_eligible_primary"
+            ),
+        ),
+        "outcome": _system_stage(
+            "outcome",
+            "Outcome Evaluation",
+            "running" if latest_primary is not None else "blocked",
+            (
+                "primary_scenario_outcome_monitoring"
+                if latest_primary is not None
+                else "awaiting_primary_scenario"
+            ),
+        ),
+        "calibration": _system_stage(
+            "calibration",
+            "Calibration",
+            (
+                "healthy"
+                if primary_candidate is not None
+                and primary_candidate.calibrated_probability is not None
+                else "no_data"
+            ),
+            (
+                "scenario_probability_calibrated"
+                if primary_candidate is not None
+                and primary_candidate.calibrated_probability is not None
+                else "insufficient_scenario_outcome_sample"
+            ),
+            details={
+                "sample_size": getattr(
+                    primary_candidate, "calibration_sample_size", 0
+                )
+            },
+        ),
+    }
+    stage_list = list(scenario_stages.values())
     persisted_failures = await _persist_stage_projection(request, symbol, stage_list)
     overall = (
         "failed" if storage["status"] == "failed" or any(item["status"] == "failed" for item in stage_list)
@@ -1892,24 +2211,63 @@ async def dashboard_system_status(request: Request, instrument: str = "XAUUSD") 
         "status": overall,
         "instrument": symbol,
         "generated_at": now,
-        "cycle_id": str(state.cycle_id) if state is not None else None,
+        "cycle_id": (
+            str(latest_attempt.attempt_id) if latest_attempt is not None else None
+        ),
         "stages": stage_list,
-        "current_decision": signal_decision.model_dump(mode="json") if signal_decision is not None else None,
-        "current_analysis_signal": (
-            _authoritative_signal_projection(
-                analysis_signal,
-                signal_decision,
-                lifecycle_status=(
-                    "HOLD"
-                    if signal_decision.final_action.value == "HOLD"
-                    else "CURRENT"
-                ),
-            )
-            if analysis_signal is not None and signal_decision is not None
-            else analysis_signal.model_dump(mode="json")
-            if analysis_signal is not None
+        "current_decision": (
+            scenario_decision.model_dump(mode="json")
+            if scenario_decision is not None
             else None
         ),
+        "current_analysis_signal": (
+            latest_primary.model_dump(mode="json")
+            if latest_primary is not None
+            else None
+        ),
+        "scenario_diagnostics": {
+            "current_server_time": now,
+            "last_completed_m15_cutoff": freshness.get(
+                "latest_candle_timestamp_by_timeframe", {}
+            ).get("M15"),
+            "last_eligible_m15_cutoff": getattr(
+                latest_attempt, "market_cutoff", None
+            ),
+            "last_attempted_simulation_cutoff": getattr(
+                latest_attempt, "market_cutoff", None
+            ),
+            "last_successful_simulation_cutoff": (
+                latest_primary.market_cutoff if latest_primary is not None else None
+            ),
+            "latest_cycle_status": (
+                "STALLED" if stalled else attempt_status
+            ),
+            "latest_cycle_id": getattr(latest_attempt, "attempt_id", None),
+            "candidate_count": len(candidates),
+            "primary_scenario_id": getattr(
+                latest_primary, "primary_candidate_id", None
+            ),
+            "alternative_scenario_id": getattr(
+                latest_primary, "alternative_candidate_id", None
+            ),
+            "last_failure_stage": getattr(latest_attempt, "failure_stage", None),
+            "last_failure_reason": getattr(
+                latest_attempt, "failure_message", None
+            ),
+            "last_skip_reason": getattr(latest_attempt, "skip_reason", None),
+            "next_expected_m15_cutoff": (
+                latest_attempt.market_cutoff + timedelta(minutes=15)
+                if latest_attempt is not None
+                else None
+            ),
+            "scheduler_status": "integration_worker",
+            "worker_status": request.app.state.integration_worker.status(
+                settings.integration_worker_enabled
+            ),
+            "queue_status": request.app.state.integration_repository.metrics()
+            if hasattr(request.app.state, "integration_repository")
+            else {},
+        },
         "storage": storage,
         "failure_history": persisted_failures or [
             {
