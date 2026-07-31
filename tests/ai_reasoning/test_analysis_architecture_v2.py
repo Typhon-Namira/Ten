@@ -238,7 +238,7 @@ async def test_analysis_persistence_rejects_conflicting_logical_duplicate() -> N
     assert len(repository.analyses) == 1
 
 
-def test_signal_engine_is_only_action_authority_and_confidence_is_independent() -> None:
+def test_legacy_ai_signal_is_supporting_evidence_without_primary_scenario_authority() -> None:
     history = [analysis(index) for index in range(5)]
     current = analysis(5)
     context = temporal_context(history, current)
@@ -274,12 +274,13 @@ def test_signal_engine_is_only_action_authority_and_confidence_is_independent() 
         }
     )
     decision = ConservativeSignalDecisionPolicy().evaluate(value)
-    assert decision.final_action == FinalSignalAction.BUY
-    assert decision.publication_eligible is True
-    assert decision.stop_loss is not None
-    assert decision.take_profit_targets
+    assert decision.final_action == FinalSignalAction.HOLD
+    assert decision.publication_eligible is False
+    assert decision.stop_loss is None
+    assert not decision.take_profit_targets
     assert decision.source_lineage is not None
     assert decision.source_lineage.current_ai_analysis_id == current.analysis_id
+    assert decision.source_lineage.primary_scenario_selection_id is None
     assert decision.confidence_score != current.output.analysis_confidence * 100
 
 

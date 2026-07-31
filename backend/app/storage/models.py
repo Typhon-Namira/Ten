@@ -579,11 +579,18 @@ class SignalEmailOutboxRecord(Base):
     __tablename__ = "signal_email_outbox"
     __table_args__ = (
         Index("ux_signal_email_outbox_signal_id", "signal_id", unique=True),
+        Index("ux_signal_email_outbox_deduplication_key", "deduplication_key", unique=True),
         Index("ix_signal_email_outbox_claim", "status", "next_retry_at", "created_at"),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     signal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    primary_scenario_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="SET NULL"),
+        index=True,
+    )
+    deduplication_key: Mapped[str | None] = mapped_column(String(64))
     decision_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("signal_decisions.id", ondelete="CASCADE"),
@@ -1503,6 +1510,193 @@ class ScenarioOutcomeRecord(Base):
     directional_accuracy: Mapped[float] = mapped_column(Float)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class MarketSimulationCycleRecord(Base):
+    __tablename__ = "market_simulation_cycles"
+    __table_args__ = (
+        Index("ux_market_simulation_boundary", "instrument", "market_cutoff", unique=True),
+    )
+
+    simulation_cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    market_state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
+        unique=True,
+        index=True,
+    )
+    synthesis_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("multi_timeframe_signal_sets.synthesis_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    analysis_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_analyses.analysis_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    quantitative_forecast_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("quantitative_forecasts.result_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    market_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    candidate_count: Mapped[int] = mapped_column(Integer)
+    engine_version: Mapped[str] = mapped_column(String(32))
+    configuration_version: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class CandidateMarketScenarioRecord(Base):
+    __tablename__ = "candidate_market_scenarios"
+    __table_args__ = (
+        Index("ux_candidate_market_scenario_rank", "simulation_cycle_id", "rank", unique=True),
+        Index("ux_candidate_market_scenario_diversity", "simulation_cycle_id", "diversity_key", unique=True),
+    )
+
+    candidate_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    simulation_cycle_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("market_simulation_cycles.simulation_cycle_id", ondelete="CASCADE"),
+        index=True,
+    )
+    direction: Mapped[str] = mapped_column(String(16), index=True)
+    scenario_type: Mapped[str] = mapped_column(String(96), index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    final_scenario_score: Mapped[float] = mapped_column(Float)
+    scenario_validity: Mapped[str] = mapped_column(String(16), index=True)
+    geometry_validity: Mapped[str] = mapped_column(String(24), index=True)
+    diversity_key: Mapped[str] = mapped_column(String(64))
+    expiry: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class ScenarioPathStageRecord(Base):
+    __tablename__ = "scenario_path_stages"
+
+    stage_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    candidate_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="CASCADE"),
+        index=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class ScenarioScoreComponentRecord(Base):
+    __tablename__ = "scenario_score_components"
+
+    candidate_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    contribution: Mapped[float] = mapped_column(Float)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class PrimaryScenarioSelectionRecord(Base):
+    __tablename__ = "primary_scenario_selections"
+
+    selection_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    simulation_cycle_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("market_simulation_cycles.simulation_cycle_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    market_state_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("unified_market_states.state_id", ondelete="RESTRICT"),
+        unique=True,
+        index=True,
+    )
+    primary_candidate_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    alternative_candidate_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    authoritative_action: Mapped[str] = mapped_column(String(16), index=True)
+    signal_eligible: Mapped[bool] = mapped_column(Boolean, index=True)
+    market_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    selected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class PrimaryScenarioGeometryRecord(Base):
+    __tablename__ = "primary_scenario_geometries"
+
+    selection_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("primary_scenario_selections.selection_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    candidate_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    entry_type: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class ScenarioLifecycleTransitionRecord(Base):
+    __tablename__ = "scenario_lifecycle_transitions"
+
+    transition_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    selection_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("primary_scenario_selections.selection_id", ondelete="CASCADE"),
+        index=True,
+    )
+    previous_status: Mapped[str | None] = mapped_column(String(32))
+    new_status: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str] = mapped_column(String(128))
+    transitioned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ScenarioCalibrationMetricRecord(Base):
+    __tablename__ = "scenario_calibration_metrics"
+
+    metric_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    scenario_type: Mapped[str] = mapped_column(String(96), index=True)
+    sample_size: Mapped[int] = mapped_column(Integer)
+    calibrated_probability: Mapped[float | None] = mapped_column(Float)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    calculated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class CandidateScenarioOutcomeRecord(Base):
+    __tablename__ = "candidate_scenario_outcomes"
+
+    outcome_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
+    candidate_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    selection_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("primary_scenario_selections.selection_id", ondelete="CASCADE"),
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    directional_accuracy: Mapped[float] = mapped_column(Float)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 

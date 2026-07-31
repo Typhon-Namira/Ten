@@ -21,6 +21,59 @@ class SignalEmailSender(Protocol):
 
 
 def render_signal_email(payload: dict[str, Any]) -> tuple[str, str]:
+    if payload.get("primary_scenario_id"):
+        score = float(payload["primary_scenario_score"])
+        subject = (
+            f"TEN Primary Scenario · {payload['symbol']} {payload['direction']} · "
+            f"{score:.0f}% · M15"
+        )
+        path = "\n".join(
+            f"  {item}" for item in payload.get("expected_path") or ()
+        )
+        alternative = payload.get("alternative_summary") or {}
+        primary_fields = (
+            ("Instrument", payload["symbol"]),
+            ("Market cutoff", payload.get("market_cutoff")),
+            ("Direction", payload["direction"]),
+            ("Scenario type", payload.get("scenario_type")),
+            ("Primary Scenario score", f"{score:.1f}%"),
+            ("Calibration", payload.get("calibration_status", "Pending")),
+            ("Reference price", payload.get("reference_price")),
+            ("Entry type", payload.get("entry_type")),
+            ("Entry zone", payload.get("entry_zone")),
+            ("Entry", payload.get("entry")),
+            ("Stop Loss", payload.get("stop_loss")),
+            ("Take Profit", payload.get("take_profit")),
+            ("Risk/Reward", payload.get("risk_reward")),
+            ("Invalidation", payload.get("invalidation")),
+            ("Expiry", payload.get("expires_at")),
+            ("Supporting evidence", ", ".join(payload.get("supporting_evidence") or ())),
+            (
+                "Alternative Scenario",
+                (
+                    f"{alternative.get('direction')} {alternative.get('scenario_type')} "
+                    f"· {alternative.get('score')}%"
+                    if alternative
+                    else "Unavailable"
+                ),
+            ),
+            ("Scenario ID", payload.get("primary_scenario_id")),
+            ("Signal ID", payload.get("signal_id")),
+        )
+        body = "\n".join(
+            [
+                "TEN PRIMARY MARKET SCENARIO",
+                "",
+                "Expected path:",
+                path,
+                "",
+                *[f"{label}: {value}" for label, value in primary_fields],
+                "",
+                "Analytical Intelligence Only",
+                "No Broker Execution",
+            ]
+        )
+        return subject, body
     blocked = payload.get("publication_status") != "ELIGIBLE"
     marker = "[BLOCKED]" if blocked else ""
     reason = next(iter(payload.get("blockers") or ()), "Observe only")

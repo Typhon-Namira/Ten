@@ -94,12 +94,19 @@ from backend.app.signal_synthesis import (
     SqlAlchemyMultiTimeframeSignalRepository,
 )
 from backend.app.scenario_forecasting import (
+    InMemoryMarketSimulationRepository,
     InMemoryScenarioForecastRepository,
+    MarketSimulationConfig,
+    MarketSimulationEngine,
+    MarketSimulationRepository,
+    MarketSimulationService,
     ScenarioForecastRepository,
     ScenarioForecastingEngine,
     ScenarioForecastingService,
+    SqlAlchemyMarketSimulationRepository,
     SqlAlchemyScenarioForecastRepository,
 )
+from backend.app.scenario_forecasting.instrument import InstrumentSpecification
 from backend.app.signal_notifications import (
     SignalEmailOutboxRepository,
     SignalEmailWorker,
@@ -545,6 +552,36 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             scenario_repository,
             ScenarioForecastingEngine(),
         )
+        simulation_repository: MarketSimulationRepository = InMemoryMarketSimulationRepository()
+        if app.state.database_session_factory is not None:
+            simulation_repository = SqlAlchemyMarketSimulationRepository(
+                app.state.database_session_factory
+            )
+        app.state.market_simulation_repository = simulation_repository
+        app.state.market_simulation_service = MarketSimulationService(
+            simulation_repository,
+            scenario_repository,
+            MarketSimulationEngine(
+                MarketSimulationConfig(
+                    minimum_candidates=settings.scenario_minimum_candidates,
+                    maximum_candidates=settings.scenario_maximum_candidates,
+                    primary_scenario_threshold=settings.primary_scenario_threshold,
+                    email_scenario_threshold=settings.primary_scenario_email_threshold,
+                    minimum_risk_reward=settings.primary_scenario_minimum_risk_reward,
+                    maximum_entry_distance_percent=settings.primary_scenario_maximum_entry_distance_percent,
+                    expiry_seconds=settings.primary_scenario_expiry_seconds,
+                    calibration_minimum_sample=settings.scenario_calibration_minimum_sample,
+                    instrument=InstrumentSpecification(
+                        tick_size=settings.xauusd_tick_size,
+                        display_precision=settings.xauusd_display_precision,
+                        minimum_stop_distance=settings.xauusd_minimum_stop_distance,
+                        minimum_target_distance=settings.xauusd_minimum_target_distance,
+                        minimum_meaningful_move=settings.xauusd_minimum_meaningful_move,
+                        maximum_expected_move_percent=settings.xauusd_maximum_expected_move_percent,
+                    ),
+                )
+            ),
+        )
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
             repository=app.state.integration_repository,
@@ -566,6 +603,7 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             signal_synthesizer=app.state.multi_timeframe_signal_synthesizer,
             signal_synthesis_repository=app.state.multi_timeframe_signal_repository,
             scenario_forecasting=app.state.scenario_forecasting_service,
+            market_simulation=app.state.market_simulation_service,
             ai_centric_shadow_mode=ai_centric_shadow_mode,
         )
         if integration_config.enabled and integration_config.live_pipeline_enabled:

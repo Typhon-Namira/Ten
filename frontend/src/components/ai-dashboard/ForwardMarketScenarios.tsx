@@ -1,5 +1,5 @@
 import { Route } from 'lucide-react'
-import type { ForwardMarketScenario, LatestCompletedCycle } from '../../types'
+import type { CandidateMarketScenario, ForwardMarketScenario, LatestCompletedCycle } from '../../types'
 import { humanize } from '../../lib/aiDashboard'
 import { EmptyState, Metric, SectionHeader, StatusBadge } from './Primitives'
 
@@ -37,11 +37,68 @@ function ScenarioCard({ scenario }: { scenario: ForwardMarketScenario | null }) 
   </section>
 }
 
+function CandidateSummary({ candidate, title }: { candidate: CandidateMarketScenario; title: string }) {
+  const tone = candidate.direction === 'BULLISH' ? 'positive' : candidate.direction === 'BEARISH' ? 'negative' : 'neutral'
+  return <section className="ai-card">
+    <SectionHeader eyebrow={title} title={humanize(candidate.scenario_type)} action={<Route size={18} />} />
+    <StatusBadge tone={tone}>{candidate.direction} · {candidate.final_scenario_score.toFixed(1)}%</StatusBadge>
+    <ol className="reasoning-copy">
+      {candidate.path_sequence.map(stage => <li key={stage.stage_id}>
+        {stage.label} · {price(stage.expected_price_area.low)}–{price(stage.expected_price_area.high)}
+      </li>)}
+    </ol>
+    <div className="health-grid">
+      <Metric label="Reference price" value={price(candidate.reference_price)} />
+      <Metric label="Entry type" value={humanize(candidate.entry_type)} />
+      <Metric label="Entry zone" value={candidate.entry_zone ? `${price(candidate.entry_zone.low)}–${price(candidate.entry_zone.high)}` : 'Unavailable'} />
+      <Metric label="Entry" value={price(candidate.geometry?.entry)} />
+      <Metric label="Stop loss" value={price(candidate.geometry?.stop_loss)} />
+      <Metric label="Take profit" value={price(candidate.geometry?.take_profit)} />
+      <Metric label="Risk / reward" value={candidate.geometry ? candidate.geometry.risk_reward_ratio.toFixed(2) : 'Unavailable'} />
+      <Metric label="Geometry" value={candidate.geometry_validity} />
+      <Metric label="Calibration" value={candidate.calibrated_probability == null ? `Pending (${candidate.calibration_sample_size} samples)` : `${(candidate.calibrated_probability * 100).toFixed(1)}%`} />
+      <Metric label="Expires" value={new Date(candidate.expiry).toLocaleTimeString()} />
+    </div>
+    {candidate.rejection_reason && <p className="reasoning-copy"><strong>Execution unavailable:</strong> {humanize(candidate.rejection_reason)}</p>}
+  </section>
+}
+
+export function PrimaryMarketScenario({ cycle }: { cycle: LatestCompletedCycle | null }) {
+  const selection = cycle?.primary_market_scenario
+  return <section className="scenario-forecast-section">
+    <SectionHeader eyebrow="Authoritative M15 simulation" title="Primary Market Scenario" action={<Route size={19} />} />
+    {!selection || !selection.primary
+      ? <section className="ai-card ai-card--wide"><EmptyState title="Primary Scenario pending" detail={selection?.rejection_reason ? humanize(selection.rejection_reason) : 'Awaiting a synchronized completed M15 simulation.'} /></section>
+      : <>
+        <CandidateSummary candidate={selection.primary} title="Selected Primary Scenario" />
+        <div className="health-grid">
+          <Metric label="Authoritative signal" value={selection.authoritative_action} />
+          <Metric label="Selection status" value={selection.status} />
+          <Metric label="Publication" value={selection.signal_eligible ? 'ELIGIBLE' : 'BLOCKED'} />
+          <Metric label="Minimum score" value={`${selection.minimum_score.toFixed(0)}%`} />
+        </div>
+        <p className="reasoning-copy">{selection.ranking_explanation}</p>
+        {selection.alternative && <CandidateSummary candidate={selection.alternative} title="Alternative Market Scenario" />}
+        <section className="ai-card ai-card--wide">
+          <SectionHeader eyebrow="Deterministic candidate comparison" title="Candidate Scenario Ranking" action={<Route size={18} />} />
+          <div className="health-grid">
+            {selection.ranked_candidates.map(candidate => <Metric
+              key={candidate.candidate_id}
+              label={`#${candidate.rank} ${humanize(candidate.scenario_type)}`}
+              value={`${candidate.direction} · ${candidate.final_scenario_score.toFixed(1)}%`}
+              detail={`${candidate.geometry_validity}${candidate.rejection_reason ? ` · ${humanize(candidate.rejection_reason)}` : ''}`}
+            />)}
+          </div>
+        </section>
+      </>}
+  </section>
+}
+
 export function ForwardMarketScenarios({ cycle }: { cycle: LatestCompletedCycle | null }) {
   const scenarios = cycle?.forward_market_scenarios
   const combined = scenarios?.combined
   return <section className="scenario-forecast-section">
-    <SectionHeader eyebrow="Evidence-grounded probability paths" title="Forward Market Scenarios" action={<Route size={19} />} />
+    <SectionHeader eyebrow="Underlying directional evidence" title="Supporting Directional Synthesis" action={<Route size={19} />} />
     <div className="ai-card-grid">
       <ScenarioCard scenario={scenarios?.m5 ?? null} />
       <ScenarioCard scenario={scenarios?.m15 ?? null} />

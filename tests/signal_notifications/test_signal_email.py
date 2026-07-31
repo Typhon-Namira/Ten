@@ -77,6 +77,38 @@ def test_blocked_email_prominently_preserves_guardrail_reason() -> None:
     assert "Guardrail status: REJECTED" in body
 
 
+def test_primary_scenario_email_uses_authoritative_contract() -> None:
+    value = payload() | {
+        "primary_scenario_id": "22222222-2222-2222-2222-222222222222",
+        "primary_scenario_score": 74.0,
+        "scenario_type": "bullish_pullback_continuation",
+        "market_cutoff": "2026-07-30T12:00:00+00:00",
+        "reference_price": 4098.78,
+        "expected_path": (
+            "1. Hold structure: 4098.70-4098.90",
+            "2. Expand: 4102.00-4102.20",
+        ),
+        "entry_type": "PULLBACK",
+        "entry_zone": {"low": 4097.8, "high": 4098.1},
+        "invalidation": "M15 closes below demand",
+        "supporting_evidence": ("smc:1", "liquidity:2"),
+        "alternative_summary": {
+            "direction": "BEARISH",
+            "scenario_type": "upside_liquidity_sweep_reversal",
+            "score": 63.0,
+        },
+    }
+
+    subject, body = render_signal_email(value)
+
+    assert subject == "TEN Primary Scenario · XAUUSD BUY · 74% · M15"
+    assert "Expected path:" in body
+    assert "Entry type: PULLBACK" in body
+    assert "Alternative Scenario: BEARISH" in body
+    assert "Analytical Intelligence Only" in body
+    assert "No Broker Execution" in body
+
+
 def test_email_configuration_validation_is_safe_and_secret_free() -> None:
     settings = Settings(signal_email_enabled=True, smtp_username="user")
 

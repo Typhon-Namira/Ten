@@ -5,7 +5,7 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,6 +17,10 @@ from backend.app.ai_reasoning.analysis import (
     TemporalAnalysisMetrics,
 )
 from backend.app.engines.ai_scoring_engine import AIScoreSnapshot
+if TYPE_CHECKING:
+    from backend.app.scenario_forecasting.simulation_models import PrimaryScenarioSelection
+else:
+    PrimaryScenarioSelection = Any
 
 NAMESPACE = UUID("81f5a757-4e58-5d38-b01d-ea7ec9f9e11d")
 type JSONScalar = str | int | float | bool | None
@@ -81,6 +85,7 @@ class SignalSourceLineage(DecisionModel):
     current_ai_signal_id: UUID | None = None
     historical_ai_analysis_ids: tuple[UUID, ...] = ()
     quantitative_forecast_id: UUID | None = None
+    primary_scenario_selection_id: UUID | None = None
     strategy_evaluation_ids: tuple[str, ...] = ()
     temporal_context_version: str | None = None
     signal_engine_version: str
@@ -239,6 +244,7 @@ class SignalDecisionInput(DecisionModel):
     quantitative_forecast_id: UUID | None = None
     current_price: float | None = Field(default=None, gt=0)
     expected_move: float | None = Field(default=None, gt=0)
+    current_primary_scenario: PrimaryScenarioSelection | None = None
     mode: DecisionMode = DecisionMode.LIVE
     policy_name: str
     policy_version: str
@@ -274,6 +280,14 @@ class SignalDecisionInput(DecisionModel):
                 raise ValueError("AI signal does not belong to current snapshot")
         if self.temporal_context is not None and self.temporal_context.as_of > self.as_of:
             raise ValueError("future temporal context is prohibited")
+        if self.current_primary_scenario is not None:
+            primary = self.current_primary_scenario
+            if primary.market_cutoff > self.as_of:
+                raise ValueError("future Primary Scenario is prohibited")
+            if primary.market_state_id != self.market_snapshot_id:
+                raise ValueError("Primary Scenario does not belong to current snapshot")
+            if primary.instrument != self.instrument:
+                raise ValueError("Primary Scenario instrument mismatch")
         return self
 
     def fingerprint(self, configuration_hash: str) -> str:
@@ -496,6 +510,7 @@ class DecisionRequest(BaseModel):
     quantitative_forecast_id: UUID | None = None
     current_price: float | None = Field(default=None, gt=0)
     expected_move: float | None = Field(default=None, gt=0)
+    current_primary_scenario: PrimaryScenarioSelection | None = None
 
     @field_validator("instrument")
     @classmethod

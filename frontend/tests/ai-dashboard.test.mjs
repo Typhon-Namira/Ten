@@ -39,16 +39,22 @@ test('decision copy is derived from backend action states and never implies exec
   assert.match(shell, /Analysis and decision support only/)
 })
 
-test('dashboard renders structured M5 M15 and combined forward scenarios', async () => {
+test('dashboard leads with Primary and Alternative scenarios and retains supporting synthesis', async () => {
   const dashboard = await source('src/components/ai-dashboard/AIDashboard.tsx')
   const scenarios = await source('src/components/ai-dashboard/ForwardMarketScenarios.tsx')
   const types = await source('src/types/index.ts')
+  assert.match(dashboard, /PrimaryMarketScenario/)
   assert.match(dashboard, /ForwardMarketScenarios/)
-  assert.match(scenarios, /Forward Market Scenarios/)
+  assert.ok(dashboard.indexOf('<PrimaryMarketScenario') < dashboard.indexOf('<CurrentAnalyticalCycle'))
+  assert.match(scenarios, /Primary Market Scenario/)
+  assert.match(scenarios, /Alternative Market Scenario/)
+  assert.match(scenarios, /Candidate Scenario Ranking/)
+  assert.match(scenarios, /Supporting Directional Synthesis/)
   assert.match(scenarios, /Combined forward scenario/)
   assert.match(scenarios, /Analytical Intelligence Only/)
   assert.match(scenarios, /No Broker Execution/)
   assert.match(types, /forward_market_scenarios/)
+  assert.match(types, /primary_market_scenario/)
   assert.match(types, /execution_geometry_validity/)
 })
 

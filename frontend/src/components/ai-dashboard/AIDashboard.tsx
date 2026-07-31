@@ -6,7 +6,7 @@ import { AnalysisHistory, CurrentAnalyticalCycle, SignalHistory } from './Author
 import { DashboardHeader } from './DecisionOverview'
 import { MarketStateSummary, QuantForecastSummary } from './IntelligenceCards'
 import { EmptyState, ErrorState, LoadingSkeleton, Metric, SectionHeader } from './Primitives'
-import { ForwardMarketScenarios } from './ForwardMarketScenarios'
+import { ForwardMarketScenarios, PrimaryMarketScenario } from './ForwardMarketScenarios'
 import { SystemStatusPanel } from './SystemStatusPanel'
 
 export type DashboardView = 'overview' | 'signals' | 'performance' | 'calibration' | 'system'
@@ -41,6 +41,7 @@ export function AIDashboard({ view = 'overview' }: { view?: DashboardView }) {
     {errorMessage && <ErrorState message={`${errorMessage}. Last known backend-authoritative values remain visible.`} />}
     {data.loading && !data.latestCycle && !data.intelligence ? <LoadingSkeleton rows={6} /> : <>
       {view === 'overview' && <>
+        <ErrorBoundary label="Primary Market Scenario"><PrimaryMarketScenario cycle={data.latestCycle} /></ErrorBoundary>
         <ErrorBoundary label="Latest completed cycle"><CurrentAnalyticalCycle cycle={data.latestCycle} /></ErrorBoundary>
         <ErrorBoundary label="Forward market scenarios"><ForwardMarketScenarios cycle={data.latestCycle} /></ErrorBoundary>
         <div className="ai-card-grid">

@@ -904,6 +904,55 @@ export interface CombinedForwardScenario {
   publication_status: string
 }
 
+export interface ScenarioPathStage {
+  stage_id: string
+  sequence: number
+  label: string
+  expected_price_area: { low: number; high: number }
+  supporting_evidence_ids: string[]
+  invalidation_condition: string
+  timing_seconds: number | null
+}
+
+export interface CandidateMarketScenario {
+  candidate_id: string
+  direction: 'BULLISH' | 'BEARISH' | 'RANGE' | 'INCONCLUSIVE'
+  scenario_type: string
+  rank: number
+  final_scenario_score: number
+  calibrated_probability: number | null
+  calibration_sample_size: number
+  reference_price: number
+  forecast_horizon_seconds: number
+  path_sequence: ScenarioPathStage[]
+  entry_type: string
+  entry_zone: { low: number; high: number } | null
+  invalidation_level: number | null
+  expiry: string
+  supporting_evidence_ids: string[]
+  contradicting_evidence_ids: string[]
+  score_components: Array<{ name: string; contribution: number; reason: string }>
+  scenario_validity: 'VALID' | 'DEGRADED' | 'INVALID'
+  geometry_validity: 'VALID' | 'UNAVAILABLE' | 'NOT_EXECUTABLE'
+  geometry: ScenarioGeometry | null
+  rejection_reason: string | null
+}
+
+export interface PrimaryScenarioSelection {
+  selection_id: string
+  market_cutoff: string
+  status: 'SELECTED' | 'INSUFFICIENT_CONFIDENCE' | 'NO_VALID_CANDIDATE' | 'BLOCKED'
+  authoritative_action: 'BUY' | 'SELL' | 'HOLD'
+  primary: CandidateMarketScenario | null
+  alternative: CandidateMarketScenario | null
+  ranked_candidates: CandidateMarketScenario[]
+  minimum_score: number
+  signal_eligible: boolean
+  rejection_reason: string | null
+  ranking_explanation: string
+  lifecycle_status: string
+}
+
 export interface AuthoritativeCycleStage {
   status: SystemStageStatus
   reason: string
@@ -942,6 +991,7 @@ export interface LatestCompletedCycle {
     analytical_intelligence_only: true
     broker_execution: false
   }
+  primary_market_scenario?: PrimaryScenarioSelection | null
   timeframe_matrix?: TimeframeAnalyticalSignal[]
   signal_lifecycle?: {
     status: AIAnalysisSignal['lifecycle_status'] | 'CURRENT'
@@ -972,7 +1022,7 @@ export interface LatestCompletedCycle {
     blockers?: Record<string, unknown>[]
   }
   analytical_direction?: {
-    direction: 'BUY' | 'SELL'
+    direction: 'BUY' | 'SELL' | 'HOLD'
     confidence: number
     strength: string
     bullish_score: number | null

@@ -15,6 +15,19 @@ from .repository import (
     SqlAlchemyScenarioForecastRepository,
 )
 from .service import ScenarioForecastingService
+from .simulation_engine import MarketSimulationConfig, MarketSimulationEngine
+from .simulation_models import (
+    CandidateMarketScenario,
+    CandidateScenarioOutcome,
+    MarketSimulationCycle,
+    PrimaryScenarioSelection,
+)
+from .simulation_repository import (
+    InMemoryMarketSimulationRepository,
+    MarketSimulationRepository,
+    SqlAlchemyMarketSimulationRepository,
+)
+from .simulation_service import MarketSimulationService
 
 __all__ = [
     "CombinedForwardScenario",
@@ -31,4 +44,14 @@ __all__ = [
     "ScenarioOutcomeStatus",
     "ScenarioValidity",
     "SqlAlchemyScenarioForecastRepository",
+    "CandidateMarketScenario",
+    "CandidateScenarioOutcome",
+    "InMemoryMarketSimulationRepository",
+    "MarketSimulationConfig",
+    "MarketSimulationCycle",
+    "MarketSimulationEngine",
+    "MarketSimulationRepository",
+    "MarketSimulationService",
+    "PrimaryScenarioSelection",
+    "SqlAlchemyMarketSimulationRepository",
 ]
