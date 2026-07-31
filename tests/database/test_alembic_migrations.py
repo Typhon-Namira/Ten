@@ -176,6 +176,19 @@ def test_ai_reasoning_claim_lease_migration_is_reversible() -> None:
     assert "op.drop_column" in source
 
 
+def test_ai_provider_retry_schedule_migration_is_reversible() -> None:
+    source = (
+        ROOT / "migrations/versions/20260731_0022_ai_provider_retry_schedule.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260731_0022"' in source
+    assert 'down_revision = "20260731_0021"' in source
+    assert "next_retry_at" in source
+    assert "WAITING_PROVIDER" in source
+    assert "FAILED_SCHEMA" in source
+    assert "op.drop_column" in source
+
+
 def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     source = (
         ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"

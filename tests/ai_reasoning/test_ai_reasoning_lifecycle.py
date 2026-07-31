@@ -273,6 +273,7 @@ class ExhaustedPoolProvider(TypedFailureProvider):
             "external_ai_apis": ("groq",),
             "configured_account_count": 4,
             "available_account_count": 0,
+            "next_retry_at": (NOW + timedelta(minutes=30)).isoformat(),
             "providers": {
                 f"groq_{index}": {"status": "QUOTA_EXHAUSTED"}
                 for index in range(1, 5)
@@ -299,6 +300,28 @@ class ExhaustedPoolProvider(TypedFailureProvider):
                 request_id=str(request.request_id),
                 cycle_id=str(request.cycle_id),
                 http_status=429,
+                exception_class="HTTPStatusError",
+            )
+        )
+
+
+class SchemaCorrectionFailureProvider(ValidProvider):
+    async def reason(self, request, *, prompt_version: str) -> AIProviderResponse:
+        self.calls += 1
+        raise AIProviderRequestError(
+            AIProviderFailureDetails(
+                provider="groq_2",
+                reason_code="rate_limited",
+                phase="schema_correction_http_request",
+                endpoint="https://api.groq.test/openai/v1/chat/completions",
+                model=request.model_identifier,
+                request_id=str(request.request_id),
+                cycle_id=str(request.cycle_id),
+                http_status=429,
+                schema_error_code="wrong_type",
+                schema_error_path=(
+                    "provider_response.higher_timeframe_context.summary"
+                ),
                 exception_class="HTTPStatusError",
             )
         )
@@ -623,6 +646,34 @@ async def test_all_four_accounts_failing_is_unhealthy_and_persists_no_analysis()
     assert health["call_control"]["groq_calls"] == 4
     assert repository.analyses == {}
     assert len(repository.failures) == 1
+    claim = await repository.claim_for_cutoff(
+        state.instrument, state.market_data_boundary
+    )
+    assert claim is not None
+    assert claim.status == "WAITING_PROVIDER"
+    assert claim.next_retry_at == NOW + timedelta(minutes=30)
+
+    # Recovery polling before the durable provider deadline cannot send again.
+    assert await service.process(state, quant) is None
+    assert service.provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_schema_correction_failure_is_terminal_for_the_cutoff() -> None:
+    state, quant = await state_and_quant()
+    repository = InMemoryAIReasoningRepository()
+    provider = SchemaCorrectionFailureProvider()
+    service = build_service(repository, provider)
+
+    assert await service.process(state, quant) is None
+    assert await service.process(state, quant) is None
+
+    claim = await repository.claim_for_cutoff(
+        state.instrument, state.market_data_boundary
+    )
+    assert claim is not None
+    assert claim.status == "FAILED_SCHEMA"
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio
