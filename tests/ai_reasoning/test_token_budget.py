@@ -13,8 +13,10 @@ from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.ai_reasoning.compact_output import (
     CompactAIAnalysisOutput,
     CompactOutputValidationError,
+    HIGHER_TIMEFRAME_SUMMARY_LIMIT,
     MARKET_REGIME_EVIDENCE_REF_LIMIT,
     normalize_descriptive_overflow,
+    normalize_higher_timeframe_summary_shape,
     normalize_reference_syntax,
     resolve_compact_output,
     truncate_market_regime_evidence_refs,
@@ -384,6 +386,122 @@ async def test_descriptive_overflow_only_truncates_allowlisted_prose() -> None:
     assert normalized["market_regime"]["strength"] == 72.12345
     assert normalized["market_regime"]["evidence_refs"] == ["E1"]
     assert changes == ("executive_summary",)
+
+
+@pytest.mark.asyncio
+async def test_higher_timeframe_string_list_is_joined_locally_without_correction() -> None:
+    """Reproduce production wrong_type at the exact provider field path."""
+
+    _, _, config, request = await _request()
+    raw = compact_output(request)
+    raw["higher_timeframe_context"]["summary"] = [
+        "M5 structure remains constructive.",
+        "M15 context retains a bullish bias.",
+    ]
+    client = CompactClient(raw)
+    selected_provider = provider(client, config)
+
+    response = await selected_provider.reason(
+        request,
+        prompt_version=request.prompt_version,
+    )
+
+    assert len(client.calls) == 1
+    assert selected_provider.correction_attempts == 0
+    assert response.raw_output["higher_timeframe_context"]["description"] == (
+        "M5 structure remains constructive. "
+        "M15 context retains a bullish bias."
+    )
+    assert response.operational_metadata["local_shape_normalizations"] == (
+        "higher_timeframe_context.summary",
+    )
+    assert response.operational_metadata[
+        "higher_timeframe_summary_received_type"
+    ] == "list"
+    attempt = selected_provider.attempts_for(request.request_id)[0]
+    assert attempt["schema_valid"] is True
+    assert attempt["schema_correction_triggered"] is False
+    assert attempt["higher_timeframe_summary_received_type"] == "list"
+
+
+@pytest.mark.asyncio
+async def test_normalized_http_200_reaches_validation_persistence_and_commit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO")
+    state, quant, config, request = await _request()
+    raw = compact_output(request)
+    raw["higher_timeframe_context"]["summary"] = [
+        "M5 is constructive.",
+        "M15 remains aligned.",
+    ]
+    selected_provider = provider(CompactClient(raw), config)
+    repository = InMemoryAIReasoningRepository()
+
+    result = await build_service(  # type: ignore[arg-type]
+        repository,
+        selected_provider,
+    ).process(state, quant)
+
+    assert result is not None
+    assert result.analysis.validation_passed is True
+    assert await repository.analysis_for_state(state.state_id) == result.analysis
+    assert selected_provider.http_calls == 1
+    assert selected_provider.correction_attempts == 0
+    messages = {record.getMessage() for record in caplog.records}
+    assert "structured_validation.completed" in messages
+    assert "ai_reasoning.persist.completed" in messages
+    assert "ai_reasoning.analysis.committed" in messages
+
+
+@pytest.mark.parametrize(
+    "invalid_summary",
+    [None, [], ["valid prose", 7], [""], {"m15": "bullish"}],
+)
+@pytest.mark.asyncio
+async def test_semantically_invalid_higher_timeframe_shapes_remain_strict(
+    invalid_summary: object,
+) -> None:
+    _, _, _, request = await _request()
+    raw = compact_output(request)
+    raw["higher_timeframe_context"]["summary"] = invalid_summary
+
+    normalized, changes = normalize_higher_timeframe_summary_shape(raw)
+
+    assert normalized == raw
+    assert changes == ()
+    with pytest.raises(ValidationError):
+        CompactAIAnalysisOutput.model_validate(normalized)
+
+
+@pytest.mark.asyncio
+async def test_higher_timeframe_summary_contract_is_explicit_and_matches_schema() -> None:
+    _, _, config, request = await _request()
+    selected_provider = provider(
+        CompactClient(compact_output(request)),
+        config,
+    )
+
+    contract = selected_provider._response_contract(  # noqa: SLF001
+        OutputProfile.COMPACT,
+        build_llm_analysis_context(request),
+    )
+    schema = CompactAIAnalysisOutput.model_json_schema()
+
+    summary_schema = schema["$defs"]["CompactHigherTimeframe"]["properties"][
+        "summary"
+    ]
+    assert summary_schema["type"] == "string"
+    assert summary_schema["minLength"] == 1
+    assert summary_schema["maxLength"] == HIGHER_TIMEFRAME_SUMMARY_LIMIT
+    assert contract["shape"]["higher_timeframe_context"]["summary"] == (
+        "one non-empty JSON string<=180;never array|object|null"
+    )
+    assert any(
+        "higher_timeframe_context.summary must be exactly one non-empty JSON string"
+        in rule
+        for rule in contract["rules"]
+    )
 
 
 @pytest.mark.asyncio

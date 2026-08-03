@@ -42,6 +42,7 @@ class EvidenceCatalogItem(CompactStrictModel):
 
 EvidenceRefs = tuple[str, ...]
 MARKET_REGIME_EVIDENCE_REF_LIMIT = 2
+HIGHER_TIMEFRAME_SUMMARY_LIMIT = 180
 
 
 class CompactRegime(CompactStrictModel):
@@ -55,7 +56,7 @@ class CompactRegime(CompactStrictModel):
 
 class CompactHigherTimeframe(CompactStrictModel):
     bias: AnalysisBias
-    summary: str = Field(min_length=1, max_length=180)
+    summary: str = Field(min_length=1, max_length=HIGHER_TIMEFRAME_SUMMARY_LIMIT)
     evidence_refs: EvidenceRefs = Field(max_length=2)
 
 
@@ -191,6 +192,37 @@ _LIST_LIMITS = {
     "data_quality_warnings": 3,
     "alternative_scenarios": 2,
 }
+
+
+def normalize_higher_timeframe_summary_shape(
+    raw: dict[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Join an equivalent JSON string list without accepting invalid content.
+
+    Groq JSON Object Mode can represent a multi-timeframe summary as an ordered
+    list even though TEN's compact wire contract requires one string. Joining a
+    non-empty list of non-empty strings preserves the same prose deterministically.
+    Nulls, mappings, empty lists, and mixed/empty list items remain untouched so
+    strict validation still rejects semantically incomplete output.
+    """
+
+    context = raw.get("higher_timeframe_context")
+    if not isinstance(context, dict):
+        return raw, ()
+    summary = context.get("summary")
+    if not (
+        isinstance(summary, list)
+        and summary
+        and all(isinstance(item, str) and item.strip() for item in summary)
+    ):
+        return raw, ()
+    normalized = dict(raw)
+    normalized_context = dict(context)
+    normalized_context["summary"] = " ".join(
+        item.strip() for item in summary
+    )
+    normalized["higher_timeframe_context"] = normalized_context
+    return normalized, ("higher_timeframe_context.summary",)
 
 
 def normalize_descriptive_overflow(raw: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
