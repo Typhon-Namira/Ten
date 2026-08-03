@@ -33,8 +33,8 @@ from .compact_output import (
     CompactRetryAIAnalysisOutput,
     HIGHER_TIMEFRAME_SUMMARY_LIMIT,
     MARKET_REGIME_EVIDENCE_REF_LIMIT,
+    normalize_compact_output_shapes,
     normalize_descriptive_overflow,
-    normalize_higher_timeframe_summary_shape,
     normalize_reference_syntax,
     resolve_compact_output,
     truncate_market_regime_evidence_refs,
@@ -209,15 +209,37 @@ def reasoning_response_schema(
                 # "description". Only remove schema metadata keywords, never
                 # names inside a JSON Schema "properties" map.
                 if property_map or key not in unsupported_keywords
-                # Enum membership already constrains each value. The unchanged
-                # application model enforces the concrete string type.
-                if not (key == "type" and "enum" in value)
             }
         if isinstance(value, list):
             return [compact(item) for item in value]
         return value
 
     return cast(dict[str, Any], compact(model.model_json_schema()))
+
+
+def validate_strict_provider_schema(schema: dict[str, Any]) -> None:
+    """Enforce Groq strict-mode object and enum requirements before transport."""
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                properties = value.get("properties")
+                required = value.get("required")
+                if not isinstance(properties, dict):
+                    raise ValueError(f"{path}.properties must be an object")
+                if set(required or ()) != set(properties):
+                    raise ValueError(f"{path}.required must contain every property")
+                if value.get("additionalProperties") is not False:
+                    raise ValueError(f"{path}.additionalProperties must be false")
+            if "enum" in value and value.get("type") != "string":
+                raise ValueError(f"{path}.enum must declare type=string")
+            for key, item in value.items():
+                visit(item, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, f"{path}.{index}")
+
+    visit(schema, "$")
 
 
 def _schema_issue(exc: ValidationError) -> tuple[str, str, str, str]:
@@ -427,6 +449,13 @@ class _OpenAICompatibleReasoningProvider:
                 "complete_object_required": True,
                 "previous_response": previous_response,
             }
+            if self.supports_strict_json_schema:
+                # The provider receives the exact strict schema in response_format.
+                # Repeating it (and a second hand-written field map) in the prompt
+                # can exceed the input budget and introduces two contract sources.
+                payload.pop("required_object_fields")
+                payload.pop("response_contract")
+                payload.pop("response_contract_rules")
         else:
             compact_context, included_sections, omitted_sections = (
                 provider_context_payload(context, selected_profile)
@@ -449,6 +478,8 @@ class _OpenAICompatibleReasoningProvider:
             omitted_sections=omitted_sections,
         )
         wire_schema = schema if self.supports_strict_json_schema else None
+        if wire_schema is not None:
+            validate_strict_provider_schema(wire_schema)
         request_body = build_request_body(
             system_prompt=system_prompt,
             payload=payload,
@@ -692,10 +723,13 @@ class _OpenAICompatibleReasoningProvider:
             "one JSON object; exact schema; no markdown or prose",
             "use only supplied evidence IDs",
             (
-                "higher_timeframe_context.summary must be exactly one non-empty "
-                f"JSON string of at most {HIGHER_TIMEFRAME_SUMMARY_LIMIT} "
-                "characters; never an array, object, or null"
+                "Every field described as string must be exactly one non-empty "
+                "JSON string, never an array, object, or null; this includes "
+                "higher_timeframe_context.summary must be exactly one non-empty JSON string; "
+                "market_structure.short_term, "
+                "market_structure.medium_term, and market_structure.recent_change"
             ),
+            "Every field described as array must be a JSON array, including one-item arrays",
             (
                 "market_regime.evidence_refs must contain at most "
                 f"{MARKET_REGIME_EVIDENCE_REF_LIMIT} catalog IDs ordered "
@@ -724,16 +758,16 @@ class _OpenAICompatibleReasoningProvider:
                 "analysis_schema_version": "compact-retry-1.1",
                 "output_profile": "compact_retry",
                 "market_regime": {
-                    "classification": "bullish|bearish|ranging|transitional|uncertain",
-                    "strength": "0..100",
-                    "confidence": "0..1",
+                    "classification": "JSON string enum:bullish|bearish|ranging|transitional|uncertain",
+                    "strength": "JSON number 0..100",
+                    "confidence": "JSON number 0..1",
                     "evidence_refs": (
                         f"array<={MARKET_REGIME_EVIDENCE_REF_LIMIT};"
                         "strongest-to-weakest"
                     ),
                 },
                 "higher_timeframe_context": {
-                    "bias": "bullish|bearish|neutral|mixed|uncertain",
+                    "bias": "JSON string enum:bullish|bearish|neutral|mixed|uncertain",
                     "summary": (
                         "one non-empty JSON string<="
                         f"{HIGHER_TIMEFRAME_SUMMARY_LIMIT};"
@@ -742,41 +776,41 @@ class _OpenAICompatibleReasoningProvider:
                     "evidence_refs": "array<=2",
                 },
                 "market_structure": {
-                    "short_term": "text<=120",
-                    "medium_term": "text<=180",
-                    "recent_change": "text<=120",
+                    "short_term": "one non-empty JSON string<=120",
+                    "medium_term": "one non-empty JSON string<=180",
+                    "recent_change": "one non-empty JSON string<=120",
                     "evidence_refs": "array<=2",
                 },
                 "liquidity_analysis": {
-                    "summary": "text<=180",
-                    "events": "array<=2;text<=100",
-                    "unresolved": "array<=2;text<=100",
+                    "summary": "one non-empty JSON string<=180",
+                    "events": "JSON array<=2 of non-empty strings<=100",
+                    "unresolved": "JSON array<=2 of non-empty strings<=100",
                     "evidence_refs": "array<=2",
                 },
                 "supply_demand_analysis": {
-                    "summary": "text<=160",
+                    "summary": "one non-empty JSON string<=160",
                     "nearest_supply_ref": supply_values,
                     "nearest_demand_ref": demand_values,
                     "evidence_refs": "array<=2",
                 },
                 "momentum_analysis": {
-                    "direction": "bullish|bearish|neutral|mixed|uncertain",
-                    "strength": "0..100",
-                    "trend": "strengthening|weakening|stable|uncertain",
+                    "direction": "JSON string enum:bullish|bearish|neutral|mixed|uncertain",
+                    "strength": "JSON number 0..100",
+                    "trend": "JSON string enum:strengthening|weakening|stable|uncertain",
                     "evidence_refs": "array<=2",
                 },
                 "volatility_analysis": {
-                    "state": "low|normal|high|extreme|uncertain",
-                    "trend": "expanding|contracting|stable|uncertain",
+                    "state": "JSON string enum:low|normal|high|extreme|uncertain",
+                    "trend": "JSON string enum:expanding|contracting|stable|uncertain",
                     "evidence_refs": "array<=2",
                 },
                 "bullish_evidence_refs": "array<=2",
                 "bearish_evidence_refs": "array<=2",
                 "contradiction_refs": "array<=2",
                 "key_risk_refs": "array<=2",
-                "invalidation_conditions": "array<=2;text<=160",
-                "data_quality_warnings": "array<=2;text<=120",
-                "analysis_confidence": "0..1",
+                "invalidation_conditions": "JSON array<=2 of non-empty strings<=160",
+                "data_quality_warnings": "JSON array<=2 of non-empty strings<=120",
+                "analysis_confidence": "JSON number 0..1",
             }
         else:
             retry_shape = self._response_contract(
@@ -791,12 +825,13 @@ class _OpenAICompatibleReasoningProvider:
                 "bearish_evidence_refs": "array<=3",
                 "contradiction_refs": "array<=3",
                 "key_risk_refs": "array<=3",
-                "data_quality_warnings": "array<=3;text<=120",
+                "data_quality_warnings": "JSON array<=3 of non-empty strings<=120",
                 "alternative_scenarios": (
-                    "array<=2:{name<=60,description<=180,probability=0..1,"
-                    "evidence_refs<=2}"
+                    "JSON array<=2:{name=non-empty string<=60,"
+                    "description=non-empty string<=180,probability=number 0..1,"
+                    "evidence_refs=string array<=2}"
                 ),
-                "executive_summary": "text<=320",
+                "executive_summary": "one non-empty JSON string<=320",
             }
         return {
             "shape": shape,
@@ -809,6 +844,14 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
     # JSON Object Mode plus TEN's unchanged application validator is the
     # portable contract for every account in the pool.
     supports_strict_json_schema = False
+    _STRICT_JSON_SCHEMA_MODELS = frozenset(
+        {
+            "gpt-oss-20b",
+            "gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
+        }
+    )
 
     def __init__(
         self,
@@ -833,6 +876,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         model_context_limit: int = 8192,
     ) -> None:
         self.provider_name = account_id
+        self.supports_strict_json_schema = model in self._STRICT_JSON_SCHEMA_MODELS
         super().__init__(
             client,
             prompts,
@@ -902,6 +946,36 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         received_reference = (
             supply_demand.get(reference_key)
             if isinstance(supply_demand, dict) and reference_key
+            else None
+        )
+        error_path = schema_error_path or (error.schema_error_path if error else None)
+        received_value: Any = response.raw_output if response else None
+        if response and error_path:
+            path_parts = error_path.split(".")
+            if path_parts and path_parts[0] == "provider_response":
+                path_parts = path_parts[1:]
+            for part in path_parts:
+                if isinstance(received_value, dict) and part in received_value:
+                    received_value = received_value[part]
+                elif isinstance(received_value, (list, tuple)) and part.isdigit():
+                    index = int(part)
+                    received_value = (
+                        received_value[index]
+                        if index < len(received_value)
+                        else None
+                    )
+                else:
+                    received_value = None
+                    break
+        received_value_encoded = (
+            json.dumps(
+                received_value,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            )
+            if response and error_path
             else None
         )
         attempt_seed = (
@@ -1027,9 +1101,29 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             "schema_error_path": schema_error_path or (
                 error.schema_error_path if error else None
             ),
+            "schema_error_received_type": (
+                type(received_value).__name__
+                if response and error_path and received_value is not None
+                else None
+            ),
+            "schema_error_received_item_count": (
+                len(received_value)
+                if isinstance(received_value, (list, tuple, dict))
+                else None
+            ),
+            "schema_error_received_value_hash": (
+                sha256(received_value_encoded.encode("utf-8")).hexdigest()[:16]
+                if received_value_encoded is not None
+                else None
+            ),
             "schema_correction_triggered": correction_triggered,
             "local_shape_normalizations": (
                 metadata.get("local_shape_normalizations", ())
+                if response
+                else ()
+            ),
+            "local_shape_normalization_details": (
+                metadata.get("local_shape_normalization_details", ())
                 if response
                 else ()
             ),
@@ -1476,14 +1570,9 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 ),
             )
         )
-        original_higher_timeframe = normalized.get("higher_timeframe_context")
-        original_summary = (
-            original_higher_timeframe.get("summary")
-            if isinstance(original_higher_timeframe, dict)
-            else None
-        )
-        normalized, shape_changes = normalize_higher_timeframe_summary_shape(
-            normalized
+        normalized, shape_normalizations = normalize_compact_output_shapes(
+            normalized,
+            retry=profile == OutputProfile.COMPACT_RETRY,
         )
         normalized, reference_changes = normalize_reference_syntax(normalized)
         normalized, descriptive_changes = normalize_descriptive_overflow(
@@ -1520,33 +1609,35 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         )
         metadata = dict(response.operational_metadata or {})
         metadata["local_descriptive_normalizations"] = descriptive_changes
-        metadata["local_shape_normalizations"] = shape_changes
-        if shape_changes:
-            metadata["higher_timeframe_summary_received_type"] = type(
-                original_summary
-            ).__name__
-            metadata["higher_timeframe_summary_received_value_hash"] = sha256(
-                json.dumps(
-                    original_summary,
-                    ensure_ascii=False,
-                    default=str,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest()[:16]
+        metadata["local_shape_normalizations"] = tuple(
+            item["path"] for item in shape_normalizations
+        )
+        metadata["local_shape_normalization_details"] = shape_normalizations
+        higher_timeframe_change = next(
+            (
+                item
+                for item in shape_normalizations
+                if item["path"] == "higher_timeframe_context.summary"
+            ),
+            None,
+        )
+        if higher_timeframe_change is not None:
+            metadata["higher_timeframe_summary_received_type"] = (
+                higher_timeframe_change["received_type"]
+            )
+            metadata["higher_timeframe_summary_received_value_hash"] = (
+                higher_timeframe_change["received_value_hash"]
+            )
+        for shape_change in shape_normalizations:
             logger.info(
                 "ai_provider.response.locally_normalized",
                 extra={
-                    "field_path": (
-                        "provider_response.higher_timeframe_context.summary"
-                    ),
-                    "normalization": "non_empty_string_list_to_string",
-                    "received_type": type(original_summary).__name__,
-                    "received_item_count": len(
-                        cast(list[Any], original_summary)
-                    ),
-                    "received_value_hash": metadata[
-                        "higher_timeframe_summary_received_value_hash"
-                    ],
+                    "field_path": f"provider_response.{shape_change['path']}",
+                    "normalization": shape_change["rule"],
+                    "received_type": shape_change["received_type"],
+                    "normalized_type": shape_change["normalized_type"],
+                    "received_item_count": shape_change["received_item_count"],
+                    "received_value_hash": shape_change["received_value_hash"],
                     "provider": response.provider,
                     "request_id": str(request.request_id),
                     "cycle_id": str(request.cycle_id),
@@ -1916,6 +2007,7 @@ class GroqProviderPool:
                 if exc.details.reason_code in {
                     "output_budget_exceeded",
                     "schema_validation_error",
+                    "json_generation_failed",
                 }:
                     self._policy_failure(account_id, exc.details)
                 else:

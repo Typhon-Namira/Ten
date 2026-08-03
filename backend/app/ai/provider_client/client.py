@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from math import ceil
 import json
 import logging
@@ -107,6 +108,8 @@ def _reason_code(
         for value in (provider_code, error_message, metadata_error_type)
         if value
     )
+    if _normalized_code(provider_code) == "json_validate_failed":
+        return "json_generation_failed"
     if "context" in error_text and ("limit" in error_text or "length" in error_text):
         return "context_limit_exceeded"
     if any(
@@ -194,6 +197,112 @@ def _error_fields(
         _safe_text(metadata.get("error_type"), limit=128),
         _safe_text(metadata.get("provider_code"), limit=128),
     )
+
+
+def _safe_error_metadata(response: httpx.Response) -> dict[str, Any]:
+    """Describe provider failure metadata without logging generated content."""
+
+    try:
+        body = response.json()
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(body, dict) or not isinstance(body.get("error"), dict):
+        return {}
+    error = body["error"]
+    metadata = error.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    failed_generation = error.get("failed_generation", metadata.get("failed_generation"))
+    encoded: str | None = None
+    reason: str | None = None
+    path: str | None = None
+    if isinstance(failed_generation, dict):
+        encoded = json.dumps(
+            failed_generation,
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        )
+        reason = _safe_text(
+            failed_generation.get("reason")
+            or failed_generation.get("error")
+            or failed_generation.get("message")
+        )
+        path = _safe_text(
+            failed_generation.get("path")
+            or failed_generation.get("schema_path"),
+            limit=256,
+        )
+    elif isinstance(failed_generation, str):
+        encoded = failed_generation
+    reason = reason or _safe_text(
+        metadata.get("reason")
+        or metadata.get("error")
+        or metadata.get("message")
+    )
+    path = path or _safe_text(
+        metadata.get("path") or metadata.get("schema_path"),
+        limit=256,
+    )
+    keys = tuple(
+        sorted(
+            {
+                *(str(key) for key in metadata),
+                *(
+                    ("failed_generation",)
+                    if failed_generation is not None
+                    else ()
+                ),
+            }
+        )
+    )
+    return {
+        "provider_metadata_keys": keys,
+        "failed_generation_type": (
+            type(failed_generation).__name__
+            if failed_generation is not None
+            else None
+        ),
+        "failed_generation_length": len(encoded) if encoded is not None else None,
+        "failed_generation_hash": (
+            sha256(encoded.encode("utf-8")).hexdigest()[:16]
+            if encoded is not None
+            else None
+        ),
+        "failed_generation_reason": reason,
+        "failed_generation_path": path,
+    }
+
+
+def _recover_failed_generation(response: httpx.Response) -> dict[str, Any] | None:
+    """Recover only an already-valid JSON object withheld by JSON Object Mode."""
+
+    try:
+        body = response.json()
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(body, dict) or not isinstance(body.get("error"), dict):
+        return None
+    error = body["error"]
+    metadata = error.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    candidate = error.get("failed_generation", metadata.get("failed_generation"))
+    if isinstance(candidate, dict):
+        attempted = candidate.get("attempted_arguments")
+        if isinstance(attempted, str):
+            candidate = attempted
+        elif "analysis_schema_version" in candidate:
+            return candidate
+        else:
+            return None
+    if not isinstance(candidate, str):
+        return None
+    try:
+        recovered, _ = extract_single_json_object(candidate)
+    except ProviderJSONDecodeError:
+        return None
+    return recovered
 
 
 def _sanitized_error_body(response: httpx.Response) -> str | None:
@@ -612,6 +721,66 @@ class HttpAIProviderClient:
                 )
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            recovered = (
+                _recover_failed_generation(exc.response)
+                if _error_fields(exc.response)[0] == "json_validate_failed"
+                else None
+            )
+            if recovered is not None:
+                headers = exc.response.headers
+                elapsed = (perf_counter() - started) * 1000
+                provider_request_id = _safe_text(
+                    headers.get("x-request-id") or headers.get("request-id"),
+                    limit=128,
+                )
+                safe_metadata = _safe_error_metadata(exc.response)
+                logger.warning(
+                    "ai_provider.response.failed_generation_recovered",
+                    extra={
+                        **context,
+                        "status_code": exc.response.status_code,
+                        "provider_error_code": "json_validate_failed",
+                        "provider_request_id": provider_request_id,
+                        "latency_ms": elapsed,
+                        **safe_metadata,
+                    },
+                )
+                return AIProviderCompletion(
+                    content=recovered,
+                    provider=self.provider,
+                    model=model,
+                    status_code=exc.response.status_code,
+                    latency_ms=elapsed,
+                    provider_request_id=provider_request_id,
+                    token_usage=None,
+                    rate_limit_limit=_safe_text(
+                        headers.get("x-ratelimit-limit-requests")
+                        or headers.get("x-ratelimit-limit")
+                    ),
+                    rate_limit_remaining=_safe_text(
+                        headers.get("x-ratelimit-remaining-requests")
+                        or headers.get("x-ratelimit-remaining")
+                    ),
+                    rate_limit_reset=_safe_text(
+                        headers.get("x-ratelimit-reset-requests")
+                        or headers.get("x-ratelimit-reset")
+                    ),
+                    retry_after=_safe_text(headers.get("retry-after")),
+                    raw_json_text=json.dumps(
+                        recovered,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    response_size_bytes=len(exc.response.content),
+                    response_character_count=len(
+                        json.dumps(recovered, ensure_ascii=False)
+                    ),
+                    extraction_note="provider_failed_generation_recovered",
+                    prompt_character_count=(
+                        metrics.system_prompt_characters
+                        + metrics.user_prompt_characters
+                    ),
+                )
             raise self._http_failure(
                 exc.response,
                 model=model,
@@ -827,6 +996,7 @@ class HttpAIProviderClient:
         error_code, error_message, metadata_error_type, metadata_provider_code = (
             _error_fields(response)
         )
+        safe_metadata = _safe_error_metadata(response)
         headers = response.headers
         endpoint = f"{self.base_url}/chat/completions"
         endpoint_parts = urlsplit(endpoint)
@@ -857,6 +1027,7 @@ class HttpAIProviderClient:
             error_message=error_message,
             metadata_error_type=metadata_error_type,
             metadata_provider_code=metadata_provider_code,
+            **safe_metadata,
             content_type=_safe_text(headers.get("content-type"), limit=128),
             body_length=len(response.content),
             sanitized_response_body=_sanitized_error_body(response),
@@ -931,6 +1102,12 @@ class HttpAIProviderClient:
                 "error_type": details.metadata_error_type,
                 "provider_error_code": details.error_code,
                 "provider_error_type": details.metadata_error_type,
+                "provider_metadata_keys": details.provider_metadata_keys,
+                "failed_generation_type": details.failed_generation_type,
+                "failed_generation_length": details.failed_generation_length,
+                "failed_generation_hash": details.failed_generation_hash,
+                "failed_generation_reason": details.failed_generation_reason,
+                "failed_generation_path": details.failed_generation_path,
                 "provider_response": details.sanitized_response_body,
                 "sanitized_error_code": details.reason_code,
                 "latency_ms": details.elapsed_ms,

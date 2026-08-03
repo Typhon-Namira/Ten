@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -194,35 +196,123 @@ _LIST_LIMITS = {
 }
 
 
+def _schema_branch_for_value(
+    schema: dict[str, Any],
+    value: Any,
+) -> dict[str, Any]:
+    branches = schema.get("anyOf")
+    if not isinstance(branches, list):
+        return schema
+    value_type = (
+        "null" if value is None else "array" if isinstance(value, list) else
+        "object" if isinstance(value, dict) else "string" if isinstance(value, str)
+        else "number" if isinstance(value, (int, float)) and not isinstance(value, bool)
+        else "boolean" if isinstance(value, bool) else None
+    )
+    return next(
+        (
+            branch
+            for branch in branches
+            if isinstance(branch, dict) and branch.get("type") == value_type
+        ),
+        next((branch for branch in branches if isinstance(branch, dict)), schema),
+    )
+
+
+def normalize_compact_output_shapes(
+    raw: dict[str, Any],
+    *,
+    retry: bool = False,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    """Normalize only lossless JSON container variants across the wire schema."""
+
+    model = CompactRetryAIAnalysisOutput if retry else CompactAIAnalysisOutput
+    root_schema = model.model_json_schema()
+    definitions = root_schema.get("$defs", {})
+    changes: list[dict[str, Any]] = []
+
+    def resolve(schema: dict[str, Any]) -> dict[str, Any]:
+        reference = schema.get("$ref")
+        if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+            return schema
+        resolved = definitions.get(reference.removeprefix("#/$defs/"))
+        return resolved if isinstance(resolved, dict) else schema
+
+    def record(path: str, before: Any, after: Any, rule: str) -> None:
+        encoded = json.dumps(
+            before,
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        )
+        changes.append(
+            {
+                "path": path,
+                "rule": rule,
+                "received_type": type(before).__name__,
+                "normalized_type": type(after).__name__,
+                "received_item_count": len(before) if isinstance(before, list) else None,
+                "received_value_hash": sha256(encoded.encode("utf-8")).hexdigest()[:16],
+            }
+        )
+
+    def visit(value: Any, schema: dict[str, Any], path: str) -> Any:
+        schema = resolve(_schema_branch_for_value(resolve(schema), value))
+        expected_type = schema.get("type")
+        if (
+            expected_type == "string"
+            and isinstance(value, list)
+            and value
+            and all(isinstance(item, str) and item.strip() for item in value)
+        ):
+            normalized_string = " ".join(item.strip() for item in value)
+            record(path, value, normalized_string, "non_empty_string_list_to_string")
+            value = normalized_string
+        elif (
+            expected_type == "array"
+            and isinstance(value, str)
+            and value.strip()
+            and resolve(schema.get("items", {})).get("type") == "string"
+        ):
+            normalized_list = [value.strip()]
+            record(path, value, normalized_list, "non_empty_string_to_string_list")
+            value = normalized_list
+
+        if expected_type == "object" and isinstance(value, dict):
+            properties = schema.get("properties", {})
+            return {
+                key: visit(
+                    item,
+                    properties.get(key, {}) if isinstance(properties, dict) else {},
+                    f"{path}.{key}" if path else key,
+                )
+                for key, item in value.items()
+            }
+        if expected_type == "array" and isinstance(value, list):
+            item_schema = schema.get("items", {})
+            if not isinstance(item_schema, dict):
+                return value
+            return [
+                visit(item, item_schema, f"{path}.{index}")
+                for index, item in enumerate(value)
+            ]
+        return value
+
+    return visit(raw, root_schema, ""), tuple(changes)
+
+
 def normalize_higher_timeframe_summary_shape(
     raw: dict[str, Any],
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
-    """Join an equivalent JSON string list without accepting invalid content.
+    """Backward-compatible facade over the schema-wide safe normalizer."""
 
-    Groq JSON Object Mode can represent a multi-timeframe summary as an ordered
-    list even though TEN's compact wire contract requires one string. Joining a
-    non-empty list of non-empty strings preserves the same prose deterministically.
-    Nulls, mappings, empty lists, and mixed/empty list items remain untouched so
-    strict validation still rejects semantically incomplete output.
-    """
-
-    context = raw.get("higher_timeframe_context")
-    if not isinstance(context, dict):
-        return raw, ()
-    summary = context.get("summary")
-    if not (
-        isinstance(summary, list)
-        and summary
-        and all(isinstance(item, str) and item.strip() for item in summary)
-    ):
-        return raw, ()
-    normalized = dict(raw)
-    normalized_context = dict(context)
-    normalized_context["summary"] = " ".join(
-        item.strip() for item in summary
+    normalized, changes = normalize_compact_output_shapes(raw)
+    paths = tuple(
+        str(item["path"])
+        for item in changes
+        if item["path"] == "higher_timeframe_context.summary"
     )
-    normalized["higher_timeframe_context"] = normalized_context
-    return normalized, ("higher_timeframe_context.summary",)
+    return normalized, paths
 
 
 def normalize_descriptive_overflow(raw: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:

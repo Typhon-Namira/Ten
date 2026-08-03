@@ -40,6 +40,12 @@ class AIProviderFailureDetails:
     error_message: str | None = None
     metadata_error_type: str | None = None
     metadata_provider_code: str | None = None
+    provider_metadata_keys: tuple[str, ...] = ()
+    failed_generation_type: str | None = None
+    failed_generation_length: int | None = None
+    failed_generation_hash: str | None = None
+    failed_generation_reason: str | None = None
+    failed_generation_path: str | None = None
     content_type: str | None = None
     body_length: int | None = None
     sanitized_response_body: str | None = None

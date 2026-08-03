@@ -240,6 +240,51 @@ async def test_success_returns_typed_completion_without_logging_payload(
 
 
 @pytest.mark.asyncio
+async def test_json_validate_failed_preserves_safe_metadata_without_raw_output(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    failed = '{"output_profile":'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            headers={"content-type": "application/json"},
+            json={
+                "error": {
+                    "code": "json_validate_failed",
+                    "message": "generated JSON failed",
+                    "metadata": {
+                        "failed_generation": failed,
+                        "reason": "object incomplete",
+                        "path": "$.market_structure.short_term",
+                    },
+                }
+            },
+            request=request,
+        )
+
+    with caplog.at_level(logging.INFO), pytest.raises(
+        AIProviderRequestError
+    ) as captured:
+        await client_for(handler).complete_json(
+            system_prompt="system",
+            payload={"input": "test"},
+            model="llama-3.1-8b-instant",
+            temperature=0,
+            max_tokens=10,
+        )
+
+    details = captured.value.details
+    assert details.reason_code == "json_generation_failed"
+    assert details.failed_generation_type == "str"
+    assert details.failed_generation_length == len(failed)
+    assert details.failed_generation_hash is not None
+    assert details.failed_generation_reason == "object incomplete"
+    assert details.failed_generation_path == "$.market_structure.short_term"
+    assert failed not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_missing_usage_remains_null_and_finish_reason_is_exposed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
