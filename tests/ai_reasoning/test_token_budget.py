@@ -15,6 +15,7 @@ from backend.app.ai_reasoning.compact_output import (
     CompactOutputValidationError,
     HIGHER_TIMEFRAME_SUMMARY_LIMIT,
     MARKET_REGIME_EVIDENCE_REF_LIMIT,
+    normalize_compact_output_shapes,
     normalize_descriptive_overflow,
     normalize_higher_timeframe_summary_shape,
     normalize_reference_syntax,
@@ -472,6 +473,68 @@ async def test_semantically_invalid_higher_timeframe_shapes_remain_strict(
     assert changes == ()
     with pytest.raises(ValidationError):
         CompactAIAnalysisOutput.model_validate(normalized)
+
+
+@pytest.mark.asyncio
+async def test_market_structure_string_list_is_normalized_without_provider_correction() -> None:
+    state, quant, config, request = await _request()
+    raw = compact_output(request)
+    raw["market_structure"]["short_term"] = [
+        "M5 higher low holds.",
+        "Momentum is constructive.",
+    ]
+    selected_provider = provider(CompactClient(raw), config)
+    repository = InMemoryAIReasoningRepository()
+
+    result = await build_service(  # type: ignore[arg-type]
+        repository,
+        selected_provider,
+    ).process(state, quant)
+
+    assert result is not None
+    assert result.analysis.validation_passed is True
+    assert selected_provider.http_calls == 1
+    assert selected_provider.correction_attempts == 0
+    attempt = selected_provider.request_attempts[0]
+    assert "market_structure.short_term" in attempt["local_shape_normalizations"]
+
+
+def test_schema_wide_shape_normalizer_repairs_safe_string_variants() -> None:
+    raw: dict[str, Any] = {
+        "market_structure": {
+            "short_term": ["M5 higher low holds.", "Momentum is constructive."],
+            "medium_term": "M15 remains balanced.",
+            "recent_change": "A local break occurred.",
+            "evidence_refs": "E1",
+        }
+    }
+
+    normalized, changes = normalize_compact_output_shapes(raw)
+
+    assert normalized["market_structure"]["short_term"] == (
+        "M5 higher low holds. Momentum is constructive."
+    )
+    assert normalized["market_structure"]["evidence_refs"] == ["E1"]
+    assert {change["path"] for change in changes} == {
+        "market_structure.short_term",
+        "market_structure.evidence_refs",
+    }
+    assert all("received_value_hash" in change for change in changes)
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    (None, [], ["valid", 7], {"trend": "bullish"}),
+)
+def test_schema_wide_shape_normalizer_does_not_repair_unsafe_values(
+    invalid_value: object,
+) -> None:
+    raw = {"market_structure": {"short_term": invalid_value}}
+
+    normalized, changes = normalize_compact_output_shapes(raw)
+
+    assert normalized == raw
+    assert changes == ()
 
 
 @pytest.mark.asyncio

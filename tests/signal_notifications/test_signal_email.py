@@ -8,7 +8,11 @@ from uuid import uuid4
 import pytest
 
 from backend.app.core.config import Settings
-from backend.app.signal_notifications.service import SignalEmailWorker, render_signal_email
+from backend.app.signal_notifications.service import (
+    SignalEmailWorker,
+    primary_email_ineligibility_reason,
+    render_signal_email,
+)
 
 
 def payload(*, blocked: bool = False) -> dict[str, object]:
@@ -143,3 +147,18 @@ async def test_claimed_primary_scenario_email_is_dispatched_once_and_marked_sent
     sender.send.assert_awaited_once_with(event.payload, event.recipient)
     repository.mark_sent.assert_awaited_once()
     repository.mark_failed.assert_not_awaited()
+
+
+def test_email_eligibility_reports_exact_upstream_reason() -> None:
+    now = datetime(2026, 7, 30, 10, 0, tzinfo=UTC)
+    decision = SimpleNamespace(
+        mode=SimpleNamespace(value="live"),
+        publication_eligible=True,
+        notification_context=None,
+        decided_at=now,
+        valid_until=datetime(2026, 7, 30, 10, 15, tzinfo=UTC),
+    )
+
+    assert primary_email_ineligibility_reason(decision, now) == (
+        "notification_context_missing"
+    )

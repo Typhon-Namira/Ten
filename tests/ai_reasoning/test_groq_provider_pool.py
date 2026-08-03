@@ -12,6 +12,7 @@ from backend.app.ai_reasoning.provider import (
     GroqProviderPool,
     ProviderStatus,
     reasoning_response_schema,
+    validate_strict_provider_schema,
 )
 from backend.app.core.exceptions import (
     AIProviderFailureDetails,
@@ -140,12 +141,15 @@ def four(
 
 def test_analysis_schema_remains_strict_at_every_object() -> None:
     schema = reasoning_response_schema()
+    validate_strict_provider_schema(schema)
 
     def assert_strict(value: object) -> None:
         if isinstance(value, dict):
             if value.get("type") == "object":
                 assert value["additionalProperties"] is False
                 assert set(value["required"]) == set(value["properties"])
+            if "enum" in value:
+                assert value["type"] == "string"
             for nested in value.values():
                 assert_strict(nested)
         elif isinstance(value, list):
@@ -237,6 +241,27 @@ async def test_schema_invalid_http_200_is_latest_attempt_not_provider_outage() -
     assert snapshot["latest_attempt_result"] == "SCHEMA_VALIDATION_ERROR"
     assert snapshot["latest_attempt_schema_error"] == "unknown_supply_zone_ref"
     assert snapshot["latest_successful_attempt_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_json_generation_failure_does_not_fail_over_or_poison_account() -> None:
+    schema_failure = failure(
+        "groq_1",
+        "json_generation_failed",
+        status=400,
+    )
+    providers = four({1: [schema_failure]})
+    router = pool(providers)
+
+    with pytest.raises(AIProviderRequestError) as captured:
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert captured.value.details.reason_code == "json_generation_failed"
+    assert [provider.calls for provider in providers] == [1, 0, 0, 0]
+    state = router.states["groq_1"]
+    assert state.status == ProviderStatus.AVAILABLE
+    assert state.provider_failures == 0
+    assert state.request_policy_failures == 1
 
 
 @pytest.mark.asyncio

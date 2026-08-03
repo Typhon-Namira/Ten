@@ -125,12 +125,14 @@ def _provider(
 def _groq_provider(
     client: AIProviderClient,
     config: AIReasoningConfig,
+    *,
+    model: str = "gpt-oss-120b",
 ) -> GroqProvider:
     return GroqProvider(
         client,
         PromptLoader(Path("backend/app/ai_reasoning/prompts")),
         account_id="groq_1",
-        model="gpt-oss-120b",
+        model=model,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         target_input_tokens=config.target_input_tokens,
@@ -313,7 +315,7 @@ async def test_oversized_context_is_rejected_before_provider_and_not_typed_as_cr
 
 
 @pytest.mark.asyncio
-async def test_groq_uses_json_object_mode_with_application_validation() -> None:
+async def test_groq_gpt_oss_uses_supported_strict_json_schema_mode() -> None:
     _, _, config, request = await _request()
     client = CapturingClient(analysis_output().model_dump(mode="python"))
 
@@ -324,9 +326,26 @@ async def test_groq_uses_json_object_mode_with_application_validation() -> None:
     validated = StructuredAIOutputValidator().validate_analysis(response.raw_output)
 
     assert client.calls == 1
-    assert client.requests[0]["response_schema"] is None
+    schema = client.requests[0]["response_schema"]
+    assert isinstance(schema, dict)
+    assert schema["type"] == "object"
     assert response.model_identifier == "gpt-oss-120b"
     assert validated.market_regime.classification.value == "bullish"
+
+
+@pytest.mark.asyncio
+async def test_groq_llama_uses_json_object_mode_with_application_validation() -> None:
+    _, _, config, request = await _request()
+    client = CapturingClient(analysis_output().model_dump(mode="python"))
+
+    await _groq_provider(
+        client,
+        config,
+        model="llama-3.1-8b-instant",
+    ).reason(request, prompt_version=request.prompt_version)
+
+    assert client.calls == 1
+    assert client.requests[0]["response_schema"] is None
 
 
 @pytest.mark.asyncio
@@ -360,7 +379,8 @@ async def test_groq_malformed_json_gets_exactly_one_correction_attempt() -> None
 
     assert response.raw_output["market_regime"]["classification"] == "bullish"
     assert len(bodies) == 2
-    assert all(body["response_format"] == {"type": "json_object"} for body in bodies)
+    assert all(body["response_format"]["type"] == "json_schema" for body in bodies)
+    assert all(body["response_format"]["json_schema"]["strict"] for body in bodies)
 
 
 @pytest.mark.asyncio
@@ -405,15 +425,9 @@ async def test_groq_missing_executive_summary_gets_one_explicit_schema_correctio
     assert "provider_response.executive_summary" in correction_payload["validation_error"]
     assert "analysis_context" not in correction_payload
     assert correction_payload["complete_object_required"] is True
-    assert "market_regime" in correction_payload["required_object_fields"]["$"]
-    assert correction_payload["response_contract"]["shape"]["market_regime"]
+    assert "required_object_fields" not in correction_payload
+    assert "response_contract" not in correction_payload
     assert correction_payload["allowed_reference_values"]["evidence_refs"]
-    assert correction_payload["required_object_fields"]["$.market_regime"] == [
-        "classification",
-        "strength",
-        "confidence",
-        "evidence_refs",
-    ]
     assert correction_payload["previous_response"]["market_regime"]
     assert "executive_summary" not in correction_payload["previous_response"]
     assert response.raw_output["executive_summary"] == "Validated analysis summary."
@@ -465,7 +479,7 @@ async def test_groq_stops_after_one_invalid_schema_correction() -> None:
     assert selected_provider.correction_attempts == 1
     correction_payload = json.loads(bodies[1]["messages"][1]["content"])
     assert correction_payload["complete_object_required"] is True
-    assert "market_regime" in correction_payload["required_object_fields"]["$"]
+    assert "required_object_fields" not in correction_payload
 
 
 @pytest.mark.asyncio

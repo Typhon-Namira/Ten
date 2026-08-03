@@ -26,36 +26,50 @@ class SignalEmailSender(Protocol):
     async def send(self, payload: dict[str, Any], recipient: str) -> str | None: ...
 
 
-def primary_email_outbox_values(
-    decision: Any,
-    recipient: str,
-    now: datetime,
-) -> dict[str, Any] | None:
+def primary_email_ineligibility_reason(decision: Any, now: datetime) -> str | None:
     notification = decision.notification_context
-    if not (
-        getattr(getattr(decision, "mode", None), "value", None) == "live"
-        and decision.publication_eligible
-        and notification is not None
-        and notification.get("primary_scenario_id") is not None
-        and notification.get("direction") in {"BUY", "SELL"}
-        and all(
-            notification.get(field) is not None
-            for field in ("entry", "stop_loss", "take_profit", "risk_reward")
-        )
-        and float(notification["risk_reward"]) > 0
-        and float(notification.get("primary_scenario_score", 100))
-        >= float(notification.get("email_threshold", 0))
-        and decision.decided_at < decision.valid_until
-        and now < decision.valid_until
+    if getattr(getattr(decision, "mode", None), "value", None) != "live":
+        return "decision_not_live"
+    if not decision.publication_eligible:
+        return "publication_not_eligible"
+    if notification is None:
+        return "notification_context_missing"
+    if notification.get("primary_scenario_id") is None:
+        return "primary_scenario_missing"
+    if notification.get("direction") not in {"BUY", "SELL"}:
+        return "direction_not_actionable"
+    if any(
+        notification.get(field) is None
+        for field in ("entry", "stop_loss", "take_profit", "risk_reward")
     ):
-        return None
+        return "geometry_incomplete"
+    if float(notification["risk_reward"]) <= 0:
+        return "risk_reward_invalid"
+    if float(notification.get("primary_scenario_score", 100)) < float(
+        notification.get("email_threshold", 0)
+    ):
+        return "score_below_email_threshold"
+    if decision.decided_at >= decision.valid_until or now >= decision.valid_until:
+        return "decision_expired"
     expires_at = notification.get("expires_at")
     if isinstance(expires_at, str):
         expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
     if isinstance(expires_at, datetime) and (
         decision.decided_at >= expires_at or now >= expires_at
     ):
+        return "scenario_expired"
+    return None
+
+
+def primary_email_outbox_values(
+    decision: Any,
+    recipient: str,
+    now: datetime,
+) -> dict[str, Any] | None:
+    notification = decision.notification_context
+    if primary_email_ineligibility_reason(decision, now) is not None:
         return None
+    assert notification is not None
     payload = {
         **notification,
         "symbol": decision.instrument,
@@ -204,6 +218,27 @@ class SignalEmailOutboxRepository:
         now = datetime.now(UTC)
         values = primary_email_outbox_values(decision, recipient, now)
         if values is None:
+            logger.info(
+                "signal_email.not_eligible",
+                extra={
+                    "decision_id": str(decision.decision_id),
+                    "scenario_id": (
+                        decision.notification_context.get("primary_scenario_id")
+                        if decision.notification_context
+                        else None
+                    ),
+                    "cutoff": (
+                        decision.notification_context.get("market_cutoff")
+                        if decision.notification_context
+                        else decision.as_of.isoformat()
+                    ),
+                    "failure_reason": primary_email_ineligibility_reason(
+                        decision,
+                        now,
+                    ),
+                    "delivery_state": "NOT_TRIGGERED",
+                },
+            )
             return False
         async with self.session_factory() as session, session.begin():
             inserted = (
