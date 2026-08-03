@@ -31,8 +31,10 @@ from .compact_output import (
     CompactAIAnalysisOutput,
     CompactOutputValidationError,
     CompactRetryAIAnalysisOutput,
+    HIGHER_TIMEFRAME_SUMMARY_LIMIT,
     MARKET_REGIME_EVIDENCE_REF_LIMIT,
     normalize_descriptive_overflow,
+    normalize_higher_timeframe_summary_shape,
     normalize_reference_syntax,
     resolve_compact_output,
     truncate_market_regime_evidence_refs,
@@ -690,6 +692,11 @@ class _OpenAICompatibleReasoningProvider:
             "one JSON object; exact schema; no markdown or prose",
             "use only supplied evidence IDs",
             (
+                "higher_timeframe_context.summary must be exactly one non-empty "
+                f"JSON string of at most {HIGHER_TIMEFRAME_SUMMARY_LIMIT} "
+                "characters; never an array, object, or null"
+            ),
+            (
                 "market_regime.evidence_refs must contain at most "
                 f"{MARKET_REGIME_EVIDENCE_REF_LIMIT} catalog IDs ordered "
                 "strongest to weakest"
@@ -727,7 +734,11 @@ class _OpenAICompatibleReasoningProvider:
                 },
                 "higher_timeframe_context": {
                     "bias": "bullish|bearish|neutral|mixed|uncertain",
-                    "summary": "text<=180",
+                    "summary": (
+                        "one non-empty JSON string<="
+                        f"{HIGHER_TIMEFRAME_SUMMARY_LIMIT};"
+                        "never array|object|null"
+                    ),
                     "evidence_refs": "array<=2",
                 },
                 "market_structure": {
@@ -1017,6 +1028,21 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 error.schema_error_path if error else None
             ),
             "schema_correction_triggered": correction_triggered,
+            "local_shape_normalizations": (
+                metadata.get("local_shape_normalizations", ())
+                if response
+                else ()
+            ),
+            "higher_timeframe_summary_received_type": (
+                metadata.get("higher_timeframe_summary_received_type")
+                if response
+                else None
+            ),
+            "higher_timeframe_summary_received_value_hash": (
+                metadata.get("higher_timeframe_summary_received_value_hash")
+                if response
+                else None
+            ),
             "compact_retry_triggered": request_kind == "compact_retry",
             "limit_classification": (
                 error.limit_classification if error else None
@@ -1450,6 +1476,15 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 ),
             )
         )
+        original_higher_timeframe = normalized.get("higher_timeframe_context")
+        original_summary = (
+            original_higher_timeframe.get("summary")
+            if isinstance(original_higher_timeframe, dict)
+            else None
+        )
+        normalized, shape_changes = normalize_higher_timeframe_summary_shape(
+            normalized
+        )
         normalized, reference_changes = normalize_reference_syntax(normalized)
         normalized, descriptive_changes = normalize_descriptive_overflow(
             normalized
@@ -1485,6 +1520,38 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         )
         metadata = dict(response.operational_metadata or {})
         metadata["local_descriptive_normalizations"] = descriptive_changes
+        metadata["local_shape_normalizations"] = shape_changes
+        if shape_changes:
+            metadata["higher_timeframe_summary_received_type"] = type(
+                original_summary
+            ).__name__
+            metadata["higher_timeframe_summary_received_value_hash"] = sha256(
+                json.dumps(
+                    original_summary,
+                    ensure_ascii=False,
+                    default=str,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            logger.info(
+                "ai_provider.response.locally_normalized",
+                extra={
+                    "field_path": (
+                        "provider_response.higher_timeframe_context.summary"
+                    ),
+                    "normalization": "non_empty_string_list_to_string",
+                    "received_type": type(original_summary).__name__,
+                    "received_item_count": len(
+                        cast(list[Any], original_summary)
+                    ),
+                    "received_value_hash": metadata[
+                        "higher_timeframe_summary_received_value_hash"
+                    ],
+                    "provider": response.provider,
+                    "request_id": str(request.request_id),
+                    "cycle_id": str(request.cycle_id),
+                },
+            )
         metadata["local_reference_normalizations"] = reference_changes
         metadata["local_evidence_ref_truncations"] = evidence_ref_truncations
         metadata["supply_catalog_count"] = len(context.supply_zone_catalog)
