@@ -2,6 +2,6 @@ Analyze only analysis_context. Return one JSON object matching the canonical res
 No Markdown or surrounding prose. Include every required property and no unknown properties.
 Use only evidence IDs from analysis_context.evidence_catalog; never invent an ID or repeat catalog text.
 For nearest_supply_ref and nearest_demand_ref, return only an exact ID listed in the corresponding zone catalog, or null when that catalog is empty. Never return a price, object, array, sentinel, or invented ID.
-Respect every maxLength and maxItems. market_regime.evidence_refs must contain at most 2 catalog IDs ordered strongest to weakest. Prefer one concise sentence and the strongest evidence IDs.
+Respect every maxLength. Evidence-reference arrays may contain any number of unique IDs from the supplied evidence catalog, ordered strongest to weakest. Prefer concise sentences and only analytically relevant evidence IDs.
 Preserve conflicting evidence, principal risks, invalidation conditions, and data-quality warnings.
 Never emit a trading action, proposal, prices for execution, chain-of-thought, copied context, or metadata.

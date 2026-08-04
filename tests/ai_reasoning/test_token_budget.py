@@ -10,14 +10,14 @@ from pydantic import ValidationError
 
 from backend.app.ai.provider_client import AIProviderCompletion, HttpAIProviderClient
 from backend.app.ai.prompts.loader import PromptLoader
+from backend.app.ai_reasoning.analysis import AIAnalysisOutput
 from backend.app.ai_reasoning.compact_output import (
     CompactAIAnalysisOutput,
     CompactOutputValidationError,
+    CompactRetryAIAnalysisOutput,
     HIGHER_TIMEFRAME_SUMMARY_LIMIT,
-    MARKET_REGIME_EVIDENCE_REF_LIMIT,
     normalize_compact_output_shapes,
     resolve_compact_output,
-    truncate_market_regime_evidence_refs,
     validate_evidence_references,
     validate_zone_references,
 )
@@ -597,25 +597,25 @@ async def test_higher_timeframe_summary_contract_is_explicit_and_matches_schema(
 
 
 @pytest.mark.asyncio
-async def test_max_items_and_non_allowlisted_reference_lengths_are_strict() -> None:
+async def test_reference_cardinality_is_bounded_by_unique_catalog_membership() -> None:
     _, _, _, request = await _request()
+    context = build_llm_analysis_context(request)
+    valid_refs = [item.evidence_id for item in context.evidence_catalog]
+    assert len(valid_refs) >= 4
     raw = compact_output(request)
-    raw["bullish_evidence_refs"] = ["E1", "E2", "E3", "E4"]
-    with pytest.raises(ValidationError):
-        CompactAIAnalysisOutput.model_validate(raw)
+    raw["bullish_evidence_refs"] = valid_refs
+    wire = CompactAIAnalysisOutput.model_validate(raw)
+    validate_evidence_references(wire, context.evidence_catalog)
 
     raw = compact_output(request)
     raw["market_regime"]["evidence_refs"] = ["not-an-evidence-id"]
     wire = CompactAIAnalysisOutput.model_validate(raw)
     with pytest.raises(CompactOutputValidationError):
-        validate_evidence_references(
-            wire,
-            build_llm_analysis_context(request).evidence_catalog,
-        )
+        validate_evidence_references(wire, context.evidence_catalog)
 
 
 @pytest.mark.asyncio
-async def test_market_regime_evidence_limit_matches_prompt_contract() -> None:
+async def test_canonical_contract_has_no_arbitrary_array_cardinality_caps() -> None:
     _, _, config, request = await _request()
     selected_provider = provider(
         CompactClient(compact_output(request)),
@@ -627,33 +627,39 @@ async def test_market_regime_evidence_limit_matches_prompt_contract() -> None:
         build_llm_analysis_context(request),
     )
 
-    assert MARKET_REGIME_EVIDENCE_REF_LIMIT == 2
-    regime_refs = contract["json_schema"]["$defs"]["CompactRegime"][
-        "properties"
-    ]["evidence_refs"]
-    assert regime_refs["type"] == "array"
-    raw = compact_output(request)
-    valid_refs = [
-        item.evidence_id
-        for item in build_llm_analysis_context(request).evidence_catalog[:2]
-    ]
-    raw["market_regime"]["evidence_refs"] = valid_refs
-    unchanged, changes = truncate_market_regime_evidence_refs(
-        raw,
-        frozenset(valid_refs),
-    )
-    assert unchanged["market_regime"]["evidence_refs"] == valid_refs
-    assert changes == ()
+    canonical_schema = CompactAIAnalysisOutput.model_json_schema()
+
+    def array_caps(value: object, path: str = "$") -> list[str]:
+        if isinstance(value, dict):
+            found = [path] if value.get("type") == "array" and any(
+                keyword in value for keyword in ("minItems", "maxItems")
+            ) else []
+            return found + [
+                item
+                for key, child in value.items()
+                for item in array_caps(child, f"{path}.{key}")
+            ]
+        if isinstance(value, list):
+            return [
+                item
+                for index, child in enumerate(value)
+                for item in array_caps(child, f"{path}.{index}")
+            ]
+        return []
+
+    assert array_caps(canonical_schema) == []
+    assert array_caps(AIAnalysisOutput.model_json_schema()) == []
+    assert array_caps(contract["json_schema"]) == []
 
 
 @pytest.mark.asyncio
-async def test_too_many_valid_regime_refs_are_truncated_without_correction() -> None:
+async def test_three_valid_higher_timeframe_refs_are_accepted_without_correction() -> None:
     _, _, config, request = await _request()
     context = build_llm_analysis_context(request)
     refs = [item.evidence_id for item in context.evidence_catalog[:3]]
     assert len(refs) == 3
     raw = compact_output(request)
-    raw["market_regime"]["evidence_refs"] = refs
+    raw["higher_timeframe_context"]["evidence_refs"] = refs
     client = CompactClient(raw)
     selected_provider = provider(client, config)
 
@@ -669,46 +675,50 @@ async def test_too_many_valid_regime_refs_are_truncated_without_correction() -> 
     ] is False
     assert [
         item["claim"]
-        for item in response.raw_output["market_regime"]["evidence"]
+        for item in response.raw_output["higher_timeframe_context"]["evidence"]
     ] == [
         context.evidence_catalog[0].fact,
         context.evidence_catalog[1].fact,
+        context.evidence_catalog[2].fact,
     ]
-    assert response.operational_metadata[
-        "local_evidence_ref_truncations"
-    ] == ("market_regime.evidence_refs",)
+    assert response.operational_metadata["local_evidence_ref_truncations"] == ()
 
 
 @pytest.mark.asyncio
-async def test_unknown_overflow_regime_refs_remain_invalid() -> None:
+async def test_three_higher_timeframe_refs_with_unknown_id_remain_invalid() -> None:
     _, _, _, request = await _request()
+    context = build_llm_analysis_context(request)
     raw = compact_output(request)
-    raw["market_regime"]["evidence_refs"] = ["E1", "E2", "E99"]
-
-    normalized, changes = truncate_market_regime_evidence_refs(
-        raw,
-        frozenset({"E1", "E2"}),
+    raw["higher_timeframe_context"]["evidence_refs"] = ["E1", "E2", "E99"]
+    wire = CompactAIAnalysisOutput.model_validate(raw)
+    with pytest.raises(CompactOutputValidationError) as unknown:
+        validate_evidence_references(wire, context.evidence_catalog)
+    assert unknown.value.code == "unknown_evidence_reference"
+    assert unknown.value.path == (
+        "provider_response.higher_timeframe_context.evidence_refs.2"
     )
-
-    assert normalized["market_regime"]["evidence_refs"] == [
-        "E1",
-        "E2",
-        "E99",
-    ]
-    assert changes == ()
-    with pytest.raises(ValidationError):
-        CompactAIAnalysisOutput.model_validate(normalized)
 
     wrongly_typed = compact_output(request)
-    wrongly_typed["market_regime"]["evidence_refs"] = ["E1", "E2", 3]
-    untouched, type_changes = truncate_market_regime_evidence_refs(
-        wrongly_typed,
-        frozenset({"E1", "E2", "E3"}),
-    )
-    assert untouched["market_regime"]["evidence_refs"] == ["E1", "E2", 3]
-    assert type_changes == ()
+    wrongly_typed["higher_timeframe_context"]["evidence_refs"] = ["E1", "E2", 3]
     with pytest.raises(ValidationError):
-        CompactAIAnalysisOutput.model_validate(untouched)
+        CompactAIAnalysisOutput.model_validate(wrongly_typed)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_evidence_references_remain_invalid() -> None:
+    _, _, _, request = await _request()
+    context = build_llm_analysis_context(request)
+    raw = compact_output(request)
+    raw["higher_timeframe_context"]["evidence_refs"] = ["E1", "E1"]
+    wire = CompactAIAnalysisOutput.model_validate(raw)
+
+    with pytest.raises(CompactOutputValidationError) as duplicate:
+        validate_evidence_references(wire, context.evidence_catalog)
+
+    assert duplicate.value.code == "duplicate_evidence_reference"
+    assert duplicate.value.path == (
+        "provider_response.higher_timeframe_context.evidence_refs.1"
+    )
 
 
 @pytest.mark.asyncio
@@ -870,6 +880,7 @@ async def test_truncation_uses_one_smaller_fresh_retry_without_previous_output()
 
 
 def test_compact_retry_uses_the_same_canonical_response_schema() -> None:
+    assert CompactRetryAIAnalysisOutput is CompactAIAnalysisOutput
     compact = json.dumps(
         reasoning_response_schema(OutputProfile.COMPACT),
         separators=(",", ":"),

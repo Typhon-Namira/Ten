@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from backend.app.ai_reasoning.config import AIReasoningConfig
+from backend.app.ai_reasoning.llm_context import build_llm_analysis_context
 from backend.app.ai_reasoning.models import MarketMemorySummary
 from backend.app.ai_reasoning.request_builder import AIReasoningRequestBuilder
 from backend.app.core.config import YamlConfigRepository
@@ -83,6 +84,12 @@ async def test_three_m15_cutoffs_normalize_commit_select_and_enqueue_once() -> N
             "M5 structure is constructive.",
             "M15 context remains aligned.",
         ]
+        evidence_refs = [
+            item.evidence_id
+            for item in build_llm_analysis_context(request).evidence_catalog[:3]
+        ]
+        assert len(evidence_refs) == 3
+        raw["higher_timeframe_context"]["evidence_refs"] = evidence_refs
         client = CompactClient(raw)
         selected_provider = provider(client, config)
 

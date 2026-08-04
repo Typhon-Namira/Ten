@@ -45,7 +45,6 @@ class EvidenceCatalogItem(CompactStrictModel):
 
 
 EvidenceRefs = tuple[str, ...]
-MARKET_REGIME_EVIDENCE_REF_LIMIT = 2
 HIGHER_TIMEFRAME_SUMMARY_LIMIT = 180
 _STRING_FROM_LIST: JsonDict = {
     "x-ten-normalize": ["string_list_to_string"]
@@ -59,10 +58,7 @@ class CompactRegime(CompactStrictModel):
     classification: RegimeClassification
     strength: float = Field(ge=0, le=100)
     confidence: float = Field(ge=0, le=1)
-    evidence_refs: EvidenceRefs = Field(
-        max_length=MARKET_REGIME_EVIDENCE_REF_LIMIT,
-        json_schema_extra=_LIST_FROM_STRING,
-    )
+    evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
 
 
 class CompactHigherTimeframe(CompactStrictModel):
@@ -72,9 +68,7 @@ class CompactHigherTimeframe(CompactStrictModel):
         max_length=HIGHER_TIMEFRAME_SUMMARY_LIMIT,
         json_schema_extra=_STRING_FROM_LIST,
     )
-    evidence_refs: EvidenceRefs = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
+    evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
 
 
 class CompactStructure(CompactStrictModel):
@@ -87,24 +81,16 @@ class CompactStructure(CompactStrictModel):
     recent_change: str = Field(
         min_length=1, max_length=120, json_schema_extra=_STRING_FROM_LIST
     )
-    evidence_refs: EvidenceRefs = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
+    evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
 
 
 class CompactLiquidity(CompactStrictModel):
     summary: str = Field(
         min_length=1, max_length=180, json_schema_extra=_STRING_FROM_LIST
     )
-    events: tuple[str, ...] = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
-    unresolved: tuple[str, ...] = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
-    evidence_refs: EvidenceRefs = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
+    events: tuple[str, ...] = Field(json_schema_extra=_LIST_FROM_STRING)
+    unresolved: tuple[str, ...] = Field(json_schema_extra=_LIST_FROM_STRING)
+    evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
 
     @field_validator("events", "unresolved")
     @classmethod
@@ -124,26 +110,20 @@ class CompactSupplyDemand(CompactStrictModel):
     nearest_demand_ref: str | None = Field(
         pattern=r"^DZ[1-3]$",
     )
-    evidence_refs: EvidenceRefs = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
+    evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
 
 
 class CompactMomentum(CompactStrictModel):
     direction: AnalysisBias
     strength: float = Field(ge=0, le=100)
     trend: MomentumTrend
-    evidence_refs: EvidenceRefs = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
+    evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
 
 
 class CompactVolatility(CompactStrictModel):
     state: VolatilityState
     trend: VolatilityTrend
-    evidence_refs: EvidenceRefs = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
+    evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
 
 
 class CompactScenario(CompactStrictModel):
@@ -154,9 +134,7 @@ class CompactScenario(CompactStrictModel):
         min_length=1, max_length=180, json_schema_extra=_STRING_FROM_LIST
     )
     probability: float = Field(ge=0, le=1)
-    evidence_refs: EvidenceRefs = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
-    )
+    evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
 
 
 class CompactAIAnalysisOutput(CompactStrictModel):
@@ -169,25 +147,17 @@ class CompactAIAnalysisOutput(CompactStrictModel):
     supply_demand_analysis: CompactSupplyDemand
     momentum_analysis: CompactMomentum
     volatility_analysis: CompactVolatility
-    bullish_evidence_refs: EvidenceRefs = Field(
-        max_length=3, json_schema_extra=_LIST_FROM_STRING
-    )
-    bearish_evidence_refs: EvidenceRefs = Field(
-        max_length=3, json_schema_extra=_LIST_FROM_STRING
-    )
-    contradiction_refs: EvidenceRefs = Field(
-        max_length=3, json_schema_extra=_LIST_FROM_STRING
-    )
-    key_risk_refs: EvidenceRefs = Field(
-        max_length=3, json_schema_extra=_LIST_FROM_STRING
-    )
+    bullish_evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
+    bearish_evidence_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
+    contradiction_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
+    key_risk_refs: EvidenceRefs = Field(json_schema_extra=_LIST_FROM_STRING)
     invalidation_conditions: tuple[str, ...] = Field(
-        max_length=2, json_schema_extra=_LIST_FROM_STRING
+        json_schema_extra=_LIST_FROM_STRING
     )
     data_quality_warnings: tuple[str, ...] = Field(
-        max_length=3, json_schema_extra=_LIST_FROM_STRING
+        json_schema_extra=_LIST_FROM_STRING
     )
-    alternative_scenarios: tuple[CompactScenario, ...] = Field(max_length=2)
+    alternative_scenarios: tuple[CompactScenario, ...]
     analysis_confidence: float = Field(ge=0, le=1)
     executive_summary: str = Field(
         min_length=1, max_length=320, json_schema_extra=_STRING_FROM_LIST
@@ -348,35 +318,6 @@ def normalize_compact_output_shapes(
     return visit(raw, root_schema, ""), tuple(changes)
 
 
-def truncate_market_regime_evidence_refs(
-    raw: dict[str, Any],
-    allowed_evidence_ids: frozenset[str],
-) -> tuple[dict[str, Any], tuple[str, ...]]:
-    """Bound an ordered regime list only when every item is a valid catalog ID."""
-
-    market_regime = raw.get("market_regime")
-    if not isinstance(market_regime, dict):
-        return raw, ()
-    references = market_regime.get("evidence_refs")
-    if (
-        not isinstance(references, list)
-        or len(references) <= MARKET_REGIME_EVIDENCE_REF_LIMIT
-        or not all(
-            isinstance(reference, str) and reference in allowed_evidence_ids
-            for reference in references
-        )
-    ):
-        return raw, ()
-
-    normalized = dict(raw)
-    normalized_regime = dict(market_regime)
-    normalized_regime["evidence_refs"] = references[
-        :MARKET_REGIME_EVIDENCE_REF_LIMIT
-    ]
-    normalized["market_regime"] = normalized_regime
-    return normalized, ("market_regime.evidence_refs",)
-
-
 def validate_evidence_references(
     output: CompactWireOutput,
     catalog: tuple[EvidenceCatalogItem, ...],
@@ -390,7 +331,15 @@ def validate_evidence_references(
             for key, item in value.items():
                 child = f"{path}.{key}" if path else key
                 if key.endswith("_refs") or key == "evidence_refs":
+                    seen: set[str] = set()
                     for index, reference in enumerate(item):
+                        if reference in seen:
+                            raise CompactOutputValidationError(
+                                "duplicate_evidence_reference",
+                                f"provider_response.{child}.{index}",
+                                f"duplicate evidence reference {reference}",
+                            )
+                        seen.add(reference)
                         if reference not in allowed:
                             raise CompactOutputValidationError(
                                 "unknown_evidence_reference",
@@ -567,12 +516,8 @@ def validate_canonical_response(
 ) -> CanonicalResponseValidation:
     """Normalize once, then validate the canonical wire and semantic contracts."""
 
-    normalized, evidence_ref_truncations = truncate_market_regime_evidence_refs(
-        raw,
-        frozenset(item.evidence_id for item in catalog),
-    )
     normalized, normalization_details = normalize_compact_output_shapes(
-        normalized,
+        raw,
         retry=retry,
     )
     model = canonical_response_model(retry=retry)
@@ -594,5 +539,5 @@ def validate_canonical_response(
         wire_output=wire,
         resolved_output=resolved,
         normalization_details=normalization_details,
-        evidence_ref_truncations=evidence_ref_truncations,
+        evidence_ref_truncations=(),
     )
