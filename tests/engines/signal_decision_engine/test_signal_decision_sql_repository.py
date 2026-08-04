@@ -1,8 +1,6 @@
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import uuid4
-
 import pytest
 
 from backend.app.engines.signal_decision_engine import DecisionMode, DecisionState, SqlAlchemySignalDecisionRepository
@@ -86,7 +84,16 @@ async def test_sql_reads_active_filters_history_and_pruning() -> None:
     assert await repository.get_decision(value.decision_id) == value
     assert await repository.get_decision(value.decision_id) is None
 
-    db.scalars.side_effect = [Scalars([record]), Scalars([]), Scalars([record]), Scalars([record]), Scalars([record]), Scalars([record]), Scalars([]), Scalars([value.decision_id])]
+    db.scalars.side_effect = [
+        Scalars([record]),
+        Scalars([]),
+        Scalars([record]),
+        Scalars([record]),
+        Scalars([record]),
+        Scalars([record]),
+        Scalars([]),
+        Scalars([value.decision_id]),
+    ]
     assert await repository.find_by_fingerprint(value.input_fingerprint, DecisionMode.LIVE) == value
     assert await repository.find_by_fingerprint("missing", DecisionMode.LIVE) is None
     assert await repository.get_active_decision("XAUUSD", "M15", NOW, value.direction, DecisionState.ELIGIBLE) == value
@@ -110,137 +117,3 @@ async def test_sql_reads_active_filters_history_and_pruning() -> None:
     assert await repository.prune(NOW + timedelta(days=1), DecisionMode.LIVE, 10) == 1
     db.execute.assert_awaited_once()
     db.commit.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_legacy_signal_without_primary_never_creates_email_outbox() -> None:
-    signal_id = uuid4()
-    value = decision().model_copy(
-        update={
-            "publication_eligible": True,
-            "notification_context": {
-                "signal_id": str(signal_id),
-                "analysis_id": str(uuid4()),
-                "synthesis_id": str(uuid4()),
-                "cycle_id": str(uuid4()),
-                "direction": "BUY",
-                "combined_confidence": 64.0,
-                "combined_strength": "MODERATE",
-                "entry": 4026.89,
-                "stop_loss": 4018.0,
-                "take_profit": 4045.0,
-                "risk_reward": 2.04,
-                "geometry_owner_timeframe": "M15",
-                "structural_source_ids": ("order-block-1",),
-                "timeframe_summaries": (),
-                "expected_horizon_seconds": 900,
-                "created_at": NOW.isoformat(),
-                "expires_at": (NOW + timedelta(minutes=15)).isoformat(),
-                "execution_status": "READY",
-                "execution_blockers": (),
-                "analytical_thesis": "Validated same-cycle structure.",
-                "current_market_price": 4027.0,
-                "ai_confidence": 62.0,
-                "quant_confidence": 66.0,
-                "quant_ai_alignment": "agreement",
-            }
-        }
-    )
-    db = session()
-    db.execute.side_effect = [
-        InsertResult(value.decision_id),
-        None,
-        None,
-        None,
-    ]
-    repository = SqlAlchemySignalDecisionRepository(
-        FakeSessionFactory(db),
-        signal_email_enabled=True,
-    )
-    repository.find_by_fingerprint = AsyncMock(side_effect=[None, value])  # type: ignore[method-assign]
-
-    assert await repository.save_decision(value) == value
-    assert db.execute.await_count == 3
-    db.commit.assert_awaited_once()
-
-    repository.find_by_fingerprint = AsyncMock(return_value=value)  # type: ignore[method-assign]
-    await repository.save_decision(value)
-    assert db.execute.await_count == 3
-
-
-@pytest.mark.asyncio
-async def test_publication_blocked_signal_does_not_enqueue_email_even_with_geometry() -> None:
-    value = decision().model_copy(
-        update={
-            "notification_context": {
-                "signal_id": str(uuid4()),
-                "direction": "SELL",
-                "entry": 4026.0,
-                "stop_loss": 4030.0,
-                "take_profit": 4018.0,
-                "risk_reward": 2.0,
-            }
-        }
-    )
-    db = session()
-    db.execute.side_effect = [InsertResult(value.decision_id), None, None]
-    repository = SqlAlchemySignalDecisionRepository(
-        FakeSessionFactory(db),
-        signal_email_enabled=True,
-    )
-    repository.find_by_fingerprint = AsyncMock(side_effect=[None, value])  # type: ignore[method-assign]
-
-    assert await repository.save_decision(value) == value
-    assert db.execute.await_count == 3
-    db.commit.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_eligible_primary_scenario_enqueues_exactly_one_email() -> None:
-    now = datetime.now(UTC)
-    signal_id = uuid4()
-    scenario_id = uuid4()
-    value = decision().model_copy(
-        update={
-            "mode": DecisionMode.LIVE,
-            "publication_eligible": True,
-            "decided_at": now,
-            "as_of": now,
-            "valid_from": now,
-            "valid_until": now + timedelta(minutes=15),
-            "notification_context": {
-                "signal_id": str(signal_id),
-                "primary_scenario_id": str(scenario_id),
-                "direction": "BUY",
-                "primary_scenario_score": 82.0,
-                "email_threshold": 60.0,
-                "market_cutoff": now.isoformat(),
-                "entry": 4050.0,
-                "stop_loss": 4045.0,
-                "take_profit": 4060.0,
-                "risk_reward": 2.0,
-                "expires_at": (now + timedelta(minutes=15)).isoformat(),
-            },
-        }
-    )
-    db = session()
-    email_id = uuid4()
-    db.execute.side_effect = [
-        InsertResult(value.decision_id),
-        None,
-        None,
-        InsertResult(email_id),
-    ]
-    repository = SqlAlchemySignalDecisionRepository(
-        FakeSessionFactory(db),
-        signal_email_enabled=True,
-        signal_email_recipient="operator@example.com",
-    )
-    repository.find_by_fingerprint = AsyncMock(side_effect=[None, value])  # type: ignore[method-assign]
-
-    assert await repository.save_decision(value) == value
-    assert db.execute.await_count == 4
-
-    repository.find_by_fingerprint = AsyncMock(return_value=value)  # type: ignore[method-assign]
-    assert await repository.save_decision(value) == value
-    assert db.execute.await_count == 4

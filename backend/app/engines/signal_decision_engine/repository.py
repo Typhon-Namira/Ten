@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from datetime import UTC, datetime
+from datetime import datetime
 import logging
 from uuid import UUID
 
@@ -15,10 +15,8 @@ from backend.app.storage.models import (
     SignalDecisionReasonRecord,
     SignalDecisionRecord,
     SignalDecisionRuleRecord,
-    SignalEmailOutboxRecord,
 )
 from backend.app.storage.scoped_session import ScopedSessionRepository, scoped_session
-from backend.app.signal_notifications.service import primary_email_outbox_values
 
 from .exceptions import SignalDecisionPersistenceError
 from .models import DecisionDirection, DecisionMode, DecisionState, SignalDecision, stable_id
@@ -180,13 +178,8 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        *,
-        signal_email_enabled: bool = False,
-        signal_email_recipient: str = "tufannamira@gmail.com",
     ) -> None:
         ScopedSessionRepository.__init__(self, session_factory)
-        self.signal_email_enabled = signal_email_enabled
-        self.signal_email_recipient = signal_email_recipient
 
     @scoped_session
     async def save_decision(self, decision: SignalDecision) -> SignalDecision:
@@ -251,44 +244,7 @@ class SqlAlchemySignalDecisionRepository(SignalDecisionRepository, ScopedSession
             if reasons:
                 for chunk in bounded_insert_chunks(reasons):
                     await self.session.execute(insert(SignalDecisionReasonRecord).values(list(chunk)).on_conflict_do_nothing(index_elements=["id"]))
-            email_values = (
-                primary_email_outbox_values(
-                    decision,
-                    self.signal_email_recipient,
-                    datetime.now(UTC),
-                )
-                if self.signal_email_enabled
-                else None
-            )
-            email_inserted = None
-            if email_values is not None:
-                email_inserted = (
-                    await self.session.execute(
-                        insert(SignalEmailOutboxRecord)
-                        .values(**email_values)
-                        .on_conflict_do_nothing()
-                        .returning(SignalEmailOutboxRecord.id)
-                    )
-                ).scalar_one_or_none()
             await self.session.commit()
-            if email_values is not None:
-                logger.info(
-                    "signal_email.triggered"
-                    if email_inserted is not None
-                    else "signal_email.duplicate",
-                    extra={
-                        "scenario_id": str(email_values["primary_scenario_id"]),
-                        "cutoff": email_values["payload"].get("market_cutoff"),
-                        "email_trigger_time": email_values["created_at"].isoformat(),
-                        "recipient": email_values["recipient"],
-                        "event_id": str(email_values["id"]),
-                        "delivery_state": (
-                            "QUEUED"
-                            if email_inserted is not None
-                            else "ALREADY_QUEUED"
-                        ),
-                    },
-                )
             return await self.find_by_fingerprint(decision.input_fingerprint, decision.mode) or decision
         except Exception as exc:
             await self.session.rollback()

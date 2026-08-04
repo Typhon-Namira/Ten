@@ -20,7 +20,9 @@ from backend.app.scenario_forecasting.simulation_repository import (
     InMemoryMarketSimulationRepository,
 )
 from backend.app.scenario_forecasting.simulation_service import MarketSimulationService
-from backend.app.signal_notifications.service import primary_email_outbox_values
+from backend.app.signal_notifications.service import (
+    primary_scenario_email_outbox_values,
+)
 from backend.app.signal_synthesis import MultiTimeframeSignalSynthesizer
 from tests.ai_reasoning.test_ai_reasoning_lifecycle import (
     InMemoryAIReasoningRepository,
@@ -134,12 +136,14 @@ async def test_three_m15_cutoffs_normalize_commit_select_and_enqueue_once() -> N
             )
         )
         assert decision.publication_eligible
-        first_email = primary_email_outbox_values(
+        first_email = primary_scenario_email_outbox_values(
+            selection,
             decision,
             "operator@example.com",
             decision.decided_at,
         )
-        repeated_email = primary_email_outbox_values(
+        repeated_email = primary_scenario_email_outbox_values(
+            selection,
             decision,
             "operator@example.com",
             decision.decided_at,

@@ -227,6 +227,21 @@ def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     assert 'op.drop_table("signal_email_outbox")' in source
 
 
+def test_primary_scenario_publication_migration_is_normalized_and_reversible() -> None:
+    source = (
+        ROOT
+        / "migrations/versions/20260804_0024_primary_scenario_publication.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260804_0024"' in source
+    assert 'down_revision = "20260803_0023"' in source
+    assert '"primary_scenario_publications"' in source
+    assert "publication_status IN ('ELIGIBLE','INELIGIBLE')" in source
+    assert "email_status IN ('ELIGIBLE','NOT_ELIGIBLE','ENQUEUED')" in source
+    assert 'op.drop_table("primary_scenario_publications")' in source
+    assert "DELETE FROM signal_email_outbox" not in source
+
+
 def test_initial_migration_renders_every_model_as_postgresql_ddl(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEN_DATABASE_URL", "postgresql+asyncpg://ten:ten@localhost:5432/ten")
     output = StringIO()

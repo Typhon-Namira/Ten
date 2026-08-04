@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -9,10 +9,24 @@ import pytest
 
 from backend.app.core.config import Settings
 from backend.app.signal_notifications.service import (
+    SignalEmailOutboxRepository,
     SignalEmailWorker,
-    primary_email_ineligibility_reason,
+    primary_publication_ineligibility_reason,
+    primary_scenario_email_outbox_values,
     render_signal_email,
 )
+from tests.conftest import FakeSessionFactory
+from backend.app.engines.signal_decision_engine import ConservativeSignalDecisionPolicy
+from backend.app.scenario_forecasting.simulation_engine import (
+    MarketSimulationConfig,
+    MarketSimulationEngine,
+)
+from tests.engines.signal_decision_engine.test_signal_decision_engine import (
+    ai_score,
+    decision_input,
+)
+from tests.scenario_forecasting.test_scenario_forecasting import scenario_inputs
+from tests.signal_synthesis.test_multi_timeframe_signal import aligned_analysis
 
 
 def payload(*, blocked: bool = False) -> dict[str, object]:
@@ -149,16 +163,154 @@ async def test_claimed_primary_scenario_email_is_dispatched_once_and_marked_sent
     repository.mark_failed.assert_not_awaited()
 
 
-def test_email_eligibility_reports_exact_upstream_reason() -> None:
-    now = datetime(2026, 7, 30, 10, 0, tzinfo=UTC)
-    decision = SimpleNamespace(
-        mode=SimpleNamespace(value="live"),
-        publication_eligible=True,
-        notification_context=None,
-        decided_at=now,
-        valid_until=datetime(2026, 7, 30, 10, 15, tzinfo=UTC),
+async def authoritative_selection_and_decision():
+    state, quant, synthesis = await scenario_inputs()
+    _, selection = MarketSimulationEngine(
+        MarketSimulationConfig(
+            primary_scenario_threshold=0,
+            email_scenario_threshold=0,
+        )
+    ).simulate(state, quant, synthesis)
+    score = ai_score(as_of=state.market_data_boundary, calculated_at=state.market_data_boundary)
+    decision = ConservativeSignalDecisionPolicy().evaluate(
+        decision_input(score=score, as_of=state.market_data_boundary).model_copy(
+            update={
+                "current_ai_analysis": aligned_analysis(state, quant),
+                "market_snapshot_id": state.state_id,
+                "quantitative_forecast_id": quant.result_id,
+                "current_primary_scenario": selection,
+            }
+        )
+    )
+    return selection, decision
+
+
+@pytest.mark.asyncio
+async def test_authoritative_primary_owns_email_payload_and_deduplication() -> None:
+    selection, decision = await authoritative_selection_and_decision()
+    now = selection.selected_at
+
+    first = primary_scenario_email_outbox_values(
+        selection, decision, "operator@example.com", now
+    )
+    repeated = primary_scenario_email_outbox_values(
+        selection, decision, "operator@example.com", now + timedelta(seconds=1)
     )
 
-    assert primary_email_ineligibility_reason(decision, now) == (
-        "notification_context_missing"
+    assert first is not None and repeated is not None
+    assert first["id"] == repeated["id"]
+    assert first["signal_id"] == selection.selection_id
+    assert first["primary_scenario_id"] == selection.primary_candidate_id
+    assert first["payload"]["entry"] == selection.primary.geometry.entry
+    assert first["payload"]["publication_status"] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+async def test_publication_ineligible_primary_has_exact_guardrail_reason() -> None:
+    selection, decision = await authoritative_selection_and_decision()
+    blocked = decision.model_copy(update={"publication_eligible": False})
+
+    assert primary_publication_ineligibility_reason(
+        selection, blocked, selection.selected_at
+    ) == "guardrails_rejected"
+    assert (
+        primary_scenario_email_outbox_values(
+            selection,
+            blocked,
+            "operator@example.com",
+            selection.selected_at,
+        )
+        is None
     )
+
+
+@pytest.mark.asyncio
+async def test_guardrail_decision_for_another_selection_cannot_publish() -> None:
+    selection, decision = await authoritative_selection_and_decision()
+    mismatched = selection.model_copy(update={"selection_id": uuid4()})
+
+    assert primary_publication_ineligibility_reason(
+        mismatched, decision, selection.selected_at
+    ) == "guardrail_decision_selection_mismatch"
+
+
+class _Transaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
+class _InsertResult:
+    def __init__(self, value: object | None) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self) -> object | None:
+        return self.value
+
+
+class _Scalars:
+    def __init__(self, values: list[object]) -> None:
+        self.values = values
+
+    def all(self) -> list[object]:
+        return self.values
+
+
+@pytest.mark.asyncio
+async def test_publication_evaluation_atomically_creates_one_outbox() -> None:
+    selection, decision = await authoritative_selection_and_decision()
+    outbox_id = uuid4()
+    database = SimpleNamespace(
+        execute=AsyncMock(
+            side_effect=[None, _InsertResult(outbox_id), None]
+        ),
+        begin=lambda: _Transaction(),
+    )
+    repository = SignalEmailOutboxRepository(FakeSessionFactory(database))
+
+    created = await repository.evaluate_primary_scenario(
+        selection,
+        decision,
+        "operator@example.com",
+        email_enabled=True,
+        now=selection.selected_at,
+    )
+
+    assert created is True
+    assert database.execute.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_repairs_missing_outbox_without_analysis_or_simulation() -> None:
+    selection, decision = await authoritative_selection_and_decision()
+    values = primary_scenario_email_outbox_values(
+        selection, decision, "operator@example.com", selection.selected_at
+    )
+    assert values is not None
+    publication = SimpleNamespace(
+        selection_id=selection.selection_id,
+        primary_scenario_id=selection.primary_candidate_id,
+        decision_id=decision.decision_id,
+        payload={
+            "market_cutoff": selection.market_cutoff.isoformat(),
+            "outbox": {
+                "id": str(values["id"]),
+                "signal_id": str(values["signal_id"]),
+                "deduplication_key": values["deduplication_key"],
+                "recipient": values["recipient"],
+                "payload": values["payload"],
+            },
+        },
+    )
+    database = SimpleNamespace(
+        scalars=AsyncMock(return_value=_Scalars([publication])),
+        execute=AsyncMock(return_value=_InsertResult(values["id"])),
+        begin=lambda: _Transaction(),
+    )
+    repository = SignalEmailOutboxRepository(FakeSessionFactory(database))
+
+    assert await repository.reconcile_primary_scenario_publications() == 1
+    database.scalars.assert_awaited_once()
+    database.execute.assert_awaited_once()
