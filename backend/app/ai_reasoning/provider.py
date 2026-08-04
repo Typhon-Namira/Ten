@@ -28,18 +28,9 @@ from backend.app.core.exceptions import AIProviderFailureDetails, AIProviderRequ
 
 from .analysis import AIAnalysisOutput
 from .compact_output import (
-    CompactAIAnalysisOutput,
     CompactOutputValidationError,
-    CompactRetryAIAnalysisOutput,
-    HIGHER_TIMEFRAME_SUMMARY_LIMIT,
-    MARKET_REGIME_EVIDENCE_REF_LIMIT,
-    normalize_compact_output_shapes,
-    normalize_descriptive_overflow,
-    normalize_reference_syntax,
-    resolve_compact_output,
-    truncate_market_regime_evidence_refs,
-    validate_evidence_references,
-    validate_zone_references,
+    canonical_response_model,
+    validate_canonical_response,
 )
 from .llm_context import build_llm_analysis_context, provider_context_payload
 from .models import AIReasoningRequest
@@ -157,6 +148,9 @@ class AIProviderResponse:
     fallback_used: bool = False
     fallback_reason: str | None = None
     operational_metadata: dict[str, object] | None = None
+    provider_output: dict[str, Any] | None = None
+    normalized_output: dict[str, Any] | None = None
+    validated_output: AIAnalysisOutput | None = None
 
 
 class AIReasoningProvider(Protocol):
@@ -178,9 +172,9 @@ def reasoning_response_schema(
     selected = OutputProfile(profile)
     model: type[BaseModel]
     if selected == OutputProfile.COMPACT_RETRY:
-        model = CompactRetryAIAnalysisOutput
+        model = canonical_response_model(retry=True)
     elif selected == OutputProfile.COMPACT:
-        model = CompactAIAnalysisOutput
+        model = canonical_response_model()
     else:
         model = AIAnalysisOutput
     unsupported_keywords = {
@@ -189,7 +183,11 @@ def reasoning_response_schema(
         "description",
         "format",
         "minLength",
+        "maxLength",
         "minItems",
+        "maxItems",
+        "pattern",
+        "x-ten-normalize",
         # Numeric bounds remain enforced by the unchanged Pydantic
         # domain schema after decoding. Omitting them from the wire
         # contract stays compact without weakening application validation.
@@ -220,8 +218,43 @@ def reasoning_response_schema(
 def validate_strict_provider_schema(schema: dict[str, Any]) -> None:
     """Enforce Groq strict-mode object and enum requirements before transport."""
 
-    def visit(value: Any, path: str) -> None:
+    definitions = schema.get("$defs", {})
+    if not isinstance(definitions, dict):
+        raise ValueError("$.$defs must be an object")
+    unsupported = {
+        "default",
+        "description",
+        "format",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "pattern",
+        "x-ten-normalize",
+        "title",
+    }
+
+    def visit(value: Any, path: str, *, property_map: bool = False) -> None:
         if isinstance(value, dict):
+            disallowed = (
+                frozenset() if property_map else unsupported.intersection(value)
+            )
+            if disallowed:
+                raise ValueError(
+                    f"{path} contains unsupported strict keywords: "
+                    f"{', '.join(sorted(disallowed))}"
+                )
+            reference = value.get("$ref")
+            if isinstance(reference, str):
+                if not reference.startswith("#/$defs/"):
+                    raise ValueError(f"{path} contains unsupported $ref {reference}")
+                if reference.removeprefix("#/$defs/") not in definitions:
+                    raise ValueError(f"{path} contains unresolved $ref {reference}")
             if value.get("type") == "object":
                 properties = value.get("properties")
                 required = value.get("required")
@@ -234,12 +267,38 @@ def validate_strict_provider_schema(schema: dict[str, Any]) -> None:
             if "enum" in value and value.get("type") != "string":
                 raise ValueError(f"{path}.enum must declare type=string")
             for key, item in value.items():
-                visit(item, f"{path}.{key}")
+                visit(item, f"{path}.{key}", property_map=key == "properties")
         elif isinstance(value, list):
             for index, item in enumerate(value):
                 visit(item, f"{path}.{index}")
 
     visit(schema, "$")
+
+
+def provider_mode_for_model(model: str) -> str:
+    return (
+        "strict_schema"
+        if model in GroqProvider._STRICT_JSON_SCHEMA_MODELS
+        else "json_object"
+    )
+
+
+def validate_provider_contract(
+    model: str,
+    profile: OutputProfile | str,
+) -> tuple[str, dict[str, Any]]:
+    """Generate and preflight the one canonical provider contract at startup."""
+
+    selected = OutputProfile(profile)
+    schema = reasoning_response_schema(selected)
+    mode = provider_mode_for_model(model)
+    if mode == "strict_schema":
+        validate_strict_provider_schema(schema)
+    else:
+        canonical_response_model(
+            retry=False
+        ).model_json_schema()
+    return mode, schema
 
 
 def _schema_issue(exc: ValidationError) -> tuple[str, str, str, str]:
@@ -308,16 +367,32 @@ def _combined_usage(*values: dict[str, int] | None) -> dict[str, int] | None:
 
 
 def _required_object_fields(
-    shape: object,
+    schema: object,
     path: str = "$",
+    definitions: dict[str, Any] | None = None,
 ) -> dict[str, tuple[str, ...]]:
-    """Describe required object membership without repeating the full contract."""
+    """Derive required object membership from the canonical JSON Schema."""
 
-    if not isinstance(shape, dict):
+    if not isinstance(schema, dict):
         return {}
-    required = {path: tuple(shape)}
-    for key, value in shape.items():
-        required.update(_required_object_fields(value, f"{path}.{key}"))
+    definitions = definitions or cast(dict[str, Any], schema.get("$defs", {}))
+    reference = schema.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/$defs/"):
+        resolved = definitions.get(reference.removeprefix("#/$defs/"))
+        return _required_object_fields(resolved, path, definitions)
+    for branch in schema.get("anyOf", ()):
+        if isinstance(branch, dict) and branch.get("type") != "null":
+            nested = _required_object_fields(branch, path, definitions)
+            if nested:
+                return nested
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return {}
+    required = {path: tuple(str(item) for item in schema.get("required", ()))}
+    for key, value in properties.items():
+        required.update(
+            _required_object_fields(value, f"{path}.{key}", definitions)
+        )
     return required
 
 
@@ -441,9 +516,7 @@ class _OpenAICompatibleReasoningProvider:
                     "Return one listed ID or null exactly; never return a price, "
                     "object, array, empty string, sentinel, or invented ID."
                 ),
-                "required_object_fields": _required_object_fields(
-                    contract.get("shape")
-                ),
+                "required_object_fields": _required_object_fields(schema),
                 "response_contract": contract,
                 "response_contract_rules": contract.get("rules", ()),
                 "complete_object_required": True,
@@ -464,7 +537,18 @@ class _OpenAICompatibleReasoningProvider:
                 "analysis_context": compact_context,
                 "response_contract": contract,
             }
+            if self.supports_strict_json_schema:
+                payload["response_contract"] = {
+                    "mode": "strict_schema",
+                    "rules": contract["rules"],
+                    "reference_catalog": contract["reference_catalog"],
+                }
             system_prompt = self.prompts.load(prompt_version)
+        budget_schema = (
+            {}
+            if correction_instruction and not self.supports_strict_json_schema
+            else contract
+        )
         plan = self.token_budgets.plan(
             system_prompt=system_prompt,
             context=(
@@ -472,7 +556,7 @@ class _OpenAICompatibleReasoningProvider:
                 if isinstance(payload.get("analysis_context"), dict)
                 else payload
             ),
-            schema=contract,
+            schema=budget_schema,
             profile=selected_profile,
             included_sections=included_sections,
             omitted_sections=omitted_sections,
@@ -592,10 +676,9 @@ class _OpenAICompatibleReasoningProvider:
                 hard_output_limit=plan.hard_output_limit,
                 output_profile=plan.output_profile.value,
                 analysis_schema_version=(
-                    "compact-retry-1.1"
-                    if plan.output_profile == OutputProfile.COMPACT_RETRY
-                    else "compact-1.1"
-                    if plan.output_profile == OutputProfile.COMPACT
+                    "compact-1.1"
+                    if plan.output_profile
+                    in {OutputProfile.COMPACT, OutputProfile.COMPACT_RETRY}
                     else "standard-1.0"
                 ),
                 input_budget_utilization_percent=(
@@ -621,6 +704,9 @@ class _OpenAICompatibleReasoningProvider:
             "provider": self.provider_name,
             "model_identifier": self.model,
             "configured": self.configured,
+            "provider_mode": (
+                "strict_schema" if self.supports_strict_json_schema else "json_object"
+            ),
             "external_ai_apis": (self.provider_name,),
             "token_usage_available": True,
         }
@@ -683,14 +769,18 @@ class _OpenAICompatibleReasoningProvider:
                 "extraction_note": completion.extraction_note,
                 "request_kind": request_kind,
                 "request_sequence": request_sequence,
+                "provider_mode": (
+                    "strict_schema"
+                    if self.supports_strict_json_schema
+                    else "json_object"
+                ),
                 "target_output_tokens": plan.target_output_tokens,
                 "hard_output_limit": plan.hard_output_limit,
                 "output_profile": plan.output_profile.value,
                 "analysis_schema_version": (
-                    "compact-retry-1.1"
-                    if plan.output_profile == OutputProfile.COMPACT_RETRY
-                    else "compact-1.1"
-                    if plan.output_profile == OutputProfile.COMPACT
+                    "compact-1.1"
+                    if plan.output_profile
+                    in {OutputProfile.COMPACT, OutputProfile.COMPACT_RETRY}
                     else "standard-1.0"
                 ),
                 "input_budget_utilization_percent": (
@@ -717,24 +807,10 @@ class _OpenAICompatibleReasoningProvider:
             if context is not None
             else []
         )
-        supply_values: list[str | None] = supply_ids or [None]
-        demand_values: list[str | None] = demand_ids or [None]
-        rules = [
+        schema = reasoning_response_schema(profile)
+        rules = (
             "one JSON object; exact schema; no markdown or prose",
             "use only supplied evidence IDs",
-            (
-                "Every field described as string must be exactly one non-empty "
-                "JSON string, never an array, object, or null; this includes "
-                "higher_timeframe_context.summary must be exactly one non-empty JSON string; "
-                "market_structure.short_term, "
-                "market_structure.medium_term, and market_structure.recent_change"
-            ),
-            "Every field described as array must be a JSON array, including one-item arrays",
-            (
-                "market_regime.evidence_refs must contain at most "
-                f"{MARKET_REGIME_EVIDENCE_REF_LIMIT} catalog IDs ordered "
-                "strongest to weakest"
-            ),
             (
                 "nearest_supply_ref must be exactly one valid supply ID"
                 if supply_ids
@@ -747,94 +823,14 @@ class _OpenAICompatibleReasoningProvider:
             ),
             "reference fields contain IDs or null only; never prices or objects",
             "analysis only; no trade, proposal, execution, or private reasoning",
-        ]
-        if profile in {OutputProfile.STANDARD, OutputProfile.EXPANDED}:
-            return {
-                "json_schema": reasoning_response_schema(profile),
-                "rules": rules,
-            }
-        if profile == OutputProfile.COMPACT_RETRY:
-            shape = {
-                "analysis_schema_version": "compact-retry-1.1",
-                "output_profile": "compact_retry",
-                "market_regime": {
-                    "classification": "JSON string enum:bullish|bearish|ranging|transitional|uncertain",
-                    "strength": "JSON number 0..100",
-                    "confidence": "JSON number 0..1",
-                    "evidence_refs": (
-                        f"array<={MARKET_REGIME_EVIDENCE_REF_LIMIT};"
-                        "strongest-to-weakest"
-                    ),
-                },
-                "higher_timeframe_context": {
-                    "bias": "JSON string enum:bullish|bearish|neutral|mixed|uncertain",
-                    "summary": (
-                        "one non-empty JSON string<="
-                        f"{HIGHER_TIMEFRAME_SUMMARY_LIMIT};"
-                        "never array|object|null"
-                    ),
-                    "evidence_refs": "array<=2",
-                },
-                "market_structure": {
-                    "short_term": "one non-empty JSON string<=120",
-                    "medium_term": "one non-empty JSON string<=180",
-                    "recent_change": "one non-empty JSON string<=120",
-                    "evidence_refs": "array<=2",
-                },
-                "liquidity_analysis": {
-                    "summary": "one non-empty JSON string<=180",
-                    "events": "JSON array<=2 of non-empty strings<=100",
-                    "unresolved": "JSON array<=2 of non-empty strings<=100",
-                    "evidence_refs": "array<=2",
-                },
-                "supply_demand_analysis": {
-                    "summary": "one non-empty JSON string<=160",
-                    "nearest_supply_ref": supply_values,
-                    "nearest_demand_ref": demand_values,
-                    "evidence_refs": "array<=2",
-                },
-                "momentum_analysis": {
-                    "direction": "JSON string enum:bullish|bearish|neutral|mixed|uncertain",
-                    "strength": "JSON number 0..100",
-                    "trend": "JSON string enum:strengthening|weakening|stable|uncertain",
-                    "evidence_refs": "array<=2",
-                },
-                "volatility_analysis": {
-                    "state": "JSON string enum:low|normal|high|extreme|uncertain",
-                    "trend": "JSON string enum:expanding|contracting|stable|uncertain",
-                    "evidence_refs": "array<=2",
-                },
-                "bullish_evidence_refs": "array<=2",
-                "bearish_evidence_refs": "array<=2",
-                "contradiction_refs": "array<=2",
-                "key_risk_refs": "array<=2",
-                "invalidation_conditions": "JSON array<=2 of non-empty strings<=160",
-                "data_quality_warnings": "JSON array<=2 of non-empty strings<=120",
-                "analysis_confidence": "JSON number 0..1",
-            }
-        else:
-            retry_shape = self._response_contract(
-                OutputProfile.COMPACT_RETRY,
-                context,
-            )["shape"]
-            shape = {
-                **cast(dict[str, Any], retry_shape),
-                "analysis_schema_version": "compact-1.1",
-                "output_profile": "compact",
-                "bullish_evidence_refs": "array<=3",
-                "bearish_evidence_refs": "array<=3",
-                "contradiction_refs": "array<=3",
-                "key_risk_refs": "array<=3",
-                "data_quality_warnings": "JSON array<=3 of non-empty strings<=120",
-                "alternative_scenarios": (
-                    "JSON array<=2:{name=non-empty string<=60,"
-                    "description=non-empty string<=180,probability=number 0..1,"
-                    "evidence_refs=string array<=2}"
-                ),
-                "executive_summary": "one non-empty JSON string<=320",
-            }
+        )
         return {
-            "shape": shape,
+            "json_schema": schema,
+            "required_object_fields": _required_object_fields(schema),
+            "reference_catalog": {
+                "nearest_supply_ref": supply_ids or [None],
+                "nearest_demand_ref": demand_ids or [None],
+            },
             "rules": rules,
         }
 
@@ -845,12 +841,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
     # portable contract for every account in the pool.
     supports_strict_json_schema = False
     _STRICT_JSON_SCHEMA_MODELS = frozenset(
-        {
-            "gpt-oss-20b",
-            "gpt-oss-120b",
-            "openai/gpt-oss-20b",
-            "openai/gpt-oss-120b",
-        }
+        {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}
     )
 
     def __init__(
@@ -877,6 +868,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
     ) -> None:
         self.provider_name = account_id
         self.supports_strict_json_schema = model in self._STRICT_JSON_SCHEMA_MODELS
+        self.provider_mode, _ = validate_provider_contract(model, output_profile)
         super().__init__(
             client,
             prompts,
@@ -897,6 +889,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             model_context_limit=model_context_limit,
         )
         self.request_attempts: list[dict[str, Any]] = []
+        self.response_cache: dict[str, AIProviderResponse] = {}
         self.attempt_counters = {
             "analysis_requests": 0,
             "schema_correction_requests": 0,
@@ -987,6 +980,8 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             "eligible_cycle_id": str(request.cycle_id),
             "provider_attempt_id": sha256(attempt_seed.encode()).hexdigest()[:24],
             "account_id": self.provider_name,
+            "provider_model": self.model,
+            "provider_mode": self.provider_mode,
             "request_kind": request_kind,
             "request_sequence": request_sequence,
             "recorded_at": datetime.now(UTC).isoformat(),
@@ -1126,16 +1121,6 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 metadata.get("local_shape_normalization_details", ())
                 if response
                 else ()
-            ),
-            "higher_timeframe_summary_received_type": (
-                metadata.get("higher_timeframe_summary_received_type")
-                if response
-                else None
-            ),
-            "higher_timeframe_summary_received_value_hash": (
-                metadata.get("higher_timeframe_summary_received_value_hash")
-                if response
-                else None
             ),
             "compact_retry_triggered": request_kind == "compact_retry",
             "limit_classification": (
@@ -1319,6 +1304,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             )
             correction_reason = exc.details.schema_error_code or exc.details.reason_code
         else:
+            self.response_cache[str(request.request_id)] = response
             normalized, removed = _normalized_contract_output(response.raw_output)
             if removed:
                 response = replace(response, raw_output=normalized)
@@ -1465,6 +1451,7 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                 previous_response_fragment=previous_fragment,
                 output_profile=OutputProfile.COMPACT,
             )
+            self.response_cache[str(request.request_id)] = corrected
         except AIProviderRequestError as exc:
             self._record_attempt(
                 request,
@@ -1562,72 +1549,21 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         profile: OutputProfile,
     ) -> AIProviderResponse:
         context = build_llm_analysis_context(request)
-        normalized, evidence_ref_truncations = (
-            truncate_market_regime_evidence_refs(
-                response.raw_output,
-                frozenset(
-                    item.evidence_id for item in context.evidence_catalog
-                ),
-            )
-        )
-        normalized, shape_normalizations = normalize_compact_output_shapes(
-            normalized,
-            retry=profile == OutputProfile.COMPACT_RETRY,
-        )
-        normalized, reference_changes = normalize_reference_syntax(normalized)
-        normalized, descriptive_changes = normalize_descriptive_overflow(
-            normalized
-        )
-        if "analysis_schema_version" not in normalized:
-            standard = AIAnalysisOutput.model_validate(normalized)
-            metadata = dict(response.operational_metadata or {})
-            metadata["output_profile"] = "standard"
-            metadata["analysis_schema_version"] = "standard-1.0"
-            metadata["local_descriptive_normalizations"] = descriptive_changes
-            metadata["local_reference_normalizations"] = reference_changes
-            return replace(
-                response,
-                raw_output=standard.model_dump(mode="json"),
-                operational_metadata=metadata,
-            )
-        wire: CompactAIAnalysisOutput | CompactRetryAIAnalysisOutput
-        if profile == OutputProfile.COMPACT_RETRY:
-            wire = CompactRetryAIAnalysisOutput.model_validate(normalized)
-        else:
-            wire = CompactAIAnalysisOutput.model_validate(normalized)
-        validate_evidence_references(wire, context.evidence_catalog)
-        validate_zone_references(
-            wire,
-            context.supply_zone_catalog,
-            context.demand_zone_catalog,
-        )
-        resolved = resolve_compact_output(
-            wire,
+        validation = validate_canonical_response(
+            response.raw_output,
             context.evidence_catalog,
             context.supply_zone_catalog,
             context.demand_zone_catalog,
+            retry=profile == OutputProfile.COMPACT_RETRY,
         )
+        wire = validation.wire_output
+        resolved = validation.resolved_output
+        shape_normalizations = validation.normalization_details
         metadata = dict(response.operational_metadata or {})
-        metadata["local_descriptive_normalizations"] = descriptive_changes
         metadata["local_shape_normalizations"] = tuple(
             item["path"] for item in shape_normalizations
         )
         metadata["local_shape_normalization_details"] = shape_normalizations
-        higher_timeframe_change = next(
-            (
-                item
-                for item in shape_normalizations
-                if item["path"] == "higher_timeframe_context.summary"
-            ),
-            None,
-        )
-        if higher_timeframe_change is not None:
-            metadata["higher_timeframe_summary_received_type"] = (
-                higher_timeframe_change["received_type"]
-            )
-            metadata["higher_timeframe_summary_received_value_hash"] = (
-                higher_timeframe_change["received_value_hash"]
-            )
         for shape_change in shape_normalizations:
             logger.info(
                 "ai_provider.response.locally_normalized",
@@ -1643,8 +1579,9 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
                     "cycle_id": str(request.cycle_id),
                 },
             )
-        metadata["local_reference_normalizations"] = reference_changes
-        metadata["local_evidence_ref_truncations"] = evidence_ref_truncations
+        metadata["local_evidence_ref_truncations"] = (
+            validation.evidence_ref_truncations
+        )
         metadata["supply_catalog_count"] = len(context.supply_zone_catalog)
         metadata["demand_catalog_count"] = len(context.demand_zone_catalog)
         metadata["evidence_catalog_count"] = len(context.evidence_catalog)
@@ -1665,7 +1602,16 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
             response,
             raw_output=resolved.model_dump(mode="json"),
             operational_metadata=metadata,
+            provider_output=response.raw_output,
+            normalized_output=validation.normalized_output,
+            validated_output=resolved,
         )
+
+    def response_artifact_for(
+        self,
+        request_id: object,
+    ) -> AIProviderResponse | None:
+        return self.response_cache.get(str(request_id))
 
     async def _compact_retry(
         self,
@@ -2541,6 +2487,16 @@ class GroqProviderPool:
                 ),
             )
         )
+
+    def response_artifact_for(
+        self,
+        request_id: object,
+    ) -> AIProviderResponse | None:
+        for provider in self.providers:
+            response = provider.response_artifact_for(request_id)
+            if response is not None:
+                return response
+        return None
 
     def mark_model_unavailable(self, provider: str) -> None:
         selected = self.providers_by_id[provider]

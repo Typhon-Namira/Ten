@@ -16,9 +16,6 @@ from backend.app.ai_reasoning.compact_output import (
     HIGHER_TIMEFRAME_SUMMARY_LIMIT,
     MARKET_REGIME_EVIDENCE_REF_LIMIT,
     normalize_compact_output_shapes,
-    normalize_descriptive_overflow,
-    normalize_higher_timeframe_summary_shape,
-    normalize_reference_syntax,
     resolve_compact_output,
     truncate_market_regime_evidence_refs,
     validate_evidence_references,
@@ -28,7 +25,11 @@ from backend.app.ai_reasoning.llm_context import (
     build_llm_analysis_context,
     provider_context_payload,
 )
-from backend.app.ai_reasoning.provider import GroqProvider, reasoning_response_schema
+from backend.app.ai_reasoning.provider import (
+    GroqProvider,
+    reasoning_response_schema,
+    validate_provider_contract,
+)
 from backend.app.ai_reasoning.token_budget import OutputProfile, TokenBudgetManager
 from tests.ai_reasoning.test_llm_payload_boundary import _request
 from tests.ai_reasoning.test_ai_reasoning_lifecycle import (
@@ -44,10 +45,8 @@ def compact_output(request: Any, *, retry: bool = False) -> dict[str, Any]:
     catalog = context.evidence_catalog
     refs = [catalog[0].evidence_id] if catalog else []
     output: dict[str, Any] = {
-        "analysis_schema_version": (
-            "compact-retry-1.1" if retry else "compact-1.1"
-        ),
-        "output_profile": "compact_retry" if retry else "compact",
+        "analysis_schema_version": "compact-1.1",
+        "output_profile": "compact",
         "market_regime": {
             "classification": "bullish",
             "strength": 72,
@@ -104,16 +103,15 @@ def compact_output(request: Any, *, retry: bool = False) -> dict[str, Any]:
         "data_quality_warnings": [],
         "analysis_confidence": 0.72,
     }
-    if not retry:
-        output.update(
-            {
-                "alternative_scenarios": [],
-                "executive_summary": (
-                    "Constructive regime evidence persists with bounded risk and "
-                    "explicit invalidation."
-                ),
-            }
-        )
+    output.update(
+        {
+            "alternative_scenarios": [],
+            "executive_summary": (
+                "Constructive regime evidence persists with bounded risk and "
+                "explicit invalidation."
+            ),
+        }
+    )
     return output
 
 
@@ -356,39 +354,6 @@ async def test_empty_zone_catalog_requires_null_and_only_safe_syntax_normalizes(
         )
     assert empty.value.code == "reference_must_be_null_when_catalog_empty"
 
-    normalized, changes = normalize_reference_syntax(
-        {
-            "supply_demand_analysis": {
-                "nearest_supply_ref": " sz1 ",
-                "nearest_demand_ref": {"price": 3300},
-            }
-        }
-    )
-    assert normalized["supply_demand_analysis"]["nearest_supply_ref"] == "SZ1"
-    assert normalized["supply_demand_analysis"]["nearest_demand_ref"] == {
-        "price": 3300
-    }
-    assert changes == ("supply_demand_analysis.nearest_supply_ref",)
-
-
-@pytest.mark.asyncio
-async def test_descriptive_overflow_only_truncates_allowlisted_prose() -> None:
-    _, _, _, request = await _request()
-    raw = compact_output(request)
-    raw["executive_summary"] = "x" * 400
-    raw["market_regime"]["classification"] = "bullish"
-    raw["market_regime"]["strength"] = 72.12345
-    raw["market_regime"]["evidence_refs"] = ["E1"]
-
-    normalized, changes = normalize_descriptive_overflow(raw)
-
-    assert len(normalized["executive_summary"]) == 320
-    assert normalized["market_regime"]["classification"] == "bullish"
-    assert normalized["market_regime"]["strength"] == 72.12345
-    assert normalized["market_regime"]["evidence_refs"] == ["E1"]
-    assert changes == ("executive_summary",)
-
-
 @pytest.mark.asyncio
 async def test_higher_timeframe_string_list_is_joined_locally_without_correction() -> None:
     """Reproduce production wrong_type at the exact provider field path."""
@@ -416,13 +381,9 @@ async def test_higher_timeframe_string_list_is_joined_locally_without_correction
     assert response.operational_metadata["local_shape_normalizations"] == (
         "higher_timeframe_context.summary",
     )
-    assert response.operational_metadata[
-        "higher_timeframe_summary_received_type"
-    ] == "list"
     attempt = selected_provider.attempts_for(request.request_id)[0]
     assert attempt["schema_valid"] is True
     assert attempt["schema_correction_triggered"] is False
-    assert attempt["higher_timeframe_summary_received_type"] == "list"
 
 
 @pytest.mark.asyncio
@@ -467,7 +428,7 @@ async def test_semantically_invalid_higher_timeframe_shapes_remain_strict(
     raw = compact_output(request)
     raw["higher_timeframe_context"]["summary"] = invalid_summary
 
-    normalized, changes = normalize_higher_timeframe_summary_shape(raw)
+    normalized, changes = normalize_compact_output_shapes(raw)
 
     assert normalized == raw
     assert changes == ()
@@ -497,6 +458,39 @@ async def test_market_structure_string_list_is_normalized_without_provider_corre
     assert selected_provider.correction_attempts == 0
     attempt = selected_provider.request_attempts[0]
     assert "market_structure.short_term" in attempt["local_shape_normalizations"]
+
+
+@pytest.mark.asyncio
+async def test_executive_summary_list_is_normalized_without_provider_correction() -> None:
+    state, quant, config, request = await _request()
+    raw = compact_output(request)
+    raw["executive_summary"] = [
+        "M5 evidence is constructive.",
+        "M15 context remains aligned.",
+    ]
+    selected_provider = provider(CompactClient(raw), config)
+    repository = InMemoryAIReasoningRepository()
+
+    result = await build_service(  # type: ignore[arg-type]
+        repository,
+        selected_provider,
+    ).process(state, quant)
+
+    assert result is not None
+    assert selected_provider.http_calls == 1
+    assert selected_provider.correction_attempts == 0
+    assert "executive_summary" in selected_provider.request_attempts[0][
+        "local_shape_normalizations"
+    ]
+    artifact = next(iter(repository.response_artifacts.values()), None)
+    assert artifact is not None
+    assert artifact.status.value == "COMMITTED"
+    assert artifact.provider_output["executive_summary"] == raw["executive_summary"]
+    assert artifact.normalized_output is not None
+    assert artifact.normalized_output["executive_summary"] == (
+        "M5 evidence is constructive. M15 context remains aligned."
+    )
+    assert artifact.analysis_id == result.analysis.analysis_id
 
 
 def test_schema_wide_shape_normalizer_repairs_safe_string_variants() -> None:
@@ -538,6 +532,43 @@ def test_schema_wide_shape_normalizer_does_not_repair_unsafe_values(
 
 
 @pytest.mark.asyncio
+async def test_schema_driven_normalizer_preserves_nullable_and_rejects_semantics() -> None:
+    _, _, _, request = await _request()
+    raw = compact_output(request)
+    raw["supply_demand_analysis"]["nearest_supply_ref"] = None
+    raw["supply_demand_analysis"]["nearest_demand_ref"] = None
+    normalized, changes = normalize_compact_output_shapes(raw)
+    assert normalized["supply_demand_analysis"]["nearest_supply_ref"] is None
+    assert normalized["supply_demand_analysis"]["nearest_demand_ref"] is None
+    assert changes == ()
+
+    raw["market_regime"]["classification"] = "strongly_bullish"
+    normalized, changes = normalize_compact_output_shapes(raw)
+    assert normalized["market_regime"]["classification"] == "strongly_bullish"
+    assert changes == ()
+    with pytest.raises(ValidationError):
+        CompactAIAnalysisOutput.model_validate(normalized)
+
+
+def test_provider_contract_preflight_uses_actual_model_capability() -> None:
+    strict_mode, strict_schema = validate_provider_contract(
+        "openai/gpt-oss-120b",
+        OutputProfile.COMPACT,
+    )
+    object_mode, object_schema = validate_provider_contract(
+        "llama-3.1-8b-instant",
+        OutputProfile.COMPACT,
+    )
+
+    assert strict_mode == "strict_schema"
+    assert object_mode == "json_object"
+    assert strict_schema == object_schema == reasoning_response_schema()
+    encoded = json.dumps(strict_schema)
+    assert "x-ten-normalize" not in encoded
+    assert set(strict_schema["required"]) == set(strict_schema["properties"])
+
+
+@pytest.mark.asyncio
 async def test_higher_timeframe_summary_contract_is_explicit_and_matches_schema() -> None:
     _, _, config, request = await _request()
     selected_provider = provider(
@@ -557,14 +588,12 @@ async def test_higher_timeframe_summary_contract_is_explicit_and_matches_schema(
     assert summary_schema["type"] == "string"
     assert summary_schema["minLength"] == 1
     assert summary_schema["maxLength"] == HIGHER_TIMEFRAME_SUMMARY_LIMIT
-    assert contract["shape"]["higher_timeframe_context"]["summary"] == (
-        "one non-empty JSON string<=180;never array|object|null"
-    )
-    assert any(
-        "higher_timeframe_context.summary must be exactly one non-empty JSON string"
-        in rule
-        for rule in contract["rules"]
-    )
+    contract_summary = contract["json_schema"]["$defs"][
+        "CompactHigherTimeframe"
+    ]["properties"]["summary"]
+    assert contract_summary == reasoning_response_schema()["$defs"][
+        "CompactHigherTimeframe"
+    ]["properties"]["summary"]
 
 
 @pytest.mark.asyncio
@@ -599,14 +628,10 @@ async def test_market_regime_evidence_limit_matches_prompt_contract() -> None:
     )
 
     assert MARKET_REGIME_EVIDENCE_REF_LIMIT == 2
-    assert contract["shape"]["market_regime"]["evidence_refs"] == (
-        "array<=2;strongest-to-weakest"
-    )
-    assert any(
-        "market_regime.evidence_refs must contain at most 2" in rule
-        and "strongest to weakest" in rule
-        for rule in contract["rules"]
-    )
+    regime_refs = contract["json_schema"]["$defs"]["CompactRegime"][
+        "properties"
+    ]["evidence_refs"]
+    assert regime_refs["type"] == "array"
     raw = compact_output(request)
     valid_refs = [
         item.evidence_id
@@ -752,7 +777,7 @@ async def test_reference_correction_lists_allowed_ids_and_never_maps_price_local
     initial = json.loads(bodies[0]["messages"][1]["content"])
     correction = json.loads(bodies[1]["messages"][1]["content"])
 
-    assert initial["response_contract"]["shape"]["supply_demand_analysis"][
+    assert initial["response_contract"]["reference_catalog"][
         "nearest_supply_ref"
     ] == ["SZ1"]
     assert correction["allowed_reference_values"]["nearest_supply_ref"] == [
@@ -829,10 +854,7 @@ async def test_truncation_uses_one_smaller_fresh_retry_without_previous_output()
     first_payload = json.loads(bodies[0]["messages"][1]["content"])
     retry_payload = json.loads(bodies[1]["messages"][1]["content"])
     assert "previous_response" not in retry_payload
-    assert (
-        len(json.dumps(retry_payload["response_contract"]))
-        < len(json.dumps(first_payload["response_contract"]))
-    )
+    assert retry_payload["response_contract"] == first_payload["response_contract"]
     assert bodies[1]["max_tokens"] < bodies[0]["max_tokens"]
     assert response.fallback_reason == "output_truncated_compact_retry"
     attempts = selected_provider.attempts_for(request.request_id)
@@ -847,7 +869,7 @@ async def test_truncation_uses_one_smaller_fresh_retry_without_previous_output()
     }
 
 
-def test_compact_retry_schema_is_strictly_smaller() -> None:
+def test_compact_retry_uses_the_same_canonical_response_schema() -> None:
     compact = json.dumps(
         reasoning_response_schema(OutputProfile.COMPACT),
         separators=(",", ":"),
@@ -856,9 +878,9 @@ def test_compact_retry_schema_is_strictly_smaller() -> None:
         reasoning_response_schema(OutputProfile.COMPACT_RETRY),
         separators=(",", ":"),
     )
-    assert len(retry) < len(compact)
-    assert "alternative_scenarios" not in retry
-    assert "executive_summary" not in retry
+    assert retry == compact
+    assert "alternative_scenarios" in retry
+    assert "executive_summary" in retry
 
 
 def test_repeated_budget_failures_degrade_policy_health_not_provider_health() -> None:

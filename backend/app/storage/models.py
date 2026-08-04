@@ -4,7 +4,18 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1313,6 +1324,42 @@ class AIMarketAnalysisRecord(Base):
     validation_passed: Mapped[bool] = mapped_column(Boolean, index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AIResponseArtifactRecord(Base):
+    """Latest durable stage of one decoded authoritative provider response."""
+
+    __tablename__ = "ai_response_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PROVIDER_RESPONSE_RECEIVED', 'NORMALIZED', 'VALIDATED', "
+            "'COMMITTED', 'TERMINAL_SCHEMA_FAILURE')",
+            name="ck_ai_response_artifact_status",
+        ),
+    )
+
+    request_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_reasoning_requests.request_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    cycle_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), index=True)
+    instrument: Mapped[str] = mapped_column(String(32), index=True)
+    market_cutoff: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str] = mapped_column(String(128))
+    provider_mode: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(48), index=True)
+    analysis_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("ai_market_analyses.analysis_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class AIAnalysisSignalRecord(Base):

@@ -19,12 +19,17 @@ from backend.app.ai.provider_client import (
 )
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.ai_reasoning.config import AIReasoningConfig
-from backend.app.ai_reasoning.llm_context import build_llm_analysis_context
+from backend.app.ai_reasoning.llm_context import (
+    build_llm_analysis_context,
+    provider_context_payload,
+)
 from backend.app.ai_reasoning.memory import MarketMemory
 from backend.app.ai_reasoning.models import MarketMemoryEntry, MarketMemorySummary
 from backend.app.ai_reasoning.provider import (
     GroqProvider,
+    reasoning_response_schema,
 )
+from backend.app.ai_reasoning.token_budget import OutputProfile
 from backend.app.ai_reasoning.request_persistence import (
     decode_persisted_request,
     persisted_request_payload,
@@ -50,7 +55,7 @@ class CapturingClient(AIProviderClient):
         self.calls = 0
         self.payloads: list[dict[str, Any]] = []
         self.requests: list[dict[str, Any]] = []
-        self.response = response or analysis_output().model_dump(mode="python")
+        self.response = response or {}
 
     async def available_models(self) -> tuple[str, ...]:
         return ("gpt-oss-120b",)
@@ -92,13 +97,83 @@ async def _request(memory: MarketMemorySummary | None = None):
     return state, quant, config, request
 
 
+def _canonical_provider_output(request: Any) -> dict[str, Any]:
+    """Build fixtures from the same canonical compact contract used in production."""
+
+    context = build_llm_analysis_context(request)
+    refs = [context.evidence_catalog[0].evidence_id] if context.evidence_catalog else []
+    return {
+        "analysis_schema_version": "compact-1.1",
+        "output_profile": "compact",
+        "market_regime": {
+            "classification": "bullish",
+            "strength": 72,
+            "confidence": 0.74,
+            "evidence_refs": refs,
+        },
+        "higher_timeframe_context": {
+            "bias": "bullish",
+            "summary": "Higher-timeframe evidence remains constructive.",
+            "evidence_refs": refs,
+        },
+        "market_structure": {
+            "short_term": "Short-term structure is constructive.",
+            "medium_term": "Medium-term structure retains higher lows.",
+            "recent_change": "No confirmed bearish break.",
+            "evidence_refs": refs,
+        },
+        "liquidity_analysis": {
+            "summary": "Nearest liquidity remains unresolved.",
+            "events": [],
+            "unresolved": ["Nearest mapped pool remains open."],
+            "evidence_refs": refs,
+        },
+        "supply_demand_analysis": {
+            "summary": "Price remains between mapped supply and demand.",
+            "nearest_supply_ref": (
+                context.supply_zone_catalog[0].zone_id
+                if context.supply_zone_catalog
+                else None
+            ),
+            "nearest_demand_ref": (
+                context.demand_zone_catalog[0].zone_id
+                if context.demand_zone_catalog
+                else None
+            ),
+            "evidence_refs": refs,
+        },
+        "momentum_analysis": {
+            "direction": "bullish",
+            "strength": 65,
+            "trend": "stable",
+            "evidence_refs": refs,
+        },
+        "volatility_analysis": {
+            "state": "normal",
+            "trend": "stable",
+            "evidence_refs": refs,
+        },
+        "bullish_evidence_refs": refs,
+        "bearish_evidence_refs": [],
+        "contradiction_refs": [],
+        "key_risk_refs": refs,
+        "invalidation_conditions": [
+            "A confirmed structural break invalidates the view."
+        ],
+        "data_quality_warnings": [],
+        "alternative_scenarios": [],
+        "analysis_confidence": 0.72,
+        "executive_summary": "Constructive evidence persists with bounded risk.",
+    }
+
+
 def _provider(
     client: CapturingClient,
     config: AIReasoningConfig,
     **overrides: Any,
 ) -> GroqProvider:
     values = {
-        "model": "gpt-oss-120b",
+        "model": "openai/gpt-oss-120b",
         "temperature": config.temperature,
         "max_tokens": config.max_tokens,
         "target_input_tokens": config.target_input_tokens,
@@ -126,7 +201,7 @@ def _groq_provider(
     client: AIProviderClient,
     config: AIReasoningConfig,
     *,
-    model: str = "gpt-oss-120b",
+    model: str = "openai/gpt-oss-120b",
 ) -> GroqProvider:
     return GroqProvider(
         client,
@@ -152,7 +227,7 @@ def _groq_provider(
 @pytest.mark.asyncio
 async def test_provider_serializes_only_typed_compact_context_without_candles_or_engine_objects() -> None:
     _, _, config, request = await _request()
-    client = CapturingClient()
+    client = CapturingClient(_canonical_provider_output(request))
 
     await _provider(client, config).reason(request, prompt_version=request.prompt_version)
 
@@ -277,9 +352,15 @@ async def test_normal_context_stays_below_target_token_budget() -> None:
     context = build_llm_analysis_context(request)
     provider = _provider(CapturingClient(), config)
     prompt = provider.prompts.load(request.prompt_version)
+    compact_context, _, _ = provider_context_payload(context, OutputProfile.COMPACT)
+    contract = provider._response_contract()
     payload = {
-        "analysis_context": context.model_dump(mode="json"),
-        "response_contract": provider._response_contract(),
+        "analysis_context": compact_context,
+        "response_contract": {
+            "mode": "strict_schema",
+            "rules": contract["rules"],
+            "reference_catalog": contract["reference_catalog"],
+        },
     }
     body = build_request_body(
         system_prompt=prompt,
@@ -287,6 +368,7 @@ async def test_normal_context_stays_below_target_token_budget() -> None:
         model=provider.model,
         temperature=provider.temperature,
         max_tokens=provider.max_tokens,
+        response_schema=reasoning_response_schema(),
     )
     metrics = measure_request_body(
         body,
@@ -317,7 +399,7 @@ async def test_oversized_context_is_rejected_before_provider_and_not_typed_as_cr
 @pytest.mark.asyncio
 async def test_groq_gpt_oss_uses_supported_strict_json_schema_mode() -> None:
     _, _, config, request = await _request()
-    client = CapturingClient(analysis_output().model_dump(mode="python"))
+    client = CapturingClient(_canonical_provider_output(request))
 
     response = await _groq_provider(client, config).reason(
         request,
@@ -329,14 +411,14 @@ async def test_groq_gpt_oss_uses_supported_strict_json_schema_mode() -> None:
     schema = client.requests[0]["response_schema"]
     assert isinstance(schema, dict)
     assert schema["type"] == "object"
-    assert response.model_identifier == "gpt-oss-120b"
+    assert response.model_identifier == "openai/gpt-oss-120b"
     assert validated.market_regime.classification.value == "bullish"
 
 
 @pytest.mark.asyncio
 async def test_groq_llama_uses_json_object_mode_with_application_validation() -> None:
     _, _, config, request = await _request()
-    client = CapturingClient(analysis_output().model_dump(mode="python"))
+    client = CapturingClient(_canonical_provider_output(request))
 
     await _groq_provider(
         client,
@@ -358,7 +440,7 @@ async def test_groq_malformed_json_gets_exactly_one_correction_attempt() -> None
         content = (
             "not-json"
             if len(bodies) == 1
-            else json.dumps(analysis_output().model_dump(mode="python"))
+            else json.dumps(_canonical_provider_output(request))
         )
         return httpx.Response(
             200,
@@ -390,7 +472,7 @@ async def test_groq_missing_executive_summary_gets_one_explicit_schema_correctio
 
     def handler(http_request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(http_request.content))
-        output = analysis_output().model_dump(mode="python")
+        output = _canonical_provider_output(request)
         output.pop("executive_summary", None)
         if len(bodies) == 2:
             output["executive_summary"] = "Validated analysis summary."
@@ -452,7 +534,7 @@ async def test_groq_stops_after_one_invalid_schema_correction() -> None:
 
     def handler(http_request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(http_request.content))
-        output = analysis_output().model_dump(mode="python")
+        output = _canonical_provider_output(request)
         output.pop("market_regime")
         return httpx.Response(
             200,
@@ -490,7 +572,7 @@ async def test_finish_reason_length_is_not_sent_as_schema_correction() -> None:
     def handler(http_request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        output = analysis_output().model_dump(mode="python")
+        output = _canonical_provider_output(request)
         output.pop("executive_summary")
         return httpx.Response(
             200,
@@ -530,7 +612,7 @@ async def test_known_empty_rate_limit_capacity_skips_correction() -> None:
     def handler(http_request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        output = analysis_output().model_dump(mode="python")
+        output = _canonical_provider_output(request)
         output.pop("executive_summary")
         return httpx.Response(
             200,
@@ -571,7 +653,7 @@ async def test_groq_missing_regime_classification_is_visible_and_corrected(
 
     def handler(http_request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(http_request.content))
-        output = analysis_output().model_dump(mode="python")
+        output = _canonical_provider_output(request)
         output["market_regime"].pop("classification", None)
         if len(bodies) == 2:
             output["market_regime"]["classification"] = "bullish"
@@ -626,7 +708,7 @@ async def test_groq_echoed_contract_metadata_is_removed_locally_without_correcti
 
     def handler(http_request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(http_request.content))
-        output = analysis_output().model_dump(mode="python")
+        output = _canonical_provider_output(request)
         if len(bodies) == 1:
             output["schema_type"] = "ten_ai_reasoning_response"
         return httpx.Response(
@@ -712,11 +794,11 @@ async def test_response_contract_is_analysis_only_and_strict() -> None:
 
     contract = _provider(CapturingClient(), config)._response_contract()
 
-    assert "shape" in contract
+    assert "json_schema" in contract
     encoded = json.dumps(contract)
     for prohibited in ("setup_family", "entry_low", "stop_loss", "take_profit_levels"):
         assert prohibited not in encoded
-    assert "market_regime" in contract["shape"]
+    assert "market_regime" in contract["json_schema"]["properties"]
     assert "no trade" in " ".join(contract["rules"])
 
 

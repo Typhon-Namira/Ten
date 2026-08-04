@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import (
     AIMarketAnalysisRecord,
+    AIResponseArtifactRecord,
     AIAnalysisSignalOutcomeRecord,
     AIAnalysisSignalRecord,
     AIMarketForecastRecord,
@@ -43,6 +44,7 @@ from .analysis import (
     AIAnalysisSignal,
     AIAnalysisSignalOutcome,
     AIMarketAnalysis,
+    AIResponseArtifact,
     AnalysisStatus,
 )
 from .models import (
@@ -249,6 +251,12 @@ class AIReasoningRepository(Protocol):
         analysis_contract_version: str,
     ) -> AIMarketAnalysis | None: ...
     async def save_analysis(self, value: AIMarketAnalysis) -> AIMarketAnalysis: ...
+    async def save_response_artifact(
+        self, value: AIResponseArtifact
+    ) -> AIResponseArtifact: ...
+    async def response_artifact(
+        self, request_id: object
+    ) -> AIResponseArtifact | None: ...
     async def save_analysis_signal(self, value: AIAnalysisSignal) -> AIAnalysisSignal: ...
     async def save_analysis_signal_outcome(
         self, value: AIAnalysisSignalOutcome
@@ -336,6 +344,7 @@ class InMemoryAIReasoningRepository:
         self.failures: dict[object, LLMStructuredOutputFailure] = {}
         self.forecasts: dict[object, AIMarketForecast] = {}
         self.analyses: dict[object, AIMarketAnalysis] = {}
+        self.response_artifacts: dict[object, AIResponseArtifact] = {}
         self.analysis_signals: dict[object, AIAnalysisSignal] = {}
         self.analysis_signal_outcomes: dict[object, AIAnalysisSignalOutcome] = {}
         self.proposals: dict[object, AISignalProposal] = {}
@@ -693,6 +702,29 @@ class InMemoryAIReasoningRepository:
                 return existing
             self.analyses[value.analysis_id] = value
         return value
+
+    async def save_response_artifact(
+        self,
+        value: AIResponseArtifact,
+    ) -> AIResponseArtifact:
+        async with self._lock:
+            existing = self.response_artifacts.get(value.request_id)
+            if (
+                existing is not None
+                and existing.provider_output != value.provider_output
+            ):
+                raise AIArtifactConflictError(
+                    "provider response changed for an authoritative request"
+                )
+            self.response_artifacts[value.request_id] = value
+        return value
+
+    async def response_artifact(
+        self,
+        request_id: object,
+    ) -> AIResponseArtifact | None:
+        async with self._lock:
+            return self.response_artifacts.get(request_id)
 
     async def save_analysis_signal(self, value: AIAnalysisSignal) -> AIAnalysisSignal:
         async with self._lock:
@@ -1543,6 +1575,48 @@ class SqlAlchemyAIReasoningRepository(ScopedSessionRepository):
             return existing
         await self.session.commit()
         return value
+
+    @scoped_session
+    async def save_response_artifact(
+        self,
+        value: AIResponseArtifact,
+    ) -> AIResponseArtifact:
+        payload = value.model_dump(mode="json")
+        await self.session.execute(
+            insert(AIResponseArtifactRecord)
+            .values(
+                request_id=value.request_id,
+                cycle_id=value.cycle_id,
+                instrument=value.instrument,
+                market_cutoff=value.market_cutoff,
+                provider=value.provider,
+                model=value.model,
+                provider_mode=value.provider_mode,
+                status=value.status.value,
+                analysis_id=value.analysis_id,
+                payload=payload,
+                updated_at=value.updated_at,
+            )
+            .on_conflict_do_update(
+                index_elements=["request_id"],
+                set_={
+                    "status": value.status.value,
+                    "analysis_id": value.analysis_id,
+                    "payload": payload,
+                    "updated_at": value.updated_at,
+                },
+            )
+        )
+        await self.session.commit()
+        return value
+
+    @scoped_session
+    async def response_artifact(
+        self,
+        request_id: object,
+    ) -> AIResponseArtifact | None:
+        record = await self.session.get(AIResponseArtifactRecord, request_id)
+        return AIResponseArtifact.model_validate(record.payload) if record else None
 
     @scoped_session
     async def save_analysis_signal(self, value: AIAnalysisSignal) -> AIAnalysisSignal:

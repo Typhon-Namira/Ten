@@ -271,7 +271,11 @@ class Settings(BaseSettings):
         if not value.strip() or any(character.isspace() for character in value):
             variable = f"TEN_{(info.field_name or 'AI_PROVIDER_MODEL').upper()}"
             raise ValueError(f"{variable} must be a non-empty provider model ID")
-        return value.strip()
+        normalized = value.strip()
+        return {
+            "gpt-oss-20b": "openai/gpt-oss-20b",
+            "gpt-oss-120b": "openai/gpt-oss-120b",
+        }.get(normalized, normalized)
 
     @model_validator(mode="after")
     def production_security(self) -> "Settings":

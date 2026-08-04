@@ -12,7 +12,7 @@ def test_ai_provider_defaults_are_four_account_groq_pool() -> None:
     assert settings.groq_pool_enabled is True
     assert settings.groq_pool_size == 4
     assert settings.groq_base_url == "https://api.groq.com/openai/v1"
-    assert settings.groq_model == "gpt-oss-120b"
+    assert settings.groq_model == "openai/gpt-oss-120b"
     assert settings.groq_request_timeout_seconds == 60
     assert settings.groq_max_retries_per_account == 1
     assert settings.groq_rate_limit_cooldown_seconds == 3600

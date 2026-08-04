@@ -189,6 +189,27 @@ def test_ai_provider_retry_schedule_migration_is_reversible() -> None:
     assert "op.drop_column" in source
 
 
+def test_ai_response_artifact_migration_is_traceable_and_reversible() -> None:
+    source = (
+        ROOT / "migrations/versions/20260803_0023_ai_response_artifacts.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260803_0023"' in source
+    assert 'down_revision = "20260731_0022"' in source
+    assert '"ai_response_artifacts"' in source
+    assert 'ForeignKey("ai_reasoning_requests.request_id", ondelete="CASCADE")' in source
+    assert 'ForeignKey("ai_market_analyses.analysis_id", ondelete="SET NULL")' in source
+    for stage in (
+        "PROVIDER_RESPONSE_RECEIVED",
+        "NORMALIZED",
+        "VALIDATED",
+        "COMMITTED",
+        "TERMINAL_SCHEMA_FAILURE",
+    ):
+        assert stage in source
+    assert 'op.drop_table("ai_response_artifacts")' in source
+
+
 def test_signal_email_outbox_migration_is_idempotent_and_reversible() -> None:
     source = (
         ROOT / "migrations/versions/20260730_0015_signal_email_outbox.py"

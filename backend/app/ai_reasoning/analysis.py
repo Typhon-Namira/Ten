@@ -26,6 +26,14 @@ class AnalysisStatus(StrEnum):
     FAILED = "failed"
 
 
+class AIResponseArtifactStatus(StrEnum):
+    PROVIDER_RESPONSE_RECEIVED = "PROVIDER_RESPONSE_RECEIVED"
+    NORMALIZED = "NORMALIZED"
+    VALIDATED = "VALIDATED"
+    COMMITTED = "COMMITTED"
+    TERMINAL_SCHEMA_FAILURE = "TERMINAL_SCHEMA_FAILURE"
+
+
 class AnalysisSignalAction(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
@@ -225,6 +233,48 @@ class AIProviderMetadata(StrictAnalysisModel):
     fallback_reason: str | None = None
     latency_ms: float | None = Field(default=None, ge=0)
     token_usage: dict[str, int] | None = None
+
+
+class AIResponseArtifact(StrictAnalysisModel):
+    """Durable provider-response state for idempotent authoritative recovery."""
+
+    request_id: UUID
+    cycle_id: UUID
+    instrument: str
+    market_cutoff: datetime
+    provider: str
+    model: str
+    provider_mode: str
+    status: AIResponseArtifactStatus
+    provider_request_count: int = Field(ge=1)
+    http_status: int
+    provider_output: dict[str, Any]
+    normalized_output: dict[str, Any] | None = None
+    normalization_details: tuple[dict[str, Any], ...] = ()
+    validation_error: dict[str, Any] | None = None
+    semantic_validation_passed: bool | None = None
+    analysis_id: UUID | None = None
+    provider_response_received_at: datetime
+    normalized_at: datetime | None = None
+    validated_at: datetime | None = None
+    committed_at: datetime | None = None
+    updated_at: datetime
+
+    @field_validator(
+        "market_cutoff",
+        "provider_response_received_at",
+        "normalized_at",
+        "validated_at",
+        "committed_at",
+        "updated_at",
+    )
+    @classmethod
+    def artifact_time_is_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("AI response artifact timestamps must be timezone-aware")
+        return value.astimezone(UTC)
 
 
 class AIMarketAnalysis(StrictAnalysisModel):

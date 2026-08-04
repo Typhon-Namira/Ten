@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import logging
 from uuid import uuid4
 
 import pytest
@@ -302,13 +303,20 @@ async def test_service_persists_one_idempotent_scenario_and_m15_combination() ->
 @pytest.mark.asyncio
 async def test_service_accepts_pipeline_correlation_id(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, quant, synthesis = await scenario_inputs()
     service = ScenarioForecastingService(
         InMemoryScenarioForecastRepository(), ScenarioForecastingEngine()
     )
     correlation_id = uuid4()
-    caplog.set_level("INFO", logger="backend.app.scenario_forecasting.service")
+    logger_name = "backend.app.scenario_forecasting.service"
+    # Alembic's logging fileConfig disables pre-existing loggers during the
+    # full suite; keep this test independent of database-test ordering.
+    target_logger = logging.getLogger(logger_name)
+    monkeypatch.setattr(target_logger, "disabled", False)
+    monkeypatch.setattr(target_logger, "propagate", True)
+    caplog.set_level("INFO", logger=logger_name)
 
     scenario, _ = await service.process(
         state,
