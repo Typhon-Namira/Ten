@@ -206,8 +206,8 @@ class AIAnalysisOutput(StrictAnalysisModel):
     alternative_scenarios: tuple[AlternativeAnalysisScenario, ...]
     analysis_confidence: float = Field(ge=0, le=1)
     executive_summary: str = Field(min_length=1, max_length=1500)
-    invalidation_conditions: tuple[str, ...] = Field(default=(), max_length=2)
-    data_quality_warnings: tuple[str, ...] = Field(default=(), max_length=3)
+    invalidation_conditions: tuple[str, ...] = ()
+    data_quality_warnings: tuple[str, ...] = ()
 
     @field_validator("invalidation_conditions")
     @classmethod

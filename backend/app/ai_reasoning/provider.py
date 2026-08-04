@@ -832,6 +832,10 @@ class _OpenAICompatibleReasoningProvider:
             "one JSON object; exact schema; no markdown or prose",
             "use only supplied evidence IDs",
             (
+                "evidence-reference arrays contain unique IDs; their maximum "
+                "cardinality is the supplied evidence catalog"
+            ),
+            (
                 "nearest_supply_ref must be exactly one valid supply ID"
                 if supply_ids
                 else "supply catalog empty; nearest_supply_ref must be null"

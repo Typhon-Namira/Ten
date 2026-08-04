@@ -832,7 +832,7 @@ def test_prompt_templates_explicitly_require_every_provider_wire_field() -> None
         assert "response_contract" in prompt
         assert "evidence_catalog" in prompt
         assert "maxLength" in prompt
-        assert "maxItems" in prompt
+        assert "unique" in prompt
         assert "Never emit a trading action" in prompt
 
 
