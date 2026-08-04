@@ -69,6 +69,21 @@ class IntegrationWorker:
                 continue
             if (
                 claim is not None
+                and claim.status == "FAILED"
+                and claim.failure_reason == "request_preflight_failed"
+            ):
+                await simulation.record_blocked_cutoff(
+                    instrument=configured.instrument_id,
+                    market_cutoff=attempt.market_cutoff,
+                    server_time=now,
+                    reason="AI_REQUEST_PREFLIGHT_FAILED",
+                    market_state_id=attempt.market_state_id,
+                    quantitative_forecast_id=attempt.quantitative_forecast_id,
+                    correlation_id=attempt.correlation_id,
+                )
+                continue
+            if (
+                claim is not None
                 and claim.status == "WAITING_PROVIDER"
                 and claim.next_retry_at is not None
                 and now < claim.next_retry_at

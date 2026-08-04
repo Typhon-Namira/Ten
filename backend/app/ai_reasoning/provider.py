@@ -438,7 +438,10 @@ class _OpenAICompatibleReasoningProvider:
             model=model,
             output_profile=output_profile,
             model_context_limit=model_context_limit,
-            maximum_input_tokens=min(target_input_tokens, hard_input_tokens),
+            # The target is an observability/compaction objective, not the
+            # admission ceiling.  Reject only at the configured hard limit
+            # (still clamped to the model's remaining context by plan()).
+            maximum_input_tokens=hard_input_tokens,
             target_output_tokens=target_output_tokens,
             hard_output_limit=max_tokens,
             safety_margin_tokens=token_safety_margin,
@@ -630,6 +633,23 @@ class _OpenAICompatibleReasoningProvider:
                         f"maximum_output_tokens={plan.hard_output_limit}"
                     ),
                     body_length=metrics.serialized_request_bytes,
+                    serialized_request_bytes=metrics.serialized_request_bytes,
+                    estimated_input_tokens=plan.estimated_input_tokens,
+                    target_output_tokens=plan.target_output_tokens,
+                    hard_output_limit=plan.hard_output_limit,
+                    output_profile=plan.output_profile.value,
+                    analysis_schema_version=(
+                        "compact-1.1"
+                        if plan.output_profile
+                        in {OutputProfile.COMPACT, OutputProfile.COMPACT_RETRY}
+                        else "standard-1.0"
+                    ),
+                    input_budget_utilization_percent=(
+                        plan.input_budget_utilization_percent
+                    ),
+                    token_estimator=plan.estimator,
+                    context_sections_included=plan.context_sections_included,
+                    context_sections_omitted=plan.context_sections_omitted,
                     exception_class="AIProviderRequestBudgetError",
                     fallback_used=fallback_used,
                     fallback_reason=fallback_reason,
@@ -826,7 +846,6 @@ class _OpenAICompatibleReasoningProvider:
         )
         return {
             "json_schema": schema,
-            "required_object_fields": _required_object_fields(schema),
             "reference_catalog": {
                 "nearest_supply_ref": supply_ids or [None],
                 "nearest_demand_ref": demand_ids or [None],
@@ -1954,7 +1973,7 @@ class GroqProviderPool:
                     "output_budget_exceeded",
                     "schema_validation_error",
                     "json_generation_failed",
-                }:
+                } or exc.details.phase == "request_validation":
                     self._policy_failure(account_id, exc.details)
                 else:
                     self._failure(account_id, exc.details)

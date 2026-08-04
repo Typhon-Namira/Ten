@@ -248,9 +248,26 @@ async def test_provider_serializes_only_typed_compact_context_without_candles_or
         '"dashboard"',
     )
     assert all(token not in encoded for token in prohibited)
+    assert "required_object_fields" not in payload["response_contract"]
     assert context["current_price"] > 0
     assert "request_id" not in context
     assert context["evidence_catalog"]
+
+
+@pytest.mark.asyncio
+async def test_input_target_is_not_used_as_the_hard_preflight_ceiling() -> None:
+    _, _, config, request = await _request()
+    client = CapturingClient(_canonical_provider_output(request))
+    provider = _provider(
+        client,
+        config,
+        target_input_tokens=512,
+        hard_input_tokens=6_000,
+    )
+
+    await provider.reason(request, prompt_version=request.prompt_version)
+
+    assert client.calls == 1
 
 
 def _request_record(request: Any, payload: dict[str, Any]) -> SimpleNamespace:
@@ -394,6 +411,11 @@ async def test_oversized_context_is_rejected_before_provider_and_not_typed_as_cr
     assert captured.value.details.reason_code == "request_too_large"
     assert captured.value.details.phase == "request_validation"
     assert captured.value.details.reason_code != "quota_exhausted"
+    assert captured.value.details.serialized_request_bytes is not None
+    assert captured.value.details.estimated_input_tokens is not None
+    assert captured.value.details.hard_output_limit == config.max_tokens
+    assert captured.value.details.output_profile == "compact"
+    assert captured.value.details.token_estimator is not None
 
 
 @pytest.mark.asyncio
