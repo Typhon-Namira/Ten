@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import sha256
 import json
-from dataclasses import dataclass
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -22,6 +23,7 @@ from .analysis import (
     MarketStructureAnalysis,
     MomentumAnalysis,
     MomentumTrend,
+    REGIME_CLASSIFICATION_ALIASES,
     RegimeClassification,
     SupplyDemandAnalysis,
     VolatilityAnalysis,
@@ -259,19 +261,59 @@ def normalize_compact_output_shapes(
             default=str,
             separators=(",", ":"),
         )
-        changes.append(
-            {
+        detail = {
                 "path": path,
                 "rule": rule,
                 "received_type": type(before).__name__,
                 "normalized_type": type(after).__name__,
                 "received_item_count": len(before) if isinstance(before, list) else None,
                 "received_value_hash": sha256(encoded.encode("utf-8")).hexdigest()[:16],
-            }
+        }
+        if rule.startswith("enum_"):
+            # Enum labels are bounded contract values, not sensitive analysis
+            # payloads. Preserve them so production diagnostics identify the
+            # exact alias without logging the provider response.
+            detail["raw_value"] = before
+            detail["canonical_value"] = after
+        changes.append(detail)
+
+    def enum_token(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", value.strip().casefold())
+
+    def canonical_enum_value(
+        value: Any,
+        schema: dict[str, Any],
+    ) -> tuple[Any, str | None]:
+        allowed = schema.get("enum")
+        if not isinstance(value, str) or not isinstance(allowed, list):
+            return value, None
+        allowed_strings = tuple(item for item in allowed if isinstance(item, str))
+        token = enum_token(value)
+        exact_matches = tuple(
+            item for item in allowed_strings if enum_token(item) == token
         )
+        if len(exact_matches) == 1:
+            canonical = exact_matches[0]
+            return canonical, "enum_format_to_canonical" if canonical != value else None
+        if schema.get("title") == RegimeClassification.__name__:
+            alias = next(
+                (
+                    canonical
+                    for raw_alias, canonical in REGIME_CLASSIFICATION_ALIASES.items()
+                    if enum_token(raw_alias) == token
+                ),
+                None,
+            )
+            if alias is not None and alias.value in allowed_strings:
+                return alias.value, "enum_alias_to_canonical"
+        return value, None
 
     def visit(value: Any, schema: dict[str, Any], path: str) -> Any:
         schema = resolve(_schema_branch_for_value(resolve(schema), value))
+        canonical_enum, enum_rule = canonical_enum_value(value, schema)
+        if enum_rule is not None:
+            record(path, value, canonical_enum, enum_rule)
+            value = canonical_enum
         expected_type = schema.get("type")
         allowed_normalizations = frozenset(schema.get("x-ten-normalize", ()))
         if (

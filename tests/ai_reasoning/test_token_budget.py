@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from backend.app.ai.provider_client import AIProviderCompletion, HttpAIProviderClient
 from backend.app.ai.prompts.loader import PromptLoader
-from backend.app.ai_reasoning.analysis import AIAnalysisOutput
+from backend.app.ai_reasoning.analysis import AIAnalysisOutput, RegimeClassification
 from backend.app.ai_reasoning.compact_output import (
     CompactAIAnalysisOutput,
     CompactOutputValidationError,
@@ -548,6 +548,159 @@ async def test_schema_driven_normalizer_preserves_nullable_and_rejects_semantics
     assert changes == ()
     with pytest.raises(ValidationError):
         CompactAIAnalysisOutput.model_validate(normalized)
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "canonical"),
+    (
+        (" BULLISH ", "bullish"),
+        ("bull-ish", "bullish"),
+        ("Bullish Trend", "bullish"),
+        ("Expansion Bullish", "bullish"),
+        ("Expansion Bull", "bullish"),
+        ("bearish_regime", "bearish"),
+        ("Compression Bearish", "bearish"),
+        ("RANGE-BOUND", "ranging"),
+        ("transition", "transitional"),
+        ("InDeTeRmInAtE", "uncertain"),
+    ),
+)
+def test_market_regime_enum_aliases_are_canonicalized_before_strict_validation(
+    raw_value: str,
+    canonical: str,
+) -> None:
+    raw = {
+        "market_regime": {
+            "classification": raw_value,
+        }
+    }
+
+    normalized, changes = normalize_compact_output_shapes(raw)
+
+    assert normalized["market_regime"]["classification"] == canonical
+    assert changes == (
+        {
+            "path": "market_regime.classification",
+            "rule": (
+                "enum_format_to_canonical"
+                if raw_value.strip().casefold().replace("-", "") == canonical
+                else "enum_alias_to_canonical"
+            ),
+            "received_type": "str",
+            "normalized_type": "str",
+            "received_item_count": None,
+            "received_value_hash": changes[0]["received_value_hash"],
+            "raw_value": raw_value,
+            "canonical_value": canonical,
+        },
+    )
+
+
+def test_enum_canonicalization_is_schema_wide_and_unknown_values_fail_closed() -> None:
+    raw = {
+        "higher_timeframe_context": {"bias": "BULL-ISH"},
+        "momentum_analysis": {"trend": "STRENG-THENING"},
+        "market_regime": {"classification": "strongly_bullish"},
+    }
+
+    normalized, changes = normalize_compact_output_shapes(raw)
+
+    assert normalized["higher_timeframe_context"]["bias"] == "bullish"
+    assert normalized["momentum_analysis"]["trend"] == "strengthening"
+    assert normalized["market_regime"]["classification"] == "strongly_bullish"
+    assert {item["path"] for item in changes} == {
+        "higher_timeframe_context.bias",
+        "momentum_analysis.trend",
+    }
+
+
+@pytest.mark.asyncio
+async def test_regime_alias_is_one_provider_call_and_commits_without_correction(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO")
+    state, quant, config, request = await _request()
+    raw = compact_output(request)
+    raw["market_regime"]["classification"] = " Bullish-Trend "
+    client = CompactClient(raw)
+    selected_provider = provider(client, config)
+    repository = InMemoryAIReasoningRepository()
+
+    result = await build_service(  # type: ignore[arg-type]
+        repository,
+        selected_provider,
+    ).process(state, quant)
+
+    assert result is not None
+    assert result.analysis.validation_passed is True
+    assert result.analysis.output is not None
+    assert (
+        result.analysis.output.market_regime.classification
+        is RegimeClassification.BULLISH
+    )
+    assert len(client.calls) == selected_provider.http_calls == 1
+    assert selected_provider.correction_attempts == 0
+    assert selected_provider.request_attempts[0]["schema_valid"] is True
+    assert selected_provider.request_attempts[0]["schema_correction_triggered"] is False
+    assert selected_provider.request_attempts[0]["local_shape_normalizations"] == (
+        "market_regime.classification",
+    )
+    artifact = next(iter(repository.response_artifacts.values()))
+    assert artifact.status.value == "COMMITTED"
+    event = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "enum_canonicalization.applied"
+    )
+    assert event.field_path == "provider_response.market_regime.classification"
+    assert event.raw_value == " Bullish-Trend "
+    assert event.canonical_value == "bullish"
+
+
+@pytest.mark.asyncio
+async def test_unknown_regime_enum_persists_explicit_terminal_invalid_enum() -> None:
+    state, quant, config, request = await _request()
+    raw = compact_output(request)
+    raw["market_regime"]["classification"] = "strongly_bullish"
+    client = CompactClient(raw)
+    selected_provider = provider(client, config)
+    repository = InMemoryAIReasoningRepository()
+
+    result = await build_service(  # type: ignore[arg-type]
+        repository,
+        selected_provider,
+    ).process(state, quant)
+
+    assert result is None
+    assert len(client.calls) == 2
+    assert selected_provider.correction_attempts == 1
+    assert selected_provider.request_attempts[0]["schema_error_code"] == "invalid_enum"
+    assert selected_provider.request_attempts[0]["schema_error_path"] == (
+        "provider_response.market_regime.classification"
+    )
+    artifact = next(iter(repository.response_artifacts.values()))
+    assert artifact.status.value == "TERMINAL_SCHEMA_FAILURE"
+    assert artifact.validation_error is not None
+    assert artifact.validation_error["error_code"] == "invalid_enum"
+
+
+@pytest.mark.asyncio
+async def test_regime_prompt_and_provider_contract_share_canonical_enum() -> None:
+    _, _, config, request = await _request()
+    selected_provider = provider(CompactClient(compact_output(request)), config)
+    contract = selected_provider._response_contract(  # noqa: SLF001
+        OutputProfile.COMPACT,
+        build_llm_analysis_context(request),
+    )
+    allowed = [item.value for item in RegimeClassification]
+    prompt = Path(
+        "backend/app/ai_reasoning/prompts/deep_market_analysis_v2.txt"
+    ).read_text(encoding="utf-8")
+
+    assert contract["enum_catalog"]["market_regime.classification"] == allowed
+    schema_values = contract["json_schema"]["$defs"]["RegimeClassification"]["enum"]
+    assert schema_values == allowed
+    assert "response_contract.enum_catalog.market_regime.classification" in prompt
 
 
 def test_provider_contract_preflight_uses_actual_model_capability() -> None:

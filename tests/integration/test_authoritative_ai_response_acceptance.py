@@ -82,6 +82,7 @@ async def test_three_m15_cutoffs_normalize_commit_select_and_enqueue_once() -> N
             previous_proposal=None,
         )
         raw = compact_output(request)
+        raw["market_regime"]["classification"] = " Bullish-Trend "
         raw["higher_timeframe_context"]["summary"] = [
             "M5 structure is constructive.",
             "M15 context remains aligned.",
@@ -105,6 +106,10 @@ async def test_three_m15_cutoffs_normalize_commit_select_and_enqueue_once() -> N
         assert reasoning.analysis.validation_passed
         assert client.calls and len(client.calls) == 1
         assert selected_provider.correction_attempts == 0
+        assert selected_provider.request_attempts[0]["local_shape_normalizations"]
+        assert "market_regime.classification" in selected_provider.request_attempts[0][
+            "local_shape_normalizations"
+        ]
         analysis_ids.add(reasoning.analysis.analysis_id)
         synthesis = MultiTimeframeSignalSynthesizer().synthesize(
             state,

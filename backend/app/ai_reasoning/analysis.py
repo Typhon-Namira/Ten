@@ -92,11 +92,45 @@ class AnalysisBias(StrEnum):
 
 
 class RegimeClassification(StrEnum):
+    """Canonical AI market-regime vocabulary used at every contract boundary."""
+
     BULLISH = "bullish"
     BEARISH = "bearish"
     RANGING = "ranging"
     TRANSITIONAL = "transitional"
     UNCERTAIN = "uncertain"
+
+
+# Only semantic aliases belong here. The values deliberately reference the
+# canonical enum instead of repeating provider-wire strings in adapters or
+# prompts.
+REGIME_CLASSIFICATION_ALIASES: dict[str, RegimeClassification] = {
+    "bull": RegimeClassification.BULLISH,
+    "bullish_market": RegimeClassification.BULLISH,
+    "bullish_regime": RegimeClassification.BULLISH,
+    "bullish_trend": RegimeClassification.BULLISH,
+    "bullish_expansion": RegimeClassification.BULLISH,
+    "expansion_bull": RegimeClassification.BULLISH,
+    "expansion_bullish": RegimeClassification.BULLISH,
+    "compression_bull": RegimeClassification.BULLISH,
+    "compression_bullish": RegimeClassification.BULLISH,
+    "bear": RegimeClassification.BEARISH,
+    "bearish_market": RegimeClassification.BEARISH,
+    "bearish_regime": RegimeClassification.BEARISH,
+    "bearish_trend": RegimeClassification.BEARISH,
+    "bearish_expansion": RegimeClassification.BEARISH,
+    "expansion_bear": RegimeClassification.BEARISH,
+    "expansion_bearish": RegimeClassification.BEARISH,
+    "compression_bear": RegimeClassification.BEARISH,
+    "compression_bearish": RegimeClassification.BEARISH,
+    "range": RegimeClassification.RANGING,
+    "range_bound": RegimeClassification.RANGING,
+    "sideways": RegimeClassification.RANGING,
+    "transition": RegimeClassification.TRANSITIONAL,
+    "transitioning": RegimeClassification.TRANSITIONAL,
+    "indeterminate": RegimeClassification.UNCERTAIN,
+    "unknown": RegimeClassification.UNCERTAIN,
+}
 
 
 class AnalysisEvidence(StrictAnalysisModel):

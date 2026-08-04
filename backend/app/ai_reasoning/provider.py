@@ -26,7 +26,7 @@ from backend.app.ai.provider_client import (
 from backend.app.ai.prompts.loader import PromptLoader
 from backend.app.core.exceptions import AIProviderFailureDetails, AIProviderRequestError
 
-from .analysis import AIAnalysisOutput
+from .analysis import AIAnalysisOutput, RegimeClassification
 from .compact_output import (
     CompactOutputValidationError,
     canonical_response_model,
@@ -830,6 +830,10 @@ class _OpenAICompatibleReasoningProvider:
         schema = reasoning_response_schema(profile)
         rules = (
             "one JSON object; exact schema; no markdown or prose",
+            (
+                "market_regime.classification must be exactly one of: "
+                + ", ".join(item.value for item in RegimeClassification)
+            ),
             "use only supplied evidence IDs",
             (
                 "evidence-reference arrays contain unique IDs; their maximum "
@@ -850,6 +854,11 @@ class _OpenAICompatibleReasoningProvider:
         )
         return {
             "json_schema": schema,
+            "enum_catalog": {
+                "market_regime.classification": [
+                    item.value for item in RegimeClassification
+                ],
+            },
             "reference_catalog": {
                 "nearest_supply_ref": supply_ids or [None],
                 "nearest_demand_ref": demand_ids or [None],
@@ -1588,6 +1597,20 @@ class GroqProvider(_OpenAICompatibleReasoningProvider):
         )
         metadata["local_shape_normalization_details"] = shape_normalizations
         for shape_change in shape_normalizations:
+            if shape_change["rule"].startswith("enum_"):
+                logger.info(
+                    "enum_canonicalization.applied",
+                    extra={
+                        "field_path": (
+                            f"provider_response.{shape_change['path']}"
+                        ),
+                        "raw_value": shape_change["raw_value"],
+                        "canonical_value": shape_change["canonical_value"],
+                        "provider": response.provider,
+                        "request_id": str(request.request_id),
+                        "cycle_id": str(request.cycle_id),
+                    },
+                )
             logger.info(
                 "ai_provider.response.locally_normalized",
                 extra={
