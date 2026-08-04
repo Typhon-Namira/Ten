@@ -57,7 +57,7 @@ def _stage_status(result: object) -> str:
 class FullSystemIntegrationService:
     """Coordinates existing engines at a final-candle boundary; contains no analytics."""
 
-    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, signal_synthesizer: Any | None = None, signal_synthesis_repository: Any | None = None, scenario_forecasting: Any | None = None, market_simulation: Any | None = None, ai_centric_shadow_mode: bool = False) -> None:
+    def __init__(self, *, event_bus: EventBus, repository: IntegrationRepository, config: IntegrationConfig, market_data: Any, smc: Any, liquidity: Any, volume_profile: Any, institutional_flow: Any, market_regime: Any, economic_calendar: Any, ai_scoring: Any, signal_decision: Any, repository_mode: str = "memory", clock: Callable[[], datetime] | None = None, stage_tracker: PipelineStageTracker | None = None, unified_market_state: Any | None = None, quantitative_forecasting: Any | None = None, ai_reasoning: Any | None = None, signal_synthesizer: Any | None = None, signal_synthesis_repository: Any | None = None, scenario_forecasting: Any | None = None, market_simulation: Any | None = None, primary_scenario_notifications: Any | None = None, signal_email_enabled: bool = False, signal_email_recipient: str = "", ai_centric_shadow_mode: bool = False) -> None:
         self.event_bus, self.repository, self.config = event_bus, repository, config
         self.market_data, self.smc, self.liquidity = market_data, smc, liquidity
         self.volume_profile, self.institutional_flow = volume_profile, institutional_flow
@@ -73,6 +73,9 @@ class FullSystemIntegrationService:
         self.signal_synthesis_repository = signal_synthesis_repository
         self.scenario_forecasting = scenario_forecasting
         self.market_simulation = market_simulation
+        self.primary_scenario_notifications = primary_scenario_notifications
+        self.signal_email_enabled = signal_email_enabled
+        self.signal_email_recipient = signal_email_recipient
         self.ai_centric_shadow_mode = ai_centric_shadow_mode
         self._unsubscribe: Callable[[], None] | None = None
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -762,6 +765,18 @@ class FullSystemIntegrationService:
                         current_primary_scenario=primary_scenario,
                     )
                 )
+                if (
+                    primary_scenario is not None
+                    and self.primary_scenario_notifications is not None
+                ):
+                    failure_stage = "primary_scenario_publication"
+                    await self.primary_scenario_notifications.evaluate_primary_scenario(
+                        primary_scenario,
+                        decision,
+                        self.signal_email_recipient,
+                        email_enabled=self.signal_email_enabled,
+                        now=self.clock(),
+                    )
                 self.last_decision_persisted_at = self.clock()
                 logger.info(
                     "decision.persist.completed",

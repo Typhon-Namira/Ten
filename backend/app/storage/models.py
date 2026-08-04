@@ -585,7 +585,7 @@ class SignalDecisionReasonRecord(Base):
 
 
 class SignalEmailOutboxRecord(Base):
-    """Durable, idempotent email notification created with its signal decision."""
+    """Durable, idempotent Primary Scenario email notification."""
 
     __tablename__ = "signal_email_outbox"
     __table_args__ = (
@@ -602,10 +602,9 @@ class SignalEmailOutboxRecord(Base):
         index=True,
     )
     deduplication_key: Mapped[str | None] = mapped_column(String(64))
-    decision_id: Mapped[UUID] = mapped_column(
+    decision_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
-        ForeignKey("signal_decisions.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("signal_decisions.id", ondelete="SET NULL"),
         index=True,
     )
     recipient: Mapped[str] = mapped_column(String(320), nullable=False)
@@ -1810,6 +1809,36 @@ class PrimaryScenarioSelectionRecord(Base):
     market_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     selected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class PrimaryScenarioPublicationRecord(Base):
+    """One durable publication and notification evaluation per selection."""
+
+    __tablename__ = "primary_scenario_publications"
+
+    selection_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("primary_scenario_selections.selection_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    primary_scenario_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("candidate_market_scenarios.candidate_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    decision_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("signal_decisions.id", ondelete="SET NULL"),
+        index=True,
+    )
+    publication_status: Mapped[str] = mapped_column(String(24), index=True)
+    publication_reason: Mapped[str] = mapped_column(String(128))
+    email_status: Mapped[str] = mapped_column(String(24), index=True)
+    email_reason: Mapped[str] = mapped_column(String(128))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
 
 
 class PrimaryScenarioGeometryRecord(Base):

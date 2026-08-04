@@ -668,6 +668,42 @@ async def test_delayed_analysis_resumes_same_idempotent_attempt_to_success() -> 
 
 
 @pytest.mark.asyncio
+async def test_m5_cycle_is_monitoring_only_and_keeps_active_primary_authority() -> None:
+    state, quant, synthesis = await scenario_inputs()
+    repository = InMemoryMarketSimulationRepository()
+    service = MarketSimulationService(
+        repository,
+        InMemoryScenarioForecastRepository(),
+        MarketSimulationEngine(
+            MarketSimulationConfig(
+                primary_scenario_threshold=0,
+                email_scenario_threshold=0,
+            )
+        ),
+    )
+    active = await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M15",
+        evaluated_at=state.market_data_boundary,
+    )
+
+    monitored = await service.process(
+        state,
+        quant,
+        synthesis,
+        trigger_timeframe="M5",
+        evaluated_at=state.market_data_boundary + timedelta(minutes=5),
+    )
+
+    assert active is not None
+    assert monitored is None
+    assert await repository.latest(state.instrument) == active
+    assert len(repository.selections) == 1
+
+
+@pytest.mark.asyncio
 async def test_concurrent_workers_create_only_one_simulation_for_cutoff() -> None:
     state, quant, synthesis = await scenario_inputs()
     analysis = aligned_analysis(state, quant)

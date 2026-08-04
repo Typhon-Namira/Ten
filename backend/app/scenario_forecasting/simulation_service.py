@@ -616,6 +616,19 @@ class MarketSimulationService:
                 "terminal_status": terminal_status.value,
             },
         )
+        logger.info(
+            "PRIMARY_SCENARIO_PERSISTED",
+            extra={
+                "selection_id": str(selection.selection_id),
+                "scenario_id": (
+                    str(selection.primary_candidate_id)
+                    if selection.primary_candidate_id is not None
+                    else None
+                ),
+                "cutoff": selection.market_cutoff.isoformat(),
+                "reason_code": "authoritative_m15_simulation_persisted",
+            },
+        )
         return selection
 
     async def _evaluate_expired(

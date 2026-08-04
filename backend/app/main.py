@@ -359,11 +359,6 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
         if app.state.database_session_factory is not None:
             decision_repository = SqlAlchemySignalDecisionRepository(
                 app.state.database_session_factory,
-                signal_email_enabled=(
-                    settings.signal_email_enabled
-                    and not settings.signal_email_configuration_errors
-                ),
-                signal_email_recipient=settings.signal_email_recipient,
             )
             decision_mode = "postgresql"
         app.state.signal_decision_service = SignalDecisionService(
@@ -590,6 +585,11 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             ai_analysis_repository=app.state.ai_reasoning_repository,
             recovery_max_age_seconds=settings.scenario_recovery_max_age_seconds,
         )
+        app.state.signal_email_outbox_repository = (
+            SignalEmailOutboxRepository(app.state.database_session_factory)
+            if app.state.database_session_factory is not None
+            else None
+        )
         app.state.integration_service = FullSystemIntegrationService(
             event_bus=app.state.pipeline_manager.event_bus,
             repository=app.state.integration_repository,
@@ -612,6 +612,14 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
             signal_synthesis_repository=app.state.multi_timeframe_signal_repository,
             scenario_forecasting=app.state.scenario_forecasting_service,
             market_simulation=app.state.market_simulation_service,
+            primary_scenario_notifications=(
+                app.state.signal_email_outbox_repository
+            ),
+            signal_email_enabled=(
+                settings.signal_email_enabled
+                and not settings.signal_email_configuration_errors
+            ),
+            signal_email_recipient=settings.signal_email_recipient,
             ai_centric_shadow_mode=ai_centric_shadow_mode,
         )
         if integration_config.enabled and integration_config.live_pipeline_enabled:
@@ -706,7 +714,6 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 extra={"missing_variables": email_configuration_errors},
             )
         app.state.signal_email_worker = None
-        app.state.signal_email_outbox_repository = None
         if (
             app.state.database_session_factory is not None
             and settings.signal_email_enabled
@@ -720,11 +727,8 @@ def create_app(*, frontend_dist: Path | None = None, settings_override: Settings
                 settings.smtp_use_tls,
                 settings.email_from or "",
             )
-            app.state.signal_email_outbox_repository = SignalEmailOutboxRepository(
-                app.state.database_session_factory
-            )
-            reconciled = await app.state.signal_email_outbox_repository.reconcile_eligible_decisions(
-                settings.signal_email_recipient
+            assert app.state.signal_email_outbox_repository is not None
+            reconciled = await app.state.signal_email_outbox_repository.reconcile_primary_scenario_publications(
             )
             logger.info(
                 "signal_email.startup.reconciled",

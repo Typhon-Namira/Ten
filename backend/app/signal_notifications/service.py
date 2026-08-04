@@ -14,8 +14,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.storage.models import (
+    PrimaryScenarioPublicationRecord,
     PrimaryScenarioSelectionRecord,
-    SignalDecisionRecord,
     SignalEmailOutboxRecord,
 )
 
@@ -26,54 +26,87 @@ class SignalEmailSender(Protocol):
     async def send(self, payload: dict[str, Any], recipient: str) -> str | None: ...
 
 
-def primary_email_ineligibility_reason(decision: Any, now: datetime) -> str | None:
-    notification = decision.notification_context
+def primary_publication_ineligibility_reason(
+    selection: Any,
+    decision: Any,
+    now: datetime,
+) -> str | None:
+    """Evaluate publication with Primary Scenario authority and guardrail evidence."""
+
+    primary = selection.primary
+    if selection.status.value != "SELECTED" or primary is None:
+        return selection.rejection_reason or "primary_scenario_not_selected"
+    if not selection.signal_eligible:
+        return selection.rejection_reason or "primary_scenario_not_signal_eligible"
+    lineage = getattr(decision, "source_lineage", None)
+    if (
+        lineage is None
+        or lineage.primary_scenario_selection_id != selection.selection_id
+    ):
+        return "guardrail_decision_selection_mismatch"
     if getattr(getattr(decision, "mode", None), "value", None) != "live":
-        return "decision_not_live"
+        return "guardrail_decision_not_live"
+    if now >= primary.expiry or now >= decision.valid_until:
+        return "primary_scenario_expired"
     if not decision.publication_eligible:
-        return "publication_not_eligible"
-    if notification is None:
-        return "notification_context_missing"
-    if notification.get("primary_scenario_id") is None:
-        return "primary_scenario_missing"
-    if notification.get("direction") not in {"BUY", "SELL"}:
-        return "direction_not_actionable"
-    if any(
-        notification.get(field) is None
-        for field in ("entry", "stop_loss", "take_profit", "risk_reward")
-    ):
-        return "geometry_incomplete"
-    if float(notification["risk_reward"]) <= 0:
-        return "risk_reward_invalid"
-    if float(notification.get("primary_scenario_score", 100)) < float(
-        notification.get("email_threshold", 0)
-    ):
-        return "score_below_email_threshold"
-    if decision.decided_at >= decision.valid_until or now >= decision.valid_until:
-        return "decision_expired"
-    expires_at = notification.get("expires_at")
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    if isinstance(expires_at, datetime) and (
-        decision.decided_at >= expires_at or now >= expires_at
-    ):
-        return "scenario_expired"
+        return (
+            decision.blockers[0].reason_code
+            if decision.blockers
+            else "guardrails_rejected"
+        )
+    if selection.authoritative_action.value not in {"BUY", "SELL"}:
+        return "primary_scenario_direction_not_actionable"
+    if primary.geometry is None:
+        return "primary_scenario_geometry_missing"
     return None
 
 
-def primary_email_outbox_values(
+def primary_scenario_email_outbox_values(
+    selection: Any,
     decision: Any,
     recipient: str,
     now: datetime,
 ) -> dict[str, Any] | None:
-    notification = decision.notification_context
-    if primary_email_ineligibility_reason(decision, now) is not None:
+    """Build an email solely from the authoritative Primary Scenario artifact."""
+
+    if primary_publication_ineligibility_reason(selection, decision, now) is not None:
         return None
-    assert notification is not None
+    primary = selection.primary
+    assert primary is not None and primary.geometry is not None
+    alternative = selection.alternative
     payload = {
-        **notification,
-        "symbol": decision.instrument,
-        "market_time": decision.as_of.isoformat(),
+        "symbol": selection.instrument,
+        "signal_id": str(selection.selection_id),
+        "primary_scenario_id": str(primary.candidate_id),
+        "alternative_scenario_id": (
+            str(alternative.candidate_id) if alternative is not None else None
+        ),
+        "cycle_id": str(selection.cycle_id),
+        "direction": selection.authoritative_action.value,
+        "primary_scenario_score": primary.final_scenario_score,
+        "scenario_type": primary.scenario_type,
+        "market_cutoff": selection.market_cutoff.isoformat(),
+        "market_time": selection.market_cutoff.isoformat(),
+        "reference_price": primary.reference_price,
+        "expected_path": primary.deterministically_validated_path,
+        "entry_type": primary.entry_type.value,
+        "entry_zone": primary.geometry.entry_zone.model_dump(mode="json"),
+        "entry": primary.geometry.entry,
+        "stop_loss": primary.geometry.stop_loss,
+        "take_profit": primary.geometry.take_profit,
+        "risk_reward": primary.geometry.risk_reward_ratio,
+        "invalidation": primary.geometry.reason,
+        "expires_at": primary.expiry.isoformat(),
+        "supporting_evidence": primary.supporting_evidence_ids[:5],
+        "alternative_summary": (
+            {
+                "direction": alternative.direction.value,
+                "scenario_type": alternative.scenario_type,
+                "score": alternative.final_scenario_score,
+            }
+            if alternative is not None
+            else None
+        ),
         "decision_id": str(decision.decision_id),
         "guardrail_status": "APPROVED",
         "publication_status": "ELIGIBLE",
@@ -82,23 +115,12 @@ def primary_email_outbox_values(
         ],
     }
     deduplication_key = sha256(
-        "|".join(
-            str(value)
-            for value in (
-                decision.instrument,
-                notification.get("market_cutoff", decision.as_of.isoformat()),
-                notification["primary_scenario_id"],
-                notification["direction"],
-                notification["entry"],
-                notification["stop_loss"],
-                notification["take_profit"],
-            )
-        ).encode()
+        f"{selection.selection_id}|{primary.candidate_id}|{recipient}".encode()
     ).hexdigest()
     return {
         "id": uuid5(NAMESPACE_URL, f"ten:primary-scenario-email:{deduplication_key}"),
-        "signal_id": UUID(str(notification["signal_id"])),
-        "primary_scenario_id": UUID(str(notification["primary_scenario_id"])),
+        "signal_id": selection.selection_id,
+        "primary_scenario_id": primary.candidate_id,
         "deduplication_key": deduplication_key,
         "decision_id": decision.decision_id,
         "recipient": recipient,
@@ -214,89 +236,193 @@ class SignalEmailOutboxRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
 
-    async def enqueue_decision(self, decision: Any, recipient: str) -> bool:
-        now = datetime.now(UTC)
-        values = primary_email_outbox_values(decision, recipient, now)
-        if values is None:
-            logger.info(
-                "signal_email.not_eligible",
-                extra={
-                    "decision_id": str(decision.decision_id),
-                    "scenario_id": (
-                        decision.notification_context.get("primary_scenario_id")
-                        if decision.notification_context
-                        else None
-                    ),
-                    "cutoff": (
-                        decision.notification_context.get("market_cutoff")
-                        if decision.notification_context
-                        else decision.as_of.isoformat()
-                    ),
-                    "failure_reason": primary_email_ineligibility_reason(
-                        decision,
-                        now,
-                    ),
-                    "delivery_state": "NOT_TRIGGERED",
-                },
-            )
-            return False
-        async with self.session_factory() as session, session.begin():
-            inserted = (
-                await session.execute(
-                    insert(SignalEmailOutboxRecord)
-                    .values(**values)
-                    .on_conflict_do_nothing()
-                    .returning(SignalEmailOutboxRecord.id)
-                )
-            ).scalar_one_or_none()
-        logger.info(
-            "signal_email.triggered" if inserted is not None else "signal_email.duplicate",
-            extra={
-                "scenario_id": str(values["primary_scenario_id"]),
-                "cutoff": values["payload"].get("market_cutoff"),
-                "email_trigger_time": now.isoformat(),
-                "recipient": recipient,
-                "event_id": str(values["id"]),
-                "delivery_state": "QUEUED" if inserted is not None else "ALREADY_QUEUED",
-            },
-        )
-        return inserted is not None
-
-    async def reconcile_eligible_decisions(
+    async def evaluate_primary_scenario(
         self,
+        selection: Any,
+        decision: Any,
         recipient: str,
         *,
-        limit: int = 500,
-    ) -> int:
-        from backend.app.engines.signal_decision_engine.models import SignalDecision
+        email_enabled: bool,
+        now: datetime | None = None,
+    ) -> bool:
+        """Persist evaluation and outbox atomically; retries repair missing outbox."""
+
+        evaluated_at = now or datetime.now(UTC)
+        reason = primary_publication_ineligibility_reason(
+            selection, decision, evaluated_at
+        )
+        publication_status = "ELIGIBLE" if reason is None else "INELIGIBLE"
+        email_values = (
+            primary_scenario_email_outbox_values(
+                selection, decision, recipient, evaluated_at
+            )
+            if reason is None and email_enabled
+            else None
+        )
+        email_status = (
+            "ELIGIBLE"
+            if email_values is not None
+            else "NOT_ELIGIBLE"
+        )
+        email_reason = (
+            "primary_scenario_email_eligible"
+            if email_values is not None
+            else reason or "email_disabled"
+        )
+        primary_id = (
+            selection.primary.candidate_id if selection.primary is not None else None
+        )
+        audit_payload = {
+            "selection_id": str(selection.selection_id),
+            "primary_scenario_id": str(primary_id) if primary_id else None,
+            "market_cutoff": selection.market_cutoff.isoformat(),
+            "publication_status": publication_status,
+            "publication_reason": reason or "all_publication_guardrails_passed",
+            "email_status": email_status,
+            "email_reason": email_reason,
+            "outbox": (
+                {
+                    "id": str(email_values["id"]),
+                    "signal_id": str(email_values["signal_id"]),
+                    "deduplication_key": email_values["deduplication_key"],
+                    "recipient": email_values["recipient"],
+                    "payload": email_values["payload"],
+                }
+                if email_values is not None
+                else None
+            ),
+        }
+        inserted_outbox = None
+        async with self.session_factory() as session, session.begin():
+            await session.execute(
+                insert(PrimaryScenarioPublicationRecord)
+                .values(
+                    selection_id=selection.selection_id,
+                    primary_scenario_id=primary_id,
+                    decision_id=decision.decision_id,
+                    publication_status=publication_status,
+                    publication_reason=(reason or "all_publication_guardrails_passed"),
+                    email_status=email_status,
+                    email_reason=email_reason,
+                    payload=audit_payload,
+                    evaluated_at=evaluated_at,
+                )
+                .on_conflict_do_nothing(index_elements=["selection_id"])
+            )
+            if email_values is not None:
+                inserted_outbox = (
+                    await session.execute(
+                        insert(SignalEmailOutboxRecord)
+                        .values(**email_values)
+                        .on_conflict_do_nothing()
+                        .returning(SignalEmailOutboxRecord.id)
+                    )
+                ).scalar_one_or_none()
+                await session.execute(
+                    update(PrimaryScenarioPublicationRecord)
+                    .where(
+                        PrimaryScenarioPublicationRecord.selection_id
+                        == selection.selection_id
+                    )
+                    .values(
+                        email_status="ENQUEUED",
+                        email_reason=(
+                            "email_outbox_created"
+                            if inserted_outbox is not None
+                            else "email_outbox_already_exists"
+                        ),
+                    )
+                )
+        context = {
+            "selection_id": str(selection.selection_id),
+            "scenario_id": str(primary_id) if primary_id else None,
+            "cutoff": selection.market_cutoff.isoformat(),
+            "decision_id": str(decision.decision_id),
+            "reason_code": reason or "all_publication_guardrails_passed",
+        }
+        logger.info("PUBLICATION_EVALUATED", extra=context)
+        logger.info(
+            "PUBLICATION_ELIGIBLE" if reason is None else "PUBLICATION_INELIGIBLE",
+            extra=context,
+        )
+        logger.info("EMAIL_EVALUATED", extra={**context, "reason_code": email_reason})
+        logger.info(
+            "EMAIL_ENQUEUED" if email_values is not None else "EMAIL_NOT_ELIGIBLE",
+            extra={
+                **context,
+                "reason_code": (
+                    "email_outbox_created"
+                    if inserted_outbox is not None
+                    else "email_outbox_already_exists"
+                    if email_values is not None
+                    else email_reason
+                ),
+            },
+        )
+        return inserted_outbox is not None
+
+    async def reconcile_primary_scenario_publications(self) -> int:
+        """Repair an eligible publication whose durable outbox is absent."""
 
         async with self.session_factory() as session:
-            records = tuple(
-                (
-                    await session.scalars(
-                        select(SignalDecisionRecord)
-                        .where(
-                            SignalDecisionRecord.mode == "live",
-                            SignalDecisionRecord.state == "eligible",
-                        )
-                        .order_by(SignalDecisionRecord.decided_at.desc())
-                        .limit(limit)
+            rows = (
+                await session.scalars(
+                    select(PrimaryScenarioPublicationRecord)
+                    .outerjoin(
+                        SignalEmailOutboxRecord,
+                        SignalEmailOutboxRecord.primary_scenario_id
+                        == PrimaryScenarioPublicationRecord.primary_scenario_id,
                     )
-                ).all()
-            )
-        inserted = 0
-        for record in records:
-            try:
-                decision = SignalDecision.model_validate(record.payload)
-                inserted += int(await self.enqueue_decision(decision, recipient))
-            except Exception as exc:
-                logger.warning(
-                    "signal_email.reconciliation.skipped",
-                    extra={
-                        "decision_id": str(record.id),
-                        "failure_reason": type(exc).__name__,
-                    },
+                    .where(
+                        PrimaryScenarioPublicationRecord.publication_status
+                        == "ELIGIBLE",
+                        PrimaryScenarioPublicationRecord.email_status.in_(
+                            ("ELIGIBLE", "ENQUEUED")
+                        ),
+                        SignalEmailOutboxRecord.id.is_(None),
+                    )
+                    .limit(500)
                 )
+            ).all()
+        inserted = 0
+        for publication in rows:
+            outbox = publication.payload.get("outbox")
+            if not isinstance(outbox, dict) or publication.primary_scenario_id is None:
+                continue
+            now = datetime.now(UTC)
+            values = {
+                "id": UUID(str(outbox["id"])),
+                "signal_id": UUID(str(outbox["signal_id"])),
+                "primary_scenario_id": publication.primary_scenario_id,
+                "deduplication_key": outbox["deduplication_key"],
+                "decision_id": publication.decision_id,
+                "recipient": outbox["recipient"],
+                "status": "PENDING",
+                "payload": outbox["payload"],
+                "attempt_count": 0,
+                "next_retry_at": now,
+                "created_at": now,
+                "updated_at": now,
+            }
+            async with self.session_factory() as session, session.begin():
+                created = (
+                    await session.execute(
+                        insert(SignalEmailOutboxRecord)
+                        .values(**values)
+                        .on_conflict_do_nothing()
+                        .returning(SignalEmailOutboxRecord.id)
+                    )
+                ).scalar_one_or_none()
+            inserted += int(created is not None)
+            logger.info(
+                "EMAIL_ENQUEUED",
+                extra={
+                    "selection_id": str(publication.selection_id),
+                    "scenario_id": str(publication.primary_scenario_id),
+                    "cutoff": publication.payload.get("market_cutoff"),
+                    "reason_code": "missing_outbox_reconciled",
+                },
+            )
         return inserted
 
     async def for_primary_scenario(
@@ -460,8 +586,8 @@ class SignalEmailWorker:
                         or now >= self._next_reconciliation_at
                     )
                 ):
-                    reconciled = await self.repository.reconcile_eligible_decisions(
-                        self.recipient
+                    reconciled = (
+                        await self.repository.reconcile_primary_scenario_publications()
                     )
                     self._next_reconciliation_at = now + timedelta(seconds=60)
                     logger.info(
@@ -485,7 +611,7 @@ class SignalEmailWorker:
         attempt = event.attempt_count
         try:
             logger.info(
-                "signal_email.sending",
+                "EMAIL_SEND_STARTED",
                 extra={
                     "event_id": str(event.id),
                     "scenario_id": str(event.primary_scenario_id),
@@ -498,7 +624,7 @@ class SignalEmailWorker:
             message_id = await self.sender.send(event.payload, event.recipient)
             await self.repository.mark_sent(event.id, message_id, datetime.now(UTC))
             logger.info(
-                "signal_email.sent",
+                "EMAIL_SENT",
                 extra={
                     "event_id": str(event.id),
                     "signal_id": str(event.signal_id),
@@ -525,7 +651,7 @@ class SignalEmailWorker:
                 terminal=terminal,
             )
             logger.warning(
-                "signal_email.failed",
+                "EMAIL_FAILED",
                 extra={
                     "event_id": str(event.id),
                     "scenario_id": str(event.primary_scenario_id),
