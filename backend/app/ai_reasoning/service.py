@@ -23,6 +23,8 @@ from backend.app.quant_forecasting.models import QuantForecastResult
 
 from .analysis import (
     AIMarketAnalysis,
+    AIResponseArtifact,
+    AIResponseArtifactStatus,
     AIAnalysisTemporalContext,
     AIProviderMetadata,
     AnalysisStatus,
@@ -44,7 +46,8 @@ from .config import AIReasoningConfig
 from .llm_context import LLM_ANALYSIS_CONTEXT_SCHEMA_VERSION, build_llm_analysis_context
 from .memory import MarketMemory
 from .models import LLMStructuredOutputFailure
-from .provider import AIReasoningProvider
+from .provider import AIProviderResponse, AIReasoningProvider
+from .compact_output import validate_canonical_response
 from .repository import AIReasoningClaim, AIReasoningRepository
 from .request_builder import AIReasoningRequestBuilder
 from .signal import DeterministicAnalysisSignalGenerator
@@ -592,6 +595,7 @@ class AIReasoningService:
             )
             return None
         response = None
+        response_artifact: AIResponseArtifact | None = None
         provider_failure: dict[str, Any] | None = None
         provider_metrics_before = self._provider_metrics()
         provider_delta: dict[str, int] = {}
@@ -600,26 +604,150 @@ class AIReasoningService:
         failure_errors: tuple[str, ...] = ()
         terminal_status = "FAILED_PROVIDER"
         try:
-            async with self._llm_semaphore:
+            existing_response = await self.repository.response_artifact(
+                request.request_id
+            )
+            if (
+                existing_response is not None
+                and existing_response.status
+                in {
+                    AIResponseArtifactStatus.PROVIDER_RESPONSE_RECEIVED,
+                    AIResponseArtifactStatus.NORMALIZED,
+                    AIResponseArtifactStatus.VALIDATED,
+                }
+            ):
+                context = build_llm_analysis_context(request)
+                recovered = validate_canonical_response(
+                    existing_response.normalized_output
+                    or existing_response.provider_output,
+                    context.evidence_catalog,
+                    context.supply_zone_catalog,
+                    context.demand_zone_catalog,
+                )
+                response = AIProviderResponse(
+                    raw_output=recovered.resolved_output.model_dump(mode="json"),
+                    provider=existing_response.provider,
+                    model_identifier=existing_response.model,
+                    latency_ms=0,
+                    token_usage=None,
+                    operational_metadata={
+                        "status_code": existing_response.http_status,
+                        "provider_mode": existing_response.provider_mode,
+                        "local_shape_normalizations": tuple(
+                            item.get("path")
+                            for item in existing_response.normalization_details
+                        ),
+                        "local_shape_normalization_details": (
+                            existing_response.normalization_details
+                        ),
+                        "recovered_from_response_artifact": True,
+                    },
+                    provider_output=existing_response.provider_output,
+                    normalized_output=recovered.normalized_output,
+                    validated_output=recovered.resolved_output,
+                )
+                recovery_time = self.clock().astimezone(UTC)
+                response_artifact = existing_response.model_copy(
+                    update={
+                        "status": AIResponseArtifactStatus.VALIDATED,
+                        "normalized_output": recovered.normalized_output,
+                        "normalization_details": recovered.normalization_details,
+                        "semantic_validation_passed": True,
+                        "normalized_at": (
+                            existing_response.normalized_at or recovery_time
+                        ),
+                        "validated_at": recovery_time,
+                        "updated_at": recovery_time,
+                    }
+                )
+                await self.repository.save_response_artifact(response_artifact)
                 logger.info(
-                    "ai_reasoning.provider_call.started",
+                    "ai_reasoning.response_artifact.reused",
                     extra={
                         **worker_context,
                         "request_id": str(request.request_id),
-                        "idempotency_key": idempotency_key,
+                        "provider_request_count": 0,
+                        "artifact_status": existing_response.status.value,
                     },
                 )
-                response = await asyncio.wait_for(
-                    self.provider.reason(request, prompt_version=request.prompt_version),
-                    timeout=self.config.request_timeout_seconds,
-                )
+            else:
+                async with self._llm_semaphore:
+                    logger.info(
+                        "ai_reasoning.provider_call.started",
+                        extra={
+                            **worker_context,
+                            "request_id": str(request.request_id),
+                            "idempotency_key": idempotency_key,
+                        },
+                    )
+                    response = await asyncio.wait_for(
+                        self.provider.reason(
+                            request,
+                            prompt_version=request.prompt_version,
+                        ),
+                        timeout=self.config.request_timeout_seconds,
+                    )
             provider_delta = self._metric_delta(
                 provider_metrics_before,
                 self._provider_metrics(),
             )
             self._consume_provider_metrics(provider_delta)
             self.last_latency_ms = response.latency_ms
-            output = self.validator.validate_analysis(response.raw_output)
+            output = response.validated_output or self.validator.validate_analysis(
+                response.raw_output
+            )
+            provider_attempts = self._provider_attempts(request.request_id)
+            now = self.clock().astimezone(UTC)
+            metadata = response.operational_metadata or {}
+            if response_artifact is None:
+                raw_normalization_details = metadata.get(
+                    "local_shape_normalization_details", ()
+                )
+                normalization_details = tuple(
+                    item
+                    for item in (
+                        raw_normalization_details
+                        if isinstance(raw_normalization_details, (list, tuple))
+                        else ()
+                    )
+                    if isinstance(item, dict)
+                )
+                raw_status = metadata.get("status_code")
+                response_artifact = AIResponseArtifact(
+                    request_id=request.request_id,
+                    cycle_id=request.cycle_id,
+                    instrument=request.instrument,
+                    market_cutoff=request.analysis_timestamp,
+                    provider=response.provider,
+                    model=response.model_identifier,
+                    provider_mode=str(metadata.get("provider_mode") or "json_object"),
+                    status=AIResponseArtifactStatus.PROVIDER_RESPONSE_RECEIVED,
+                    provider_request_count=max(1, len(provider_attempts)),
+                    http_status=raw_status if isinstance(raw_status, int) else 200,
+                    provider_output=response.provider_output or response.raw_output,
+                    provider_response_received_at=now,
+                    updated_at=now,
+                )
+                await self.repository.save_response_artifact(response_artifact)
+                response_artifact = response_artifact.model_copy(
+                    update={
+                        "status": AIResponseArtifactStatus.NORMALIZED,
+                        "normalized_output": (
+                            response.normalized_output or response.raw_output
+                        ),
+                        "normalization_details": normalization_details,
+                        "normalized_at": now,
+                    }
+                )
+                await self.repository.save_response_artifact(response_artifact)
+                response_artifact = response_artifact.model_copy(
+                    update={
+                        "status": AIResponseArtifactStatus.VALIDATED,
+                        "semantic_validation_passed": True,
+                        "validated_at": now,
+                    }
+                )
+                await self.repository.save_response_artifact(response_artifact)
             analysis = AIMarketAnalysis(
                 analysis_id=uuid5(
                     NAMESPACE_URL,
@@ -675,6 +803,9 @@ class AIReasoningService:
                 provider_metrics=provider_delta,
                 provider_attempts=provider_attempts,
             )
+            normalization_paths = (response.operational_metadata or {}).get(
+                "local_shape_normalizations", ()
+            )
             logger.info(
                 "structured_validation.completed",
                 extra={
@@ -683,6 +814,29 @@ class AIReasoningService:
                     "validation_status": "valid",
                     "validation_issue_count": 0,
                     "artifact_type": "ai_market_analysis",
+                    "provider_account": response.provider,
+                    "provider_model": response.model_identifier,
+                    "provider_mode": (
+                        (response.operational_metadata or {}).get("provider_mode")
+                        or self.provider.metadata().get("provider_mode")
+                    ),
+                    "provider_request_count": len(provider_attempts),
+                    "received_top_level_field_count": len(
+                        response.provider_output or response.raw_output
+                    ),
+                    "normalization_count": len(
+                        normalization_paths
+                        if isinstance(normalization_paths, (list, tuple))
+                        else ()
+                    ),
+                    "normalized_field_paths": (
+                        response.operational_metadata or {}
+                    ).get("local_shape_normalizations", ()),
+                    "semantic_validation_status": "valid",
+                    "schema_correction_triggered": any(
+                        item.get("request_kind") == "schema_correction"
+                        for item in provider_attempts
+                    ),
                 },
             )
         except StructuredAIOutputError as exc:
@@ -696,6 +850,62 @@ class AIReasoningService:
             self.metrics["validation_failures"] += 1
             failure_state = "structured_output_invalid"
             failure_errors = exc.errors
+            if response is not None:
+                failed_at = self.clock().astimezone(UTC)
+                metadata = response.operational_metadata or {}
+                raw_status = metadata.get("status_code")
+                raw_normalization_details = metadata.get(
+                    "local_shape_normalization_details", ()
+                )
+                failed_artifact = AIResponseArtifact(
+                    request_id=request.request_id,
+                    cycle_id=request.cycle_id,
+                    instrument=request.instrument,
+                    market_cutoff=request.analysis_timestamp,
+                    provider=response.provider,
+                    model=response.model_identifier,
+                    provider_mode=str(metadata.get("provider_mode") or "json_object"),
+                    status=AIResponseArtifactStatus.TERMINAL_SCHEMA_FAILURE,
+                    provider_request_count=max(
+                        1,
+                        len(self._provider_attempts(request.request_id)),
+                    ),
+                    http_status=raw_status if isinstance(raw_status, int) else 200,
+                    provider_output=response.provider_output or response.raw_output,
+                    normalized_output=response.normalized_output,
+                    normalization_details=tuple(
+                        item
+                        for item in (
+                            raw_normalization_details
+                            if isinstance(raw_normalization_details, (list, tuple))
+                            else ()
+                        )
+                        if isinstance(item, dict)
+                    ),
+                    validation_error=(
+                        {
+                            "field_path": exc.first_issue.field_path,
+                            "expected_type": exc.first_issue.expected_type,
+                            "actual_type": type(
+                                exc.first_issue.actual_value
+                            ).__name__,
+                            "received_shape": (
+                                exc.first_issue.offending_json_fragment
+                            ),
+                            "normalization_possible": False,
+                            "rejection_reason": exc.first_issue.validator_name,
+                        }
+                        if exc.first_issue
+                        else {"reason": "canonical_validation_failed"}
+                    ),
+                    semantic_validation_passed=False,
+                    provider_response_received_at=failed_at,
+                    normalized_at=(
+                        failed_at if response.normalized_output is not None else None
+                    ),
+                    updated_at=failed_at,
+                )
+                await self.repository.save_response_artifact(failed_artifact)
             logger.error(
                 "ai_reasoning.request.failed",
                 extra={
@@ -732,6 +942,79 @@ class AIReasoningService:
                 },
             )
         except AIProviderRequestError as exc:
+            cached_response_getter = getattr(
+                self.provider,
+                "response_artifact_for",
+                None,
+            )
+            cached_response = (
+                cached_response_getter(request.request_id)
+                if callable(cached_response_getter)
+                else None
+            )
+            if cached_response is not None and (
+                exc.details.reason_code == "schema_validation_error"
+                or exc.details.phase.startswith("schema_correction_")
+            ):
+                failed_at = self.clock().astimezone(UTC)
+                cached_metadata = cached_response.operational_metadata or {}
+                cached_status = cached_metadata.get("status_code")
+                cached_normalizations = cached_metadata.get(
+                    "local_shape_normalization_details", ()
+                )
+                await self.repository.save_response_artifact(
+                    AIResponseArtifact(
+                        request_id=request.request_id,
+                        cycle_id=request.cycle_id,
+                        instrument=request.instrument,
+                        market_cutoff=request.analysis_timestamp,
+                        provider=cached_response.provider,
+                        model=cached_response.model_identifier,
+                        provider_mode=str(
+                            cached_metadata.get("provider_mode") or "json_object"
+                        ),
+                        status=(
+                            AIResponseArtifactStatus.TERMINAL_SCHEMA_FAILURE
+                        ),
+                        provider_request_count=max(
+                            1,
+                            len(self._provider_attempts(request.request_id)),
+                        ),
+                        http_status=(
+                            cached_status
+                            if isinstance(cached_status, int)
+                            else 200
+                        ),
+                        provider_output=cached_response.provider_output
+                        or cached_response.raw_output,
+                        normalized_output=cached_response.normalized_output,
+                        normalization_details=tuple(
+                            item
+                            for item in (
+                                cached_normalizations
+                                if isinstance(cached_normalizations, (list, tuple))
+                                else ()
+                            )
+                            if isinstance(item, dict)
+                        ),
+                        validation_error={
+                            "field_path": exc.details.schema_error_path,
+                            "expected_type": exc.details.schema_error_code,
+                            "actual_type": "unknown",
+                            "received_shape": "recorded_by_provider_attempt_hash",
+                            "normalization_possible": False,
+                            "rejection_reason": exc.details.reason_code,
+                        },
+                        semantic_validation_passed=False,
+                        provider_response_received_at=failed_at,
+                        normalized_at=(
+                            failed_at
+                            if cached_response.normalized_output is not None
+                            else None
+                        ),
+                        updated_at=failed_at,
+                    )
+                )
             provider_failure = {
                 "terminal": asdict(exc.details),
                 "providers": self.provider.metadata().get("providers"),
@@ -912,6 +1195,16 @@ class AIReasoningService:
                 },
             )
             return None
+        if response_artifact is not None:
+            response_artifact = response_artifact.model_copy(
+                update={
+                    "status": AIResponseArtifactStatus.COMMITTED,
+                    "analysis_id": analysis.analysis_id,
+                    "committed_at": self.clock().astimezone(UTC),
+                    "updated_at": self.clock().astimezone(UTC),
+                }
+            )
+            await self.repository.save_response_artifact(response_artifact)
         if analysis.status != AnalysisStatus.AVAILABLE:
             await self._complete_claim(
                 claim,

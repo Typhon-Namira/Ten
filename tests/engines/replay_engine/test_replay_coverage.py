@@ -247,7 +247,11 @@ class FailingBus(InMemoryEventBus):
 
 @pytest.mark.asyncio
 async def test_service_remaining_controls_health_comparison_and_publication() -> None:
-    config = ReplayConfig(limits={"max_concurrent_sessions": 1}, worker={"max_concurrency": 1})
+    config = ReplayConfig(
+        limits={"max_concurrent_sessions": 1},
+        worker={"max_concurrency": 1},
+        retention={"completed_days": 365},
+    )
     service, repository = await build_service((historical_event(5, 1),), config=config)
     session = await service.create(replay_request())
     with pytest.raises(Exception, match="maximum concurrent"):

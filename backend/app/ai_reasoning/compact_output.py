@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic.config import JsonDict
 
 from .analysis import (
     AIAnalysisOutput,
@@ -45,6 +47,12 @@ class EvidenceCatalogItem(CompactStrictModel):
 EvidenceRefs = tuple[str, ...]
 MARKET_REGIME_EVIDENCE_REF_LIMIT = 2
 HIGHER_TIMEFRAME_SUMMARY_LIMIT = 180
+_STRING_FROM_LIST: JsonDict = {
+    "x-ten-normalize": ["string_list_to_string"]
+}
+_LIST_FROM_STRING: JsonDict = {
+    "x-ten-normalize": ["string_to_string_list"]
+}
 
 
 class CompactRegime(CompactStrictModel):
@@ -52,28 +60,51 @@ class CompactRegime(CompactStrictModel):
     strength: float = Field(ge=0, le=100)
     confidence: float = Field(ge=0, le=1)
     evidence_refs: EvidenceRefs = Field(
-        max_length=MARKET_REGIME_EVIDENCE_REF_LIMIT
+        max_length=MARKET_REGIME_EVIDENCE_REF_LIMIT,
+        json_schema_extra=_LIST_FROM_STRING,
     )
 
 
 class CompactHigherTimeframe(CompactStrictModel):
     bias: AnalysisBias
-    summary: str = Field(min_length=1, max_length=HIGHER_TIMEFRAME_SUMMARY_LIMIT)
-    evidence_refs: EvidenceRefs = Field(max_length=2)
+    summary: str = Field(
+        min_length=1,
+        max_length=HIGHER_TIMEFRAME_SUMMARY_LIMIT,
+        json_schema_extra=_STRING_FROM_LIST,
+    )
+    evidence_refs: EvidenceRefs = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
 
 
 class CompactStructure(CompactStrictModel):
-    short_term: str = Field(min_length=1, max_length=120)
-    medium_term: str = Field(min_length=1, max_length=180)
-    recent_change: str = Field(min_length=1, max_length=120)
-    evidence_refs: EvidenceRefs = Field(max_length=2)
+    short_term: str = Field(
+        min_length=1, max_length=120, json_schema_extra=_STRING_FROM_LIST
+    )
+    medium_term: str = Field(
+        min_length=1, max_length=180, json_schema_extra=_STRING_FROM_LIST
+    )
+    recent_change: str = Field(
+        min_length=1, max_length=120, json_schema_extra=_STRING_FROM_LIST
+    )
+    evidence_refs: EvidenceRefs = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
 
 
 class CompactLiquidity(CompactStrictModel):
-    summary: str = Field(min_length=1, max_length=180)
-    events: tuple[str, ...] = Field(max_length=2)
-    unresolved: tuple[str, ...] = Field(max_length=2)
-    evidence_refs: EvidenceRefs = Field(max_length=2)
+    summary: str = Field(
+        min_length=1, max_length=180, json_schema_extra=_STRING_FROM_LIST
+    )
+    events: tuple[str, ...] = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
+    unresolved: tuple[str, ...] = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
+    evidence_refs: EvidenceRefs = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
 
     @field_validator("events", "unresolved")
     @classmethod
@@ -84,34 +115,48 @@ class CompactLiquidity(CompactStrictModel):
 
 
 class CompactSupplyDemand(CompactStrictModel):
-    summary: str = Field(min_length=1, max_length=160)
+    summary: str = Field(
+        min_length=1, max_length=160, json_schema_extra=_STRING_FROM_LIST
+    )
     nearest_supply_ref: str | None = Field(
         pattern=r"^SZ[1-3]$",
     )
     nearest_demand_ref: str | None = Field(
         pattern=r"^DZ[1-3]$",
     )
-    evidence_refs: EvidenceRefs = Field(max_length=2)
+    evidence_refs: EvidenceRefs = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
 
 
 class CompactMomentum(CompactStrictModel):
     direction: AnalysisBias
     strength: float = Field(ge=0, le=100)
     trend: MomentumTrend
-    evidence_refs: EvidenceRefs = Field(max_length=2)
+    evidence_refs: EvidenceRefs = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
 
 
 class CompactVolatility(CompactStrictModel):
     state: VolatilityState
     trend: VolatilityTrend
-    evidence_refs: EvidenceRefs = Field(max_length=2)
+    evidence_refs: EvidenceRefs = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
 
 
 class CompactScenario(CompactStrictModel):
-    name: str = Field(min_length=1, max_length=60)
-    description: str = Field(min_length=1, max_length=180)
+    name: str = Field(
+        min_length=1, max_length=60, json_schema_extra=_STRING_FROM_LIST
+    )
+    description: str = Field(
+        min_length=1, max_length=180, json_schema_extra=_STRING_FROM_LIST
+    )
     probability: float = Field(ge=0, le=1)
-    evidence_refs: EvidenceRefs = Field(max_length=2)
+    evidence_refs: EvidenceRefs = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
 
 
 class CompactAIAnalysisOutput(CompactStrictModel):
@@ -124,15 +169,29 @@ class CompactAIAnalysisOutput(CompactStrictModel):
     supply_demand_analysis: CompactSupplyDemand
     momentum_analysis: CompactMomentum
     volatility_analysis: CompactVolatility
-    bullish_evidence_refs: EvidenceRefs = Field(max_length=3)
-    bearish_evidence_refs: EvidenceRefs = Field(max_length=3)
-    contradiction_refs: EvidenceRefs = Field(max_length=3)
-    key_risk_refs: EvidenceRefs = Field(max_length=3)
-    invalidation_conditions: tuple[str, ...] = Field(max_length=2)
-    data_quality_warnings: tuple[str, ...] = Field(max_length=3)
+    bullish_evidence_refs: EvidenceRefs = Field(
+        max_length=3, json_schema_extra=_LIST_FROM_STRING
+    )
+    bearish_evidence_refs: EvidenceRefs = Field(
+        max_length=3, json_schema_extra=_LIST_FROM_STRING
+    )
+    contradiction_refs: EvidenceRefs = Field(
+        max_length=3, json_schema_extra=_LIST_FROM_STRING
+    )
+    key_risk_refs: EvidenceRefs = Field(
+        max_length=3, json_schema_extra=_LIST_FROM_STRING
+    )
+    invalidation_conditions: tuple[str, ...] = Field(
+        max_length=2, json_schema_extra=_LIST_FROM_STRING
+    )
+    data_quality_warnings: tuple[str, ...] = Field(
+        max_length=3, json_schema_extra=_LIST_FROM_STRING
+    )
     alternative_scenarios: tuple[CompactScenario, ...] = Field(max_length=2)
     analysis_confidence: float = Field(ge=0, le=1)
-    executive_summary: str = Field(min_length=1, max_length=320)
+    executive_summary: str = Field(
+        min_length=1, max_length=320, json_schema_extra=_STRING_FROM_LIST
+    )
 
     @field_validator("invalidation_conditions")
     @classmethod
@@ -149,26 +208,29 @@ class CompactAIAnalysisOutput(CompactStrictModel):
         return values
 
 
-class CompactRetryAIAnalysisOutput(CompactStrictModel):
-    analysis_schema_version: Literal["compact-retry-1.1"]
-    output_profile: Literal["compact_retry"]
-    market_regime: CompactRegime
-    higher_timeframe_context: CompactHigherTimeframe
-    market_structure: CompactStructure
-    liquidity_analysis: CompactLiquidity
-    supply_demand_analysis: CompactSupplyDemand
-    momentum_analysis: CompactMomentum
-    volatility_analysis: CompactVolatility
-    bullish_evidence_refs: EvidenceRefs = Field(max_length=2)
-    bearish_evidence_refs: EvidenceRefs = Field(max_length=2)
-    contradiction_refs: EvidenceRefs = Field(max_length=2)
-    key_risk_refs: EvidenceRefs = Field(max_length=2)
-    invalidation_conditions: tuple[str, ...] = Field(max_length=2)
-    data_quality_warnings: tuple[str, ...] = Field(max_length=2)
-    analysis_confidence: float = Field(ge=0, le=1)
+AuthoritativeAIResponse = CompactAIAnalysisOutput
+# A retry changes the token budget and request classification, never the wire
+# contract. Keep the old import name as a type alias for internal callers while
+# retaining exactly one authoritative Pydantic response model.
+CompactRetryAIAnalysisOutput = AuthoritativeAIResponse
+CompactWireOutput = AuthoritativeAIResponse
 
 
-CompactWireOutput = CompactAIAnalysisOutput | CompactRetryAIAnalysisOutput
+@dataclass(frozen=True)
+class CanonicalResponseValidation:
+    provider_output: dict[str, Any]
+    normalized_output: dict[str, Any]
+    wire_output: CompactWireOutput
+    resolved_output: AIAnalysisOutput
+    normalization_details: tuple[dict[str, Any], ...]
+    evidence_ref_truncations: tuple[str, ...]
+
+
+def canonical_response_model(*, retry: bool = False) -> type[CompactStrictModel]:
+    """Return the sole provider-response model for an authoritative attempt."""
+
+    del retry
+    return AuthoritativeAIResponse
 
 
 class CompactOutputValidationError(ValueError):
@@ -176,24 +238,6 @@ class CompactOutputValidationError(ValueError):
         self.code = code
         self.path = path
         super().__init__(message)
-
-
-_DESCRIPTIVE_LIMITS = {
-    "summary": 180,
-    "short_term": 120,
-    "medium_term": 180,
-    "recent_change": 120,
-    "name": 60,
-    "description": 180,
-    "executive_summary": 320,
-}
-_LIST_LIMITS = {
-    "events": 2,
-    "unresolved": 2,
-    "invalidation_conditions": 2,
-    "data_quality_warnings": 3,
-    "alternative_scenarios": 2,
-}
 
 
 def _schema_branch_for_value(
@@ -226,7 +270,7 @@ def normalize_compact_output_shapes(
 ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     """Normalize only lossless JSON container variants across the wire schema."""
 
-    model = CompactRetryAIAnalysisOutput if retry else CompactAIAnalysisOutput
+    model = canonical_response_model(retry=retry)
     root_schema = model.model_json_schema()
     definitions = root_schema.get("$defs", {})
     changes: list[dict[str, Any]] = []
@@ -259,8 +303,10 @@ def normalize_compact_output_shapes(
     def visit(value: Any, schema: dict[str, Any], path: str) -> Any:
         schema = resolve(_schema_branch_for_value(resolve(schema), value))
         expected_type = schema.get("type")
+        allowed_normalizations = frozenset(schema.get("x-ten-normalize", ()))
         if (
             expected_type == "string"
+            and "string_list_to_string" in allowed_normalizations
             and isinstance(value, list)
             and value
             and all(isinstance(item, str) and item.strip() for item in value)
@@ -270,6 +316,7 @@ def normalize_compact_output_shapes(
             value = normalized_string
         elif (
             expected_type == "array"
+            and "string_to_string_list" in allowed_normalizations
             and isinstance(value, str)
             and value.strip()
             and resolve(schema.get("items", {})).get("type") == "string"
@@ -299,84 +346,6 @@ def normalize_compact_output_shapes(
         return value
 
     return visit(raw, root_schema, ""), tuple(changes)
-
-
-def normalize_higher_timeframe_summary_shape(
-    raw: dict[str, Any],
-) -> tuple[dict[str, Any], tuple[str, ...]]:
-    """Backward-compatible facade over the schema-wide safe normalizer."""
-
-    normalized, changes = normalize_compact_output_shapes(raw)
-    paths = tuple(
-        str(item["path"])
-        for item in changes
-        if item["path"] == "higher_timeframe_context.summary"
-    )
-    return normalized, paths
-
-
-def normalize_descriptive_overflow(raw: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
-    """Locally bound only non-decision prose; identifiers and values are untouched."""
-
-    changes: list[str] = []
-
-    def visit(value: Any, path: str) -> Any:
-        if isinstance(value, dict):
-            normalized: dict[str, Any] = {}
-            for key, item in value.items():
-                child_path = f"{path}.{key}" if path else key
-                if key in _DESCRIPTIVE_LIMITS and isinstance(item, str):
-                    limit = _DESCRIPTIVE_LIMITS[key]
-                    if len(item) > limit:
-                        changes.append(child_path)
-                        item = item[:limit].rstrip()
-                if key in _LIST_LIMITS and isinstance(item, list):
-                    limit = _LIST_LIMITS[key]
-                    if len(item) > limit:
-                        changes.append(child_path)
-                        item = item[:limit]
-                normalized[key] = visit(item, child_path)
-            return normalized
-        if isinstance(value, list):
-            return [visit(item, f"{path}.{index}") for index, item in enumerate(value)]
-        return value
-
-    return visit(raw, ""), tuple(changes)
-
-
-def normalize_reference_syntax(
-    raw: dict[str, Any],
-) -> tuple[dict[str, Any], tuple[str, ...]]:
-    """Normalize only whitespace/case for syntactically valid catalog IDs."""
-
-    normalized = {
-        key: (
-            dict(value)
-            if isinstance(value, dict)
-            else value
-        )
-        for key, value in raw.items()
-    }
-    changes: list[str] = []
-    supply_demand = normalized.get("supply_demand_analysis")
-    if not isinstance(supply_demand, dict):
-        return normalized, ()
-    for key, prefix in (
-        ("nearest_supply_ref", "SZ"),
-        ("nearest_demand_ref", "DZ"),
-    ):
-        value = supply_demand.get(key)
-        if not isinstance(value, str):
-            continue
-        candidate = value.strip().upper()
-        if (
-            candidate.startswith(prefix)
-            and candidate[len(prefix) :].isdigit()
-            and candidate != value
-        ):
-            supply_demand[key] = candidate
-            changes.append(f"supply_demand_analysis.{key}")
-    return normalized, tuple(changes)
 
 
 def truncate_market_regime_evidence_refs(
@@ -585,4 +554,45 @@ def resolve_compact_output(
         executive_summary=summary,
         invalidation_conditions=output.invalidation_conditions,
         data_quality_warnings=output.data_quality_warnings,
+    )
+
+
+def validate_canonical_response(
+    raw: dict[str, Any],
+    catalog: tuple[EvidenceCatalogItem, ...],
+    supply_catalog: tuple[Any, ...] = (),
+    demand_catalog: tuple[Any, ...] = (),
+    *,
+    retry: bool = False,
+) -> CanonicalResponseValidation:
+    """Normalize once, then validate the canonical wire and semantic contracts."""
+
+    normalized, evidence_ref_truncations = truncate_market_regime_evidence_refs(
+        raw,
+        frozenset(item.evidence_id for item in catalog),
+    )
+    normalized, normalization_details = normalize_compact_output_shapes(
+        normalized,
+        retry=retry,
+    )
+    model = canonical_response_model(retry=retry)
+    validated = model.model_validate(normalized)
+    if not isinstance(validated, AuthoritativeAIResponse):
+        raise TypeError("canonical response model returned an unexpected type")
+    wire = validated
+    validate_evidence_references(wire, catalog)
+    validate_zone_references(wire, supply_catalog, demand_catalog)
+    resolved = resolve_compact_output(
+        wire,
+        catalog,
+        supply_catalog,
+        demand_catalog,
+    )
+    return CanonicalResponseValidation(
+        provider_output=raw,
+        normalized_output=wire.model_dump(mode="json"),
+        wire_output=wire,
+        resolved_output=resolved,
+        normalization_details=normalization_details,
+        evidence_ref_truncations=evidence_ref_truncations,
     )
