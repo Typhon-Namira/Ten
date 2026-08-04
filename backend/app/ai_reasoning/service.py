@@ -884,6 +884,12 @@ class AIReasoningService:
                     ),
                     validation_error=(
                         {
+                            "error_code": (
+                                "invalid_enum"
+                                if "enum" in exc.first_issue.validator_name
+                                or "literal" in exc.first_issue.validator_name
+                                else "schema_validation_failed"
+                            ),
                             "field_path": exc.first_issue.field_path,
                             "expected_type": exc.first_issue.expected_type,
                             "actual_type": type(
@@ -998,6 +1004,10 @@ class AIReasoningService:
                             if isinstance(item, dict)
                         ),
                         validation_error={
+                            "error_code": (
+                                exc.details.schema_error_code
+                                or "schema_validation_failed"
+                            ),
                             "field_path": exc.details.schema_error_path,
                             "expected_type": exc.details.schema_error_code,
                             "actual_type": "unknown",
