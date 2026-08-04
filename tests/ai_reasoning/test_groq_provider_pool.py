@@ -265,6 +265,33 @@ async def test_json_generation_failure_does_not_fail_over_or_poison_account() ->
 
 
 @pytest.mark.asyncio
+async def test_local_preflight_failure_does_not_fail_over_or_poison_account() -> None:
+    preflight_failure = AIProviderRequestError(
+        AIProviderFailureDetails(
+            provider="groq_1",
+            reason_code="request_too_large",
+            phase="request_validation",
+            endpoint="https://api.groq.test/openai/v1/chat/completions",
+            model="llama-3.1-8b-instant",
+            request_id="request-1",
+            cycle_id="cycle-1",
+            exception_class="AIProviderRequestBudgetError",
+        )
+    )
+    providers = four({1: [preflight_failure]})
+    router = pool(providers)
+
+    with pytest.raises(AIProviderRequestError):
+        await router.reason(request(), prompt_version="v1")  # type: ignore[arg-type]
+
+    assert [provider.calls for provider in providers] == [1, 0, 0, 0]
+    state = router.states["groq_1"]
+    assert state.status == ProviderStatus.AVAILABLE
+    assert state.provider_failures == 0
+    assert state.request_policy_failures == 1
+
+
+@pytest.mark.asyncio
 async def test_schema_correction_rate_limit_does_not_repeat_analysis_on_next_account() -> None:
     correction_failure = AIProviderRequestError(
         AIProviderFailureDetails(

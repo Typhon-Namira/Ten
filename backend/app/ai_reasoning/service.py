@@ -1036,7 +1036,11 @@ class AIReasoningService:
                     claim,
                     request_id=request.request_id,
                     analysis_id=None,
-                    status="RELEASED",
+                    # Request validation is deterministic for a persisted
+                    # market state and contract version. Releasing makes the
+                    # recovery worker submit the identical oversized request
+                    # indefinitely; a new state or deployment gets a new key.
+                    status="FAILED",
                     failure_reason="request_preflight_failed",
                 )
                 return None

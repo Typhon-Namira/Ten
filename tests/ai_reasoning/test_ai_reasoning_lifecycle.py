@@ -866,6 +866,17 @@ async def test_request_preflight_failure_is_a_skip_not_a_provider_failure() -> N
     assert metrics["skip_reasons"]["request_preflight_failed"] == 1
     claim = await repository.claim_for_cutoff(state.instrument, state.market_data_boundary)
     assert claim is not None
-    assert claim.status == "RELEASED"
+    assert claim.status == "FAILED"
     assert claim.failure_reason == "request_preflight_failed"
     assert repository.analyses == {}
+
+    # Recovery of the same persisted cutoff must not rebuild and reject the
+    # identical request every scheduler tick.
+    assert await service.process(state, quant) is None
+    assert provider.calls == 0
+    repeated_claim = await repository.claim_for_cutoff(
+        state.instrument,
+        state.market_data_boundary,
+    )
+    assert repeated_claim is not None
+    assert repeated_claim.status == "FAILED"
