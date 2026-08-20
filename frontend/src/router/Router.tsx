@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { AIAnalysisPage, ConfigurationPage, EngineStatusPage, InstitutionalFlowPage, LiquidityPage, LogsPage, MarketRegimePage, VolumeProfilePage } from '../pages/ModulePages'
-import { AICalibrationPage, AIPerformancePage, AISignalsPage, AISystemPage, Dashboard } from '../pages/Dashboard'
+import { AICalibrationPage, AIPerformancePage, AISystemPage } from '../pages/Dashboard'
+import { FutureMarketPage } from '../pages/FutureMarketPage'
 import { MarketPage } from '../pages/MarketPage'
 import { ReplaySessionsPage } from '../pages/ReplaySessionsPage'
 import { CurrentSignalsPage } from '../pages/CurrentSignalsPage'
@@ -16,7 +17,8 @@ import { AssistantPage } from '../pages/AssistantPage'
 import { AppShell } from '../components/AppShell'
 
 const routes: Record<string, () => React.JSX.Element> = {
-  '/': Dashboard,
+  '/': () => <FutureMarketPage view="forecast" />,
+  '/signals': () => <FutureMarketPage view="opportunities" />,
   '/market': MarketPage,
   '/market/sessions': MarketPage,
   '/replay': ReplaySessionsPage,
@@ -27,7 +29,6 @@ const routes: Record<string, () => React.JSX.Element> = {
   '/market-regime': MarketRegimePage,
   '/economic-calendar': EconomicCalendarEnginePage,
   '/ai-analysis': AIAnalysisPage,
-  '/signals': AISignalsPage,
   '/signals/rejected': RejectedSignalsPage,
   '/signals/history': SignalHistoryPage,
   '/signals/decision-tree': SignalDecisionTreePage,
@@ -51,6 +52,6 @@ export function Router() {
     window.addEventListener('popstate', update)
     return () => window.removeEventListener('popstate', update)
   }, [])
-  const Page = routes[path] ?? Dashboard
+  const Page = routes[path] ?? routes['/']
   return <AppShell currentPath={path}><Page /></AppShell>
 }
