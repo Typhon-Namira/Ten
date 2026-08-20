@@ -22,13 +22,23 @@ target_metadata = Base.metadata
 
 
 def database_url() -> str:
-    """Return the Railway-compatible async database URL without logging it."""
-    raw_url = os.environ.get("TEN_DATABASE_URL")
+    """Return the managed-runtime async database URL without logging it.
+
+    ``TEN_DATABASE_URL`` is canonical. ``DATABASE_URL`` is accepted as a
+    Railway/PostgreSQL compatibility fallback so pre-deploy migrations and the
+    application runtime resolve the same database even when the platform only
+    exposes its generic variable.
+    """
+    raw_url = os.environ.get("TEN_DATABASE_URL") or os.environ.get("DATABASE_URL")
     url = normalize_async_database_url(raw_url) if raw_url else None
     if not url:
-        raise RuntimeError("TEN_DATABASE_URL is required to run database migrations")
+        raise RuntimeError(
+            "TEN_DATABASE_URL or DATABASE_URL is required to run database migrations"
+        )
     if not url.startswith(("postgresql+asyncpg://", "sqlite+aiosqlite://")):
-        raise RuntimeError("TEN_DATABASE_URL must use postgresql+asyncpg:// or sqlite+aiosqlite://")
+        raise RuntimeError(
+            "database URL must use postgresql+asyncpg:// or sqlite+aiosqlite://"
+        )
     return url
 
 
