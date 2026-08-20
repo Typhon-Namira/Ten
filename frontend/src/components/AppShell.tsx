@@ -1,13 +1,12 @@
 import type { ReactNode } from 'react'
-import { Activity, Gauge, Settings2, ShieldCheck, Signal } from 'lucide-react'
+import { Activity, Gauge, Settings2, Target } from 'lucide-react'
 import { navigate } from '../router/navigation'
 import { DiagnosticsBar } from './DiagnosticsBar'
 
 const NAVIGATION = [
-  { path: '/', label: 'Overview', icon: Activity },
-  { path: '/signals', label: 'Signals', icon: Signal },
+  { path: '/', label: 'Forecast', icon: Activity },
+  { path: '/signals', label: 'Opportunities', icon: Target },
   { path: '/performance', label: 'Performance', icon: Gauge },
-  { path: '/calibration', label: 'Calibration', icon: ShieldCheck },
   { path: '/system', label: 'System', icon: Settings2 },
 ]
 
@@ -15,7 +14,7 @@ export function AppShell({ currentPath, children }: { currentPath: string; child
   return <div className="app">
     <nav className="top-nav" aria-label="Primary navigation">
       <a className="top-nav__brand" href="/" onClick={(event) => { event.preventDefault(); navigate('/') }}>
-        <span>TEN</span><small>AI MARKET INTELLIGENCE</small>
+        <span>TEN</span><small>FUTURE MARKET INTELLIGENCE</small>
       </a>
       <div className="top-nav__links">
         {NAVIGATION.map(({ path, label, icon: Icon }) => <a
@@ -26,10 +25,10 @@ export function AppShell({ currentPath, children }: { currentPath: string; child
           onClick={(event) => { event.preventDefault(); navigate(path) }}
         ><Icon size={16} />{label}</a>)}
       </div>
-      <span className="top-nav__scope">Analysis only</span>
+      <span className="top-nav__scope">30m scenario intelligence</span>
     </nav>
     <main>{children}</main>
     <DiagnosticsBar />
-    <footer className="app-footer">Analysis and decision support only. No Broker Execution. Outcomes and probabilities are not guarantees.</footer>
+    <footer className="app-footer">Scenario intelligence and decision support only. No broker execution. Forecast probabilities are not guarantees.</footer>
   </div>
 }
