@@ -15,6 +15,19 @@ from backend.app.core.database.url import normalize_async_database_url
 logger = logging.getLogger(__name__)
 
 
+def _default_database_url() -> str:
+    """Use Railway's generic DATABASE_URL when TEN_DATABASE_URL is absent.
+
+    BaseSettings still gives an explicitly configured ``TEN_DATABASE_URL``
+    precedence over this default. This fallback keeps the application runtime
+    aligned with Alembic's managed-deployment database resolution.
+    """
+    return os.getenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://ten:ten@localhost:5432/ten",
+    )
+
+
 class Settings(BaseSettings):
     """Validated runtime settings. Secrets are loaded only from the environment."""
 
@@ -25,7 +38,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     api_prefix: str = ""
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
-    database_url: str = "postgresql+asyncpg://ten:ten@localhost:5432/ten"
+    database_url: str = Field(default_factory=_default_database_url)
     db_pool_size: int = Field(default=3, ge=1, le=50)
     db_max_overflow: int = Field(default=2, ge=0, le=50)
     db_pool_timeout_seconds: float = Field(default=30, gt=0, le=300)
@@ -355,4 +368,3 @@ def get_settings() -> Settings:
     """Return the process-wide immutable settings instance."""
 
     return Settings()
-
