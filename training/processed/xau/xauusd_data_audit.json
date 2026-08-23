@@ -1,0 +1,251 @@
+{
+  "source": "Dukascopy mirror / dukascopy-node",
+  "instrument": "XAUUSD",
+  "side": "bid",
+  "source_timeframe": "M1",
+  "output_timeframe": "M5",
+  "stale_run_minutes": 60,
+  "years": {
+    "2016": {
+      "raw_rows": 527040,
+      "invalid_rows": 0,
+      "stale_rows_removed": 172657,
+      "active_m1_rows": 354383,
+      "m5_rows": 70858,
+      "longest_identical_runs_minutes": [
+        4380,
+        4260,
+        3135,
+        3000,
+        2942,
+        2941,
+        2940,
+        2880,
+        1560,
+        300
+      ],
+      "first_timestamp": "2016-01-01T00:00:00+00:00",
+      "last_timestamp": "2016-12-31T23:59:00+00:00"
+    },
+    "2017": {
+      "raw_rows": 525600,
+      "invalid_rows": 0,
+      "stale_rows_removed": 172799,
+      "active_m1_rows": 352801,
+      "m5_rows": 70508,
+      "longest_identical_runs_minutes": [
+        4381,
+        4380,
+        3135,
+        3001,
+        3000,
+        2942,
+        2941,
+        2940,
+        2820,
+        329
+      ],
+      "first_timestamp": "2017-01-01T00:00:00+00:00",
+      "last_timestamp": "2017-12-31T23:59:00+00:00"
+    },
+    "2018": {
+      "raw_rows": 525600,
+      "invalid_rows": 0,
+      "stale_rows_removed": 171469,
+      "active_m1_rows": 354131,
+      "m5_rows": 70750,
+      "longest_identical_runs_minutes": [
+        4381,
+        3135,
+        3002,
+        2942,
+        2941,
+        2940,
+        2880,
+        1695,
+        1380,
+        300
+      ],
+      "first_timestamp": "2018-01-01T00:00:00+00:00",
+      "last_timestamp": "2018-12-31T23:59:00+00:00"
+    },
+    "2019": {
+      "raw_rows": 525600,
+      "invalid_rows": 0,
+      "stale_rows_removed": 171392,
+      "active_m1_rows": 354208,
+      "m5_rows": 70773,
+      "longest_identical_runs_minutes": [
+        4381,
+        3114,
+        3000,
+        2944,
+        2942,
+        2941,
+        2940,
+        2880,
+        1695,
+        1380
+      ],
+      "first_timestamp": "2019-01-01T00:00:00+00:00",
+      "last_timestamp": "2019-12-31T23:59:00+00:00"
+    },
+    "2020": {
+      "raw_rows": 527040,
+      "invalid_rows": 0,
+      "stale_rows_removed": 171456,
+      "active_m1_rows": 355584,
+      "m5_rows": 71115,
+      "longest_identical_runs_minutes": [
+        4576,
+        4380,
+        3180,
+        3135,
+        3000,
+        2940,
+        2881,
+        1380,
+        300,
+        120
+      ],
+      "first_timestamp": "2020-01-01T00:00:00+00:00",
+      "last_timestamp": "2020-12-31T23:59:00+00:00"
+    },
+    "2021": {
+      "raw_rows": 525600,
+      "invalid_rows": 0,
+      "stale_rows_removed": 171216,
+      "active_m1_rows": 354384,
+      "m5_rows": 70874,
+      "longest_identical_runs_minutes": [
+        4381,
+        4380,
+        4260,
+        3136,
+        3000,
+        2940,
+        2880,
+        319,
+        300,
+        120
+      ],
+      "first_timestamp": "2021-01-01T00:00:00+00:00",
+      "last_timestamp": "2021-12-31T23:59:00+00:00"
+    },
+    "2022": {
+      "raw_rows": 525600,
+      "invalid_rows": 0,
+      "stale_rows_removed": 170909,
+      "active_m1_rows": 354691,
+      "m5_rows": 70929,
+      "longest_identical_runs_minutes": [
+        4381,
+        3136,
+        3000,
+        2943,
+        2940,
+        2880,
+        2820,
+        1561,
+        301,
+        211
+      ],
+      "first_timestamp": "2022-01-01T00:00:00+00:00",
+      "last_timestamp": "2022-12-31T23:59:00+00:00"
+    },
+    "2023": {
+      "raw_rows": 525600,
+      "invalid_rows": 0,
+      "stale_rows_removed": 172405,
+      "active_m1_rows": 353195,
+      "m5_rows": 70631,
+      "longest_identical_runs_minutes": [
+        4381,
+        3196,
+        3001,
+        3000,
+        2940,
+        2880,
+        2820,
+        301,
+        271,
+        211
+      ],
+      "first_timestamp": "2023-01-01T00:00:00+00:00",
+      "last_timestamp": "2023-12-31T23:59:00+00:00"
+    },
+    "2024": {
+      "raw_rows": 527040,
+      "invalid_rows": 0,
+      "stale_rows_removed": 171081,
+      "active_m1_rows": 355959,
+      "m5_rows": 71183,
+      "longest_identical_runs_minutes": [
+        4381,
+        3076,
+        3000,
+        2941,
+        2940,
+        2880,
+        1696,
+        1380,
+        211,
+        210
+      ],
+      "first_timestamp": "2024-01-01T00:00:00+00:00",
+      "last_timestamp": "2024-12-31T23:59:00+00:00"
+    },
+    "2025": {
+      "raw_rows": 525600,
+      "invalid_rows": 0,
+      "stale_rows_removed": 171065,
+      "active_m1_rows": 354535,
+      "m5_rows": 70894,
+      "longest_identical_runs_minutes": [
+        4381,
+        3181,
+        3076,
+        3000,
+        2945,
+        2943,
+        2940,
+        2880,
+        1700,
+        1380
+      ],
+      "first_timestamp": "2025-01-01T00:00:00+00:00",
+      "last_timestamp": "2025-12-31T23:59:00+00:00"
+    },
+    "2026": {
+      "raw_rows": 250200,
+      "invalid_rows": 0,
+      "stale_rows_removed": 82722,
+      "active_m1_rows": 167478,
+      "m5_rows": 33490,
+      "longest_identical_runs_minutes": [
+        4381,
+        3181,
+        2946,
+        2940,
+        2880,
+        1380,
+        211,
+        61,
+        60,
+        7
+      ],
+      "first_timestamp": "2026-01-01T00:00:00+00:00",
+      "last_timestamp": "2026-06-23T17:59:00+00:00"
+    }
+  },
+  "total_raw_m1_rows": 5510520,
+  "total_invalid_rows": 0,
+  "total_stale_rows_removed": 1799171,
+  "final_m5_rows": 742005,
+  "first_timestamp": "2016-01-03T23:00:00+00:00",
+  "last_timestamp": "2026-06-23T17:55:00+00:00",
+  "continuous_m5_transitions": 739301,
+  "gap_count": 2703,
+  "largest_gap_minutes": 4585.0,
+  "median_gap_minutes": 65.0
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": "ten-world-model-dataset-v1",
+  "bar_seconds": 300,
+  "context_bars": 96,
+  "context_minutes": 480,
+  "horizon_bars": 6,
+  "horizon_minutes": 30,
+  "feature_columns": [
+    "log_return_1",
+    "log_return_3",
+    "log_hl_range",
+    "body_pct",
+    "upper_wick_pct",
+    "lower_wick_pct",
+    "rolling_vol_12",
+    "rolling_vol_48",
+    "ema_gap_12",
+    "ema_gap_48",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "feature_count": 12,
+  "bar_count": 5000,
+  "sample_count": 4839,
+  "split_counts": {
+    "train": 2731,
+    "validation": 1146,
+    "test": 962
+  },
+  "train_end": "2025-01-10T23:59:59+00:00",
+  "validation_end": "2025-01-14T23:59:59+00:00"
+}
