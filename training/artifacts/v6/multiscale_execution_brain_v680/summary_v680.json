@@ -1,0 +1,12 @@
+{
+  "version": "v6.8.0",
+  "champion_epoch": 2,
+  "selection_2023": 1.7514785561299429,
+  "policy": {
+    "quantile": 0.9,
+    "threshold": 0.9149430990219116,
+    "confidence": 0.3
+  },
+  "2025_evaluated": false,
+  "2026_evaluated": false
+}
