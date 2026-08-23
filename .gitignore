@@ -28,3 +28,15 @@ frontend/vite.config.d.ts
 data/*.db
 data/*.csv
 !data/.gitkeep
+
+# TEN training data, model weights and local backups
+training/**/data_lake/
+training/**/*.parquet
+training/**/*.npy
+training/**/*.npz
+training/**/*.pt
+training/**/*.pth
+training/**/*.ckpt
+training/**/*.onnx
+training/**/*.bak
+training/**/*.pre_*
