@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 import json
 import time
 
@@ -18,7 +19,6 @@ OUT = Path(
     "stable_direction_targets_v692a"
 )
 
-YEAR = 2024
 COST = 0.5
 
 
@@ -139,13 +139,23 @@ def evaluate_candidate(
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--year",
+        type=int,
+        choices=(2023, 2024),
+        default=2024,
+    )
+    args = parser.parse_args()
+    year = int(args.year)
+
     started = time.time()
     OUT.mkdir(parents=True, exist_ok=True)
 
     print("TEN V6.9.2A STABLE DIRECTION TARGET AUDIT")
     print("=" * 136)
     print("Purpose: find the most useful stable direction target before another GPU run.")
-    print("Year:", YEAR)
+    print("Year:", year)
     print("No training. Frozen V6.8 action/WHEN policy.")
 
     device = torch.device(
@@ -170,7 +180,7 @@ def main():
     val = split["val"]
 
     rows = v680.filter_rows(
-        val[years[val] == YEAR],
+        val[years[val] == year],
         arrays,
         execution,
     )
@@ -357,12 +367,12 @@ def main():
     )
 
     table.to_csv(
-        OUT / "stable_target_ranking_2024.csv",
+        OUT / f"stable_target_ranking_{year}.csv",
         index=False,
     )
 
     summary = {
-        "year": YEAR,
+        "year": year,
         "baseline": baseline,
         "max_of_max_oracle": oracle,
         "best_stable_target": table.iloc[0].to_dict(),
@@ -371,7 +381,7 @@ def main():
         "seconds": float(time.time() - started),
     }
 
-    with open(OUT / "summary_v692a.json", "w") as f:
+    with open(OUT / f"summary_v692a_{year}.json", "w") as f:
         json.dump(summary, f, indent=2)
 
     print()
