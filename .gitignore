@@ -40,3 +40,4 @@ training/**/*.ckpt
 training/**/*.onnx
 training/**/*.bak
 training/**/*.pre_*
+training/vendor/dukascopy_xau_m1/
